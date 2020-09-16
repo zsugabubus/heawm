@@ -38,12 +38,12 @@ X server with XInput support.
 
 === Compiling from source
 
-[source,sh]
+[source,sh,subs=+attributes]
 -----------
 git clone https://github.com/zsugabubus/{wmname} &&
 cd {wmname} &&
 make &&
-make install # 1
+make install # <1>
 -----------
 
 <1> Or use `make xephyr && make run` if you want to give it a try first.
