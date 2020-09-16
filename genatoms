@@ -1,0 +1,16 @@
+#!/bin/sh
+file=$1
+
+exec >atoms.h
+
+for_each_atom() {
+	sed -n '/ATOM_NAMES/,$ {/^\s*"/{s/.*"_\?\([0-9A-Z_]*\)".*/'"$*"'/;p};/^}/q}' "$file"
+}
+
+echo "/* Generated automatically by $0. Do not edit. */"
+echo 'enum {'
+for_each_atom '\t\1,'
+echo '};'
+echo
+for_each_atom '#define ATOM_\1\tatoms[\1]'
+echo
