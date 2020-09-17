@@ -3,11 +3,11 @@
 :toc:
 
 Lightweight, keyboard-centric‌footnote:[No, no, not like others… this one is
-really.], infinitely nestable, primitive semi-automatic footnote:[WTF!?] tiling
-window manager for X Window System with multi-head footnote:[Here be dragons.],
-multi-hand footnote:[Stuff that requires at least three limbs: multi-pointer
+really.], infinitely nestable, primitive semi-automatic‌footnote:[WTF!?] tiling
+window manager for X Window System with multi-head‌footnote:[Here be dragons.],
+multi-hand‌footnote:[Stuff that requires at least three limbs: multi-pointer
 and friends. Not for introverts. You have been warned.],
-multi-leg footnote:[Now you can kick your computer with both of your legs.] support footnote:[That’s actually a
+multi-leg‌footnote:[Now you can kick your computer with both of your legs.] support‌footnote:[That’s actually a
 lie.]. Infinite possibilities, single layout. Replace all windows on all
 monitors at once for better separating different kinds of work.
 
