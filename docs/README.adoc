@@ -2,12 +2,12 @@
 = {wmname}
 :toc:
 
-Lightweight, keyboard-centric footnote:[No, no, not like others… this one is
-really.], infinitely nestable primitive semi-automatic footnote:[WTF!?] tiling
+Lightweight, keyboard-centric‌footnote:[No, no, not like others… this one is
+really.], infinitely nestable, primitive semi-automatic footnote:[WTF!?] tiling
 window manager for X Window System with multi-head footnote:[Here be dragons.],
 multi-hand footnote:[Stuff that requires at least three limbs: multi-pointer
 and friends. Not for introverts. You have been warned.],
-multi-leg footnote:[Just kidding. :D Or not!?] support footnote:[That’s actually a
+multi-leg footnote:[Now you can kick your computer with both of your legs.] support footnote:[That’s actually a
 lie.]. Infinite possibilities, single layout. Replace all windows on all
 monitors at once for better separating different kinds of work.
 
@@ -29,7 +29,7 @@ sane defaults.
 
 === Dependencies
 
-X server with XInput support.
+X server with X Input Extension 2 support.
 
 * `cc -std=c11`
 * `make`
@@ -39,12 +39,11 @@ X server with XInput support.
 === Compiling from source
 
 [source,sh,subs=+attributes]
------------
+----
 git clone https://github.com/zsugabubus/{wmname} &&
 cd {wmname} &&
 make &&
 make install # <1>
------------
+----
 
 <1> Or use `make xephyr && make run` if you want to give it a try first.
-
