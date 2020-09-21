@@ -57,7 +57,7 @@ make install # <1>
 
 `man {wmname}`.
 ---
-include::{wmname}.1.in[tag=intro]
+include::docs/{wmname}.1.in[tag=intro]
 ---
 
 <1> Or use `make xephyr && make run` if you want to give it a try first.
