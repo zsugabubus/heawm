@@ -2,24 +2,31 @@
 = {wmname}
 :toc:
 
-Lightweight, keyboard-centric‌footnote:[No, no, not like others… this one is
-really.], infinitely nestable, primitive semi-automatic‌footnote:[WTF!?] tiling
-window manager for X Window System with multi-head‌footnote:[Here be dragons.],
-multi-hand‌footnote:[Stuff that requires at least three limbs: multi-pointer
-and friends. Not for introverts. You have been warned.],
-multi-leg‌footnote:[Now you can kick your computer with both of your legs.] support‌footnote:[That’s actually a
-lie.]. Infinite possibilities, single layout. Replace all windows on all
-monitors at once for better separating different kinds of work.
+Lightweight, keyboard-centric‌footnote:[No, no, not like others… this one
+is really.], infinitely nestable, primitive semi-dynamic‌footnote:[WTF!?]
+tiling window manager for X Window System with multi-head‌footnote:[Here
+be dragons.], multi-hand‌footnote:[Stuff that requires at least three
+limbs: multi-pointer and friends. Not for introverts. You have been warned.],
+multi-leg‌footnote:[This program is so much crap you will surely use
+both of your legs.] support‌footnote:[That’s actually a lie.]. Infinite
+possibilities, single layout. Replace all windows on all monitors at once for
+better separating different kinds of work.
 
-Configuration currently happens in C in a compile yourself manner. Comes with
-sane defaults.
+Configuration currently happens in C in a compile yourself manner. Do not be afraid.
 
 == Philosophy
 
-* Enjoy the *weightlessness*. Here there is no up or down, left or right. You
-  travel from one window to another through wormholes.
-* “That’s one small step for other window managers, *one giant leap* for `{wmname}`.”—nobody Nothing takes more than 2 keystrokes.
+* Enjoy the *weightlessness*.
++
+Here there is no up or down, left or right. You travel from one window to
+another through wormholes.
+
+* _“That’s one small step for other window managers, *one giant leap* for `{wmname}`.”_—nobody
++
+Nothing takes more than 2 keystrokes.
+
 * Solid black *wallpapers are nice* for one instant. Every pixel wants to be a useful pixel, so do not make them sad.
+
 * What you see is what you get. There is only one layout–grid– (but you do not
   even have to know about it) that can be easily managed.
   Internally, they are called “boxes.” Every box can contain infinite, nicely
@@ -27,9 +34,9 @@ sane defaults.
 
 == Installation
 
-=== Dependencies
+You will need the following tools and libraries.
 
-X server with X Input Extension 2 support.
+=== Dependencies
 
 * `cc -std=c11`
 * `make`
@@ -45,5 +52,12 @@ cd {wmname} &&
 make &&
 make install # <1>
 ----
+
+== Usage
+
+`man {wmname}`.
+---
+include::{wmname}.1.in[tag=intro]
+---
 
 <1> Or use `make xephyr && make run` if you want to give it a try first.
