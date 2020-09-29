@@ -15,7 +15,13 @@ do
 	(INCLUDE\(*\))
 		name=${line#INCLUDE(}
 		name=${name%)}
-		sed -n '/\/\*MAN('"$name"')/{n;:o;N;s/\*\/$//;To;s/[\t ]*\*[\t ]*//g;p}' "$@"
+		sed -n '/\/\*MAN('"$name"')/{n;:o;N;s/\*\/$//;To;s/[\t]* \*  *//g;p}' "$@"
+		;;
+	(SHELL\(*\))
+		git shortlog -sn | cut -f2|sed -e 'i.UR' -e 'a.UE'
+		cmd=${line#SHELL(}
+		cmd=${cmd%)}
+		eval "$cmd"
 		;;
 	(*)
 		printf '%s\n' "$line"

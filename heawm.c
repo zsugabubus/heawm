@@ -44,8 +44,17 @@ https://www.x.org/releases/X11R7.7/doc/inputproto/XI2proto.txt
 https://www.x.org/releases/X11R7.5/doc/randrproto/randrproto.txt
 */
 
+#ifdef HEAWM_NDEBUG
+/** suppress debug output */
+#endif
+
+/** maximum length of names */
+#ifndef NAME_LEN
+# define NAME_LEN 2
+#endif
+
 #ifndef M_PHI
-# define M_PHI 1.6180339887
+# define M_PHI 1.6180339887 /* Golden Ratio */
 #endif
 
 #define RGB8_TO_FLOATS(color) \
@@ -53,12 +62,11 @@ https://www.x.org/releases/X11R7.5/doc/randrproto/randrproto.txt
 	(uint8_t)((color) >> 8 ) / 256., \
 	(uint8_t)((color)      ) / 256.
 
-#define NAME_LEN 2
 /* sizeof array... but in elements */
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(*x))
 #define offsetof(type, field) (size_t)(&((type*)0)->field)
 
-#ifdef __GNUC__
+#if defined(__GNUC__)
 # define maybe_unused __attribute__((unused))
 #else
 # define maybe_unused
@@ -94,8 +102,9 @@ struct box_pointer_xy {
 	uint16_t x, y; /** percent */
 };
 
-#define NULL_BODY 0xffU
-#define NULL_HAND 0xffU
+#define NULL_BODY 128U
+#define MAX_HANDS 127U
+#define NULL_HAND (MAX_HANDS + 1U)
 
 /** a box that holds smaller boxes. you surely know such box so i do not have
  * to introduce it better */
@@ -136,7 +145,8 @@ struct box {
 	 * - other: fixed, user set */
 	         num_columns;
 	/* TODO: maybe a different name; label/id? */
-	char name[NAME_LEN]; /* permanent name */
+	/** permanent name */
+	char name[NAME_LEN];
 	/** relative size to siblings
 	 *
 	 * used only when box has one variable dimension, i.e. when parent
@@ -150,19 +160,21 @@ struct box {
 
 	/* we always update the whole scene. these variables help to track what
 	 * changed */
-	bool position_changed: 1, /* box repositioned */
-	     layout_changed: 1, /* any of the children's boundary box changed */
-	     focus_changed: 1, /* focused child changed */
-	     content_changed: 1, /* set by children to indicate parent should
+	bool position_changed: 1, /** box repositioned */
+	     layout_changed: 1, /** any of the children's boundary box changed */
+	     focus_changed: 1, /** focused child changed */
+	     content_changed: 1, /** set by children to indicate parent should
 	                            descend with update (means that this flag
 	                            must be propagated upwards until root) */
-	     title_changed: 1, /* for containers, set by children */
+	     title_changed: 1, /** for containers, set by children */
 	     close_by_force: 1,
 
-	     /* focus_hand_changed: 1, */
-	     concealed: 1, /* show only when has focus inside */
-	     focus_lock: 1; /* swap newly focused window with focused window */
-	/** tracking focus without needing heavy linked-lists
+	     /** show only when has focus; hide otherwise */
+	     concealed: 1,
+	     /** fix focus position on screen by always swapping newly
+	      * focused window with previously focused window */
+	     focus_lock: 1;
+	/** last time (sequence number) when box has been focused
 	 *
 	 * (1) {never focused box}->focus_seq := 0
 	 * (2) {old focus}->focus_seq < {new focus}->focus_seq
@@ -184,15 +196,16 @@ struct box {
 	/** the bigger box */
 	struct box *parent;
 
-	/** contained boxes */
-	struct box *children[]; /* OR struct box_pointer_xy pointers[num_hands]; */
+	/** contained boxes for containers */
+	struct box *children[];
+	/* OR struct box_pointer_xy pointers[num_hands]; for windows */
 };
 
-/* root's children are XRandR monitors from all screens
- * monitor
- *   parent = screen root */
+/** the box that contains everything
+ *
+ * root's children are XRandR monitors from all screens
+ */
 static struct box *root;
-static struct box const EMPTY_BOX;
 
 /** little angels flying around screen */
 struct label {
@@ -349,9 +362,26 @@ static uint8_t num_hands;
  * device (a master device pair) for controlling X */
 static struct hand *hands;
 
-#include "atoms.h"
+#define LABEL_CLASS "heawm"
+#define LABEL_INSTANCE LABEL_CLASS "-label"
 
-/* XCB_ATOM_WM_HINTS */
+struct size {
+	int width;
+	int height;
+};
+
+static char const *label_font = "monospace";
+struct size label_rect = { .width = 30, .height = 60 }; /** in pts */
+static int label_stroke = /* 4 */ 2 /* .5 */;
+static int label_size =
+#if 1
+17
+#else
+22
+#endif
+;
+
+#include "atoms.h"
 
 static char const *const ATOM_NAMES[] =
 {
@@ -417,7 +447,6 @@ static char **argv;
 	} \
 out_for_each:;
 
-
 static struct box *
 find_box_by_window(struct box *const root, struct box *start, xcb_window_t const window)
 {
@@ -428,20 +457,6 @@ find_box_by_window(struct box *const root, struct box *start, xcb_window_t const
 	})
 	return box;
 }
-
-#define LABEL_CLASS "heawm"
-#define LABEL_CLASSNAME LABEL_CLASS "-label"
-
-static int const LABEL_WIDTH_PT = 60;
-static int const LABEL_HEIGHT_PT = 30;
-static int const LABEL_STROKE = /* 4 */ 2 /* .5 */;
-static int const LABEL_SIZE =
-#if 1
-17
-#else
-22
-#endif
-;
 
 static bool
 box_is_monitor(struct box const *const box)
@@ -454,11 +469,6 @@ box_is_leg(struct box const *const box)
 {
 	return box_is_monitor(box->parent);
 }
-
-struct size {
-	int width;
-	int height;
-};
 
 static struct box *
 box_get_monitor(struct box const *box)
@@ -497,12 +507,11 @@ repaint_label(struct label const *const label, bool const shape)
 	name[NAME_LEN] = '\0';
 
 	struct box const *const monitor = box_get_monitor(label->base);
-	struct size const size = monitor_convert_pt2px(monitor,
-			(struct size){ LABEL_WIDTH_PT, LABEL_HEIGHT_PT });
+	struct size const size = monitor_convert_pt2px(monitor, label_rect);
 	int const font_size = monitor_convert_pt2px(monitor,
-			(struct size){ 0, LABEL_SIZE }).height;
+			(struct size){ 0, label_size }).height;
 	int const stroke_width = monitor_convert_pt2px(monitor,
-			(struct size){ LABEL_STROKE, 0 }).width;
+			(struct size){ label_stroke, 0 }).width;
 
 	struct body const *const body = &bodies[label->base->body];
 	cairo_surface_t *const surface = shape
@@ -515,7 +524,7 @@ repaint_label(struct label const *const label, bool const shape)
 
 	struct hand *hand = &hands[label->base->focus_hand];
 
-	cairo_select_font_face(cr, "monospace",
+	cairo_select_font_face(cr, label_font,
 			CAIRO_FONT_SLANT_NORMAL,
 			CAIRO_FONT_WEIGHT_BOLD);
 
@@ -722,10 +731,7 @@ static void
 label_set_position_from_box(struct label *const label, int relx, int rely)
 {
 	struct box const *const monitor = box_get_monitor(label->base);
-	struct size const size = monitor_convert_pt2px(monitor, (struct size){
-			LABEL_WIDTH_PT,
-			LABEL_HEIGHT_PT
-	});
+	struct size const size = monitor_convert_pt2px(monitor, label_rect);
 
 	uint16_t x = label->base->x + ((relx + 1) * (label->base->width  - size.width )) / 2;
 	uint16_t y = label->base->y + ((rely + 1) * (label->base->height - size.height)) / 2;
@@ -754,10 +760,7 @@ label_create_window(struct label *label)
 	label->window = xcb_generate_id(conn);
 
 	struct box const *const monitor = box_get_monitor(label->base);
-	struct size const size = monitor_convert_pt2px(monitor, (struct size){
-			LABEL_WIDTH_PT,
-			LABEL_HEIGHT_PT
-	});
+	struct size const size = monitor_convert_pt2px(monitor, label_rect);
 
 	CHECK(xcb_create_window, conn, XCB_COPY_FROM_PARENT,
 			label->window,
@@ -767,27 +770,21 @@ label_create_window(struct label *label)
 			2,
 			XCB_WINDOW_CLASS_INPUT_OUTPUT,
 			screen->root_visual,
-			/* XCB_CW_BORDER_PIXEL | */
-			/* XCB_CW_BACKING_STORE | */
-			/* XCB_CW_BACKING_PLANES |
-			XCB_CW_BACKING_PIXEL | */
 			XCB_CW_SAVE_UNDER |
 			XCB_CW_OVERRIDE_REDIRECT |
 			XCB_CW_EVENT_MASK,
 			&(uint32_t const[]){
-				/* 0xff0000, */
-				/* 0xffFFff, */
-				/* 0, */
 				true,
 				true,
+				/* TODO: maybe we should handle enter/leave to hide/show labels? */
 				XCB_EVENT_MASK_EXPOSURE
 			});
 
 	CHECK(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
 			label->window, XCB_ATOM_WM_CLASS ,
 			XCB_ATOM_STRING, 8,
-			sizeof LABEL_CLASSNAME "\0" LABEL_CLASS,
-			LABEL_CLASSNAME "\0" LABEL_CLASS);
+			sizeof LABEL_INSTANCE "\0" LABEL_CLASS,
+			LABEL_INSTANCE "\0" LABEL_CLASS);
 
 	/* TODO: search for labels with the same name and type and copy shape from there */
 	/* setup its shape */
@@ -958,16 +955,6 @@ find_box_by_name(struct box **optimum, char name[static NAME_LEN])
 	})
 
 	return complete;
-}
-
-static bool
-box_are_in_same_subtree(struct box const *const one, struct box const *const other)
-{
-	if (one->parent == other->parent)
-		return true;
-
-
-	return false;
 }
 
 static bool
@@ -1300,8 +1287,7 @@ update_box_label(struct box *const box)
 		printf("A\n");
 
 		struct box const *const monitor = box_get_monitor(box);
-		struct size const size = monitor_convert_pt2px(monitor,
-				(struct size){ LABEL_WIDTH_PT, LABEL_HEIGHT_PT });
+		struct size const size = monitor_convert_pt2px(monitor, label_rect);
 
 		for (char ch = 'a'; ch <= 'z'; ++ch) {
 			label = new_label_for(box);
@@ -1406,7 +1392,7 @@ update_box(struct box *const box)
 						uint16_t top;
 						uint16_t right;
 						uint16_t bottom;
-					} gap = {box_is_container(child) || box->focus_lock ? 0 : 1, 0, 0, 0};
+					} gap = {box_is_container(child) || box->focus_lock ? 0 : 0, 0, 0, 0};
 					gap.top = gap.left;
 					gap.right = gap.left;
 					gap.bottom = gap.left;
@@ -1614,6 +1600,8 @@ focus_box(struct hand *hand, struct box *box);
 static void
 find_most_recent_box(struct hand *hand, struct box *root, uint32_t const focus_seq, struct box **boxes, uint32_t n)
 {
+	static struct box const EMPTY_BOX;
+
 	/* use a dummy box so we do not have to check for NULL */
 	for (uint32_t i = 0; i < n; ++i)
 		/* cast is safe because we do not write boxes and they
@@ -2436,6 +2424,40 @@ connect_display(void)
 	/* BROADCAST(connected, &(struct connected_args){ }); */
 }
 
+static bool
+load_resource(char **const out, char const *const format, ...)
+{
+	if (NULL == xrm)
+		return false;
+
+	va_list argp;
+
+	va_start(argp, format);
+	char name[vsnprintf(NULL, 0, format, argp) + 1/*NULL*/];
+	va_end(argp);
+
+	va_start(argp, format);
+	vsprintf(name, format, argp);
+	va_end(argp);
+
+	return 0 == xcb_xrm_resource_get_string(xrm, name, NULL, out);
+}
+
+static void
+setup_xrm(void)
+{
+	char *value;
+
+	if (load_resource(&value, "heawm.label.fontFamily"))
+		label_font = value;
+
+	if (load_resource(&value, "heawm.label.fontSize"))
+		label_size = strtol(value, NULL, 10);
+
+	if (load_resource(&value, "heawm.label.strokeWidth"))
+		label_stroke = strtol(value, NULL, 10);
+}
+
 static void
 screen_query_windows(xcb_screen_t *screen)
 {
@@ -2752,6 +2774,8 @@ setup_display(void)
 	}
 
 	CHECK(xcb_ungrab_server, conn);
+
+	update_hands();
 }
 
 static void
@@ -2798,7 +2822,7 @@ handle_property_notify(xcb_property_notify_event_t const *const event)
 					" Maximum allowed size is %u.\n",
 					program,
 					box->window,
-					len, xcb_get_property_value(reply),
+					len, (char *)xcb_get_property_value(reply),
 					NAME_LEN);
 			goto out;
 		}
@@ -3066,25 +3090,6 @@ handle_client_message(xcb_client_message_event_t const *const event)
 static struct hand *
 find_hand_from_pointer(xcb_input_device_id_t const pointer);
 
-static bool
-load_resource(char **const value, char const *const format, ...)
-{
-	if (NULL == xrm)
-		return false;
-
-	va_list argp;
-
-	va_start(argp, format);
-	char name[vsnprintf(NULL, 0, format, argp) + 1/*NULL*/];
-	va_end(argp);
-
-	va_start(argp, format);
-	vsprintf(name, format, argp);
-	va_end(argp);
-
-	return 0 == xcb_xrm_resource_get_string(xrm, name, NULL, value);
-}
-
 static void
 update_hands(void)
 {
@@ -3115,17 +3120,72 @@ update_hands(void)
 		if (XCB_INPUT_DEVICE_TYPE_MASTER_POINTER != device->type)
 			continue;
 
+		int const len = xcb_input_xi_device_info_name_length(device) - strlen(" pointer");
+		char *name = malloc(len + 1/* NULL */);
+		memcpy(name, xcb_input_xi_device_info_name(device), len);
+		name[len] = '\0';
+
 		struct hand *const old_hand = find_hand_from_pointer(device->deviceid);
 
 		/* they are always come in pairs */
 		struct hand *const hand = &new_hands[new_num_hands++];
 
-		char *value;
-		if (load_resource(&value, "heawm.color.hand.%u", (unsigned)new_num_hands)) {
-			sscanf(value, "0x%6x", &hand->color);
+		/*MAN(RESOURCES)
+		 * .SS "Hand Resources"
+		 * The following resources can be used to customize
+		 * hands. They are specified by the following patterns
+		 * and checked from this order:
+		 * .
+		 * .IP \(bu
+		 * \fB\(lqheawm.hand.\fIINDEX\fB.*\(rq\fR: Match hand by its 1-based \fIINDEX\fR.
+		 * .
+		 * .IP \(bu
+		 * \fB\(lqheawm.hand.\fINAME\fB.*\(rq\fR: Match hand by
+		 * its \fINAME\fR, e.g. \(lqVirtual core\(rq. \fINAME\fR
+		 * is coming from
+		 * .B XInput
+		 * \(lq\fINAME\fR pointer\(rq and
+		 * \(lq\fINAME\fR keyboard\(rq master device pair.
+		 * .
+		 * .IP \(bu
+		 * \fB\(lqheawm.hand.*\(rq\fR: Match all hands. Can be useful for specifying default settings.
+		 * .
+		 * .TP
+		 * .B color
+		 * Specifies focus color in
+		 * .B \(lq0xRRGGBB\(rq
+		 * or
+		 * .B \(lq#RRGGBB\(rq
+		 * format.
+		 * .RE
+		 * .
+		 * .PP
+		 * Example:
+		 * .sp
+		 * .EX
+		 * ! Default input pair.
+		 * heawm.hand.Virtual core.color: #fe0202
+		 * ! Master devices \(lqmom pointer\(rq and \(lqmom keyboard\(rq.
+		 * heawm.hand.mom.color: #ff00ff
+		 * ! 17th device pair.
+		 * heawm.hand.17.color: 0xffaf5f
+		 * ! Default color.
+		 * heawm.hand.color: 0xffff00
+		 * .EE
+		 */
+		hand->color = 0xfe0202, 0xffaf5f;
+		for (char *value;
+		     load_resource(&value, "heawm.hand.%s.color", name) ||
+		     load_resource(&value, "heawm.hand.%u.color", new_num_hands) ||
+		     load_resource(&value, "heawm.hand.color", new_num_hands);)
+		{
+			if (1 != sscanf(value, "0x%6x", &hand->color) &&
+			    1 != sscanf(value, "#%6x", &hand->color))
+				fprintf(stderr, "%s: Invalid color resource value: %s.\n",
+						program,
+						value);
 			free(value);
-		} else {
-			hand->color = 0xfe0202, 0xffaf5f;
+			break;
 		}
 
 		if (NULL != old_hand) {
@@ -3184,6 +3244,8 @@ update_hands(void)
 		/* it is safe to call because we know that hand currently
 		 * has no focus */
 		update_focus(hand);
+
+		free(name);
 	}
 
 	free(devices);
@@ -3506,7 +3568,6 @@ hand_handle_input_key_mode(struct hand *const hand, xcb_keysym_t const sym)
 	}
 		break;
 
-
 	case mode_name:
 	{
 		if (XKB_KEY_Return == sym ||
@@ -3717,7 +3778,6 @@ hand_handle_input_key_command(struct hand *const hand, xcb_keysym_t const sym)
 	}
 		break;
 
-
 	default:
 		return true;
 	}
@@ -3890,20 +3950,6 @@ handle_input_enter(xcb_input_enter_event_t const *const event)
 	xcb_input_xi_set_client_pointer(conn, event->child, event->deviceid);
 }
 
-
-static void
-handle_mapping_notify(xcb_mapping_notify_event_t *const event)
-{
-	if (event->request != XCB_MAPPING_KEYBOARD &&
-	    event->request != XCB_MAPPING_MODIFIER)
-		return;
-
-	xcb_refresh_keyboard_mapping(symbols, event);
-	for (uint8_t i = 0; i < num_hands; ++i) {
-		struct hand *hand = &hands[i];
-	}
-}
-
 static void
 handle_input_event(xcb_ge_generic_event_t const *const event)
 {
@@ -4070,44 +4116,9 @@ hands_time_elapsed(int elapsed_ms)
 	printf("next timeout =%d\n", next_timeout_ms);
 }
 
-int
-main(int _argc, char *_argv[])
+static int
+run(void)
 {
-	argc = _argc, argv = _argv;
-	atexit(quit);
-
-	setup_sighandlers();
-
-	for (char c; -1 != (c = getopt(argc, argv, "v"));) {
-		switch (c) {
-		/*MAN(OPTIONS)
-		 * .TP
-		 * .B \-v
-		 * Show Git commit (version) and exit.
-		 */
-		case 'v':
-			printf(VERSION "\n");
-			exit(EXIT_SUCCESS);
-
-		case '?':
-		case ':':
-			fprintf(stderr, "%s: Option -%c is invalid or requires an argument.\n",
-					program, optopt);
-			exit(EXIT_FAILURE);
-
-		default:
-			abort();
-		}
-	}
-
-	/* BROADCAST(start, &(struct start_args){0}); */
-
-	connect_display();
-	setup_display();
-	update_hands();
-
-	system("~/.xinit &");
-
 	struct pollfd pfd;
 	pfd.fd = xcb_get_file_descriptor(conn);
 	pfd.events = POLLIN;
@@ -4161,10 +4172,6 @@ main(int _argc, char *_argv[])
 			handle_configure_notify((void *)event);
 			break;
 
-		case XCB_MAPPING_NOTIFY:
-			/* handle_mapping_notify((void *)event); */
-			break;
-
 		case XCB_UNMAP_NOTIFY:
 			handle_unmap_notify((void *)event);
 			break;
@@ -4190,4 +4197,45 @@ main(int _argc, char *_argv[])
 			break;
 		}
 	}
+}
+
+int
+main(int _argc, char *_argv[])
+{
+	argc = _argc, argv = _argv;
+	atexit(quit);
+
+	setup_sighandlers();
+
+	for (char c; -1 != (c = getopt(argc, argv, "v"));) {
+		switch (c) {
+		/*MAN(OPTIONS)
+		 * .TP
+		 * .B \-v
+		 * Show Git commit (version) and exit.
+		 */
+		case 'v':
+			printf(VERSION "\n");
+			exit(EXIT_SUCCESS);
+
+		case '?':
+		case ':':
+			fprintf(stderr, "%s: Option -%c is invalid or requires an argument.\n",
+					program, optopt);
+			exit(EXIT_FAILURE);
+
+		default:
+			abort();
+		}
+	}
+
+	/* BROADCAST(start, &(struct start_args){0}); */
+
+	connect_display();
+	setup_xrm();
+	setup_display();
+
+	system("~/.xinit &");
+
+	return run();
 }
