@@ -11,7 +11,7 @@ multi-leg‌footnote:[This program is so much crap you will surely use both
 of your legs.] support, aiming to provide O(1) navigation.
 
 - Configure in C with some X resources.
-- Minimal ICCCM and NetWM support—mainly because they are useless and/or against the concept.
+- Minimal ICCCM and NetWM support--mainly because they are useless and/or against the concept.
 - Script by sending messages to root.
 
 == Philosophy
@@ -21,7 +21,7 @@ of your legs.] support, aiming to provide O(1) navigation.
 Here there is no up or down, left or right. You travel from one window to
 another through wormholes.
 
-* _“That’s one small step for other window managers, *one giant leap* for `{wmname}`.”_—nobody
+* _“That’s one small step for other window managers, *one giant leap* for `{wmname}`.”_
 +
 Nothing takes more than 2 keystrokes.
 
@@ -41,9 +41,12 @@ You will need the following tools and libraries.
 * `cc -std=c11`
 * `make`
 * `xcb{,-cursor,-keysyms,-shape,-xinput,-xrm}`
-* `xcb-util` footnote:[Debug build only.]
-* `xcb-icccm` footnote:[Headers only, compile time.]
+* `xcb-util` <1>
+* `xcb-icccm` <2>
 * `cairo`
+[subs=+callouts]
+<1> Debug build.
+<2> Headers only.
 
 === Compiling from source
 
