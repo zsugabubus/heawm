@@ -48,6 +48,11 @@ https://www.x.org/releases/X11R7.5/doc/randrproto/randrproto.txt
 # define M_PHI 1.6180339887
 #endif
 
+#define RGB8_TO_FLOATS(color) \
+	(uint8_t)((color) >> 16) / 256., \
+	(uint8_t)((color) >> 8 ) / 256., \
+	(uint8_t)((color)      ) / 256.
+
 #define NAME_LEN 2
 /* sizeof array... but in elements */
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(*x))
@@ -180,8 +185,7 @@ struct box {
 	struct box *parent;
 
 	/** contained boxes */
-	struct box *children[];
-	/* struct box_pointer_xy pointers[num_hands]; */
+	struct box *children[]; /* OR struct box_pointer_xy pointers[num_hands]; */
 };
 
 /* root's children are XRandR monitors from all screens
@@ -366,6 +370,7 @@ static char const *const ATOM_NAMES[] =
 	"WM_SIZE_HINTS",
 	"WM_DELETE_WINDOW",
 	"WM_PROTOCOLS",
+	"_HEAWM_NAME",
 #if 0
 	/* https://specifications.freedesktop.org/wm-spec/1.3/ar01s05.html */
 	/* https://specifications.freedesktop.org/wm-spec/1.3/ar01s07.html */
@@ -427,8 +432,8 @@ find_box_by_window(struct box *const root, struct box *start, xcb_window_t const
 #define LABEL_CLASS "heawm"
 #define LABEL_CLASSNAME LABEL_CLASS "-label"
 
-static int const LABEL_WIDTH_PT = 50;
-static int const LABEL_HEIGHT_PT = 25;
+static int const LABEL_WIDTH_PT = 60;
+static int const LABEL_HEIGHT_PT = 30;
 static int const LABEL_STROKE = /* 4 */ 2 /* .5 */;
 static int const LABEL_SIZE =
 #if 1
@@ -547,6 +552,8 @@ repaint_label(struct label const *const label, bool const shape)
 
 	case label_box:
 	{
+#define glory_radius (radius * sqrt(M_PHI))
+
 		if (root->focus_seq != label->base->focus_seq ||
 		    0 == label->base->focus_seq ||
 		    box_is_container(label->base))
@@ -563,26 +570,34 @@ repaint_label(struct label const *const label, bool const shape)
 
 			fhands[i++] = j;
 		}
-		assert(0 < i);
+		assert(0 < i && "???");
 		if (0 == i)
 			goto normal;
 
-		hand = &hands[fhands[0]];
-
-		assert(hand - hands < num_hands && "glory used with invalid hand");
-		if (!shape)
-			cairo_set_source_rgb(cr,
-					(uint8_t)(hand->color >> 16) / 256.,
-					(uint8_t)(hand->color >> 8 ) / 256.,
-					(uint8_t)(hand->color      ) / 256.
-			);
-		else
+		if (shape) {
+			/* the shape is a circle, we do not have to care about colors */
 			cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
-		cairo_arc(cr, 0, 0, radius * sqrt(M_PHI * .7) + stroke_width / 4, 0, 2 * M_PI);
-		cairo_fill/* _preserve */(cr);
-		/* cairo_set_source_rgb(cr, 1, 1, 1); */
-		/* cairo_set_line_width(cr, 6);
-		cairo_stroke(cr); */
+			cairo_arc(cr, 0, 0, glory_radius, 0, 2 * M_PI);
+			cairo_fill/* _preserve */(cr);
+			break;
+		}
+
+#define TWELVE_OCLOCK (-M_PI / 2)
+
+		double angle = TWELVE_OCLOCK;
+		double const slice = 2 * M_PI / i;
+		for (uint8_t j = 0; j < i; ++j, angle += slice) {
+			struct hand const *const hand = &hands[fhands[j]];
+
+			cairo_set_source_rgb(cr, RGB8_TO_FLOATS(hand->color));
+			cairo_move_to(cr, 0, 0);
+			cairo_arc(cr, 0, 0, glory_radius,
+					angle, angle + slice);
+			cairo_fill(cr);
+		}
+
+#undef TWELVE_OCLOCK
+#undef glory_radius
 	}
 		break;
 
@@ -956,7 +971,7 @@ box_are_in_same_subtree(struct box const *const one, struct box const *const oth
 }
 
 static bool
-name_box(struct box *box, bool iscontainer)
+name_box(struct box *const box, bool const iscontainer)
 {
 	/* collect the min distance, max focus_seq */
 	struct {
@@ -966,9 +981,12 @@ name_box(struct box *box, bool iscontainer)
 
 	memset(letters, 0, sizeof letters);
 
-	/* TODO: if box has name, leave it and check if there are conflicts in its parent */
-
 	uint8_t const n = strnlen(box->name, NAME_LEN);
+
+	/* TODO: if box has name, leave it and check if there are conflicts in its parent */
+	if (0 < n) {
+		return true;
+	}
 
 	struct box *to = box->parent;
 
@@ -1008,6 +1026,12 @@ name_box(struct box *box, bool iscontainer)
 		return false;
 
 	box->name[n] = optimum;
+
+	if (!box_is_container(box))
+		CHECK(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
+				box->window, ATOM(_HEAWM_NAME),
+				XCB_ATOM_STRING, 8, n + 1, box->name);
+
 	return true;
 }
 
@@ -1382,7 +1406,7 @@ update_box(struct box *const box)
 						uint16_t top;
 						uint16_t right;
 						uint16_t bottom;
-					} gap = {box_is_container(child) || box->focus_lock ? 0 : 3, 0, 0, 0};
+					} gap = {box_is_container(child) || box->focus_lock ? 0 : 1, 0, 0, 0};
 					gap.top = gap.left;
 					gap.right = gap.left;
 					gap.bottom = gap.left;
@@ -2146,6 +2170,7 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 		xcb_get_property(conn, 0, window, XCB_ATOM_WM_TRANSIENT_FOR, XCB_ATOM_WINDOW,     0, 1),
 		xcb_get_property(conn, 0, window, ATOM(WM_CLIENT_LEADER),    XCB_ATOM_WINDOW,     0, 1),
 		xcb_get_property(conn, 0, window, ATOM(WM_NORMAL_HINTS),     ATOM(WM_SIZE_HINTS), 0, 1),
+		xcb_get_property(conn, 0, window, ATOM(_HEAWM_NAME),         XCB_ATOM_STRING,     0, NAME_LEN),
 		/* cookies[2] = xcb_get_property(conn, 0, window, XCB_ATOM_WM_CLASS, XCB_ATOM_STRING, 0, 1); */
 	};
 
@@ -2174,6 +2199,12 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 
 	if (NULL != (reply = xcb_get_property_reply(conn, cookies[3], NULL))) {
 		box_update_size_hints(box, xcb_get_property_value(reply));
+		free(reply);
+	}
+
+	if (NULL != (reply = xcb_get_property_reply(conn, cookies[4], NULL))) {
+		int const len = xcb_get_property_value_length(reply);
+		memcpy(box->name, xcb_get_property_value(reply), len);
 		free(reply);
 	}
 
@@ -2260,10 +2291,8 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 
 	insert_box(parent, pos, box);
 
-	box->name[0] = 'a' - 1;
 	if (NULL != hand && (NULL == hand->focus || focus))
 		focus_box(hand, box);
-	box->name[0] = 0;
 
 	name_box(box, false);
 
@@ -2391,9 +2420,9 @@ connect_display(void)
 		exit(EXIT_FAILURE);
 	}
 
-	root = new_box();
-
 	init_atoms();
+
+	root = new_box();
 
 	symbols = xcb_key_symbols_alloc(conn);
 
@@ -2739,16 +2768,17 @@ handle_property_notify(xcb_property_notify_event_t const *const event)
 #define REQUEST_PROPERTY(object, type, length) \
 	if (NULL == (reply =  xcb_get_property_reply(conn, xcb_get_property(conn, 0, (object)->window, event->atom, (type), 0, (length)), NULL))) \
 		return;
+
 #define FIND_BOX \
 	struct box *const box = find_box_by_window(root, root, event->window); \
 	if (NULL == box) \
-		return;
+		goto out;
 
 	if (ATOM(_NET_WM_NAME) == event->atom) {
 		FIND_BOX;
 		REQUEST_PROPERTY(box, XCB_ATOM_STRING, 128 / sizeof(uint32_t))
 
-		size_t const len = xcb_get_property_value_length(reply);
+		int const len = xcb_get_property_value_length(reply);
 		box->title = realloc(box->title, (len + 1) * sizeof(char));
 		memcpy(box->title, xcb_get_property_value(reply), len);
 		box->title[len] = '\0';
@@ -2757,16 +2787,34 @@ handle_property_notify(xcb_property_notify_event_t const *const event)
 		REQUEST_PROPERTY(box, ATOM(WM_SIZE_HINTS), sizeof(xcb_size_hints_t) / sizeof(uint32_t));
 
 		box_update_size_hints(box, xcb_get_property_value(reply));
+	} else if (ATOM(_HEAWM_NAME) == event->atom) {
+		FIND_BOX;
+		REQUEST_PROPERTY(box, XCB_ATOM_STRING, NAME_LEN);
+
+		int const len = xcb_get_property_value_length(reply);
+		if (NAME_LEN < len) {
+			fprintf(stderr,
+					"%s: 0x%x._HEAWM_NAME = \"%.*s\" is too long."
+					" Maximum allowed size is %u.\n",
+					program,
+					box->window,
+					len, xcb_get_property_value(reply),
+					NAME_LEN);
+			goto out;
+		}
+
+		memcpy(box->name, xcb_get_property_value(reply), len);
+		if (len < NAME_LEN)
+			box->name[len] = '\0';
+	} else {
+		return;
 	}
+
+out:
+	free(reply);
 
 #undef FIND_BOX
 #undef REQUEST_PROPERTY
-}
-
-static void
-handle_input_focus_out(xcb_input_focus_out_event_t const *const event)
-{
-	printf("focus out from %d\n", event->event);
 }
 
 static bool
@@ -2807,7 +2855,6 @@ hand_grab_keyboard(struct hand const *const hand)
 		xcb_window_t const root_window = body->screen->root;
 
 		if (hand_get_grab_state(hand)) {
-			printf(">> grab all\n");
 			/* listen for every key so we can record whether input
 			 * happened at the current window or not */
 			xcb_input_xi_passive_grab_device(conn, XCB_CURRENT_TIME, root_window,
@@ -2826,7 +2873,6 @@ hand_grab_keyboard(struct hand const *const hand)
 					});
 
 		} else {
-			printf(">> UNgrab all\n");
 			/* or just grab enter */
 			/* NOTE: because we previously grabbed every key we can
 			 * undo it if we ungrab all keys. however it also
@@ -3029,10 +3075,11 @@ load_resource(char **const value, char const *const format, ...)
 	va_list argp;
 
 	va_start(argp, format);
-
 	char name[vsnprintf(NULL, 0, format, argp) + 1/*NULL*/];
-	vsprintf(name, format, argp);
+	va_end(argp);
 
+	va_start(argp, format);
+	vsprintf(name, format, argp);
 	va_end(argp);
 
 	return 0 == xcb_xrm_resource_get_string(xrm, name, NULL, value);
@@ -3073,6 +3120,14 @@ update_hands(void)
 		/* they are always come in pairs */
 		struct hand *const hand = &new_hands[new_num_hands++];
 
+		char *value;
+		if (load_resource(&value, "heawm.color.hand.%u", (unsigned)new_num_hands)) {
+			sscanf(value, "0x%6x", &hand->color);
+			free(value);
+		} else {
+			hand->color = 0xfe0202, 0xffaf5f;
+		}
+
 		if (NULL != old_hand) {
 			memcpy(hand, old_hand, sizeof *hand);
 			/* grabbers are already setup and consistent; focus do
@@ -3080,14 +3135,6 @@ update_hands(void)
 			hand_map[old_hand - hands] = hand - new_hands;
 			/* NOTE: grabbing have been already set up */
 			continue;
-		}
-
-		char *value;
-		if (load_resource(&value, "heawm.color.hand.%zu", hand - hands)) {
-			sscanf(value, "0x%6x", &hand->color);
-			free(value);
-		} else {
-			hand->color = 0xfe0202, 0xffaf5f;
 		}
 
 		hand->master_pointer = device->deviceid;
@@ -3577,7 +3624,6 @@ hand_handle_input_key_command(struct hand *const hand, xcb_keysym_t const sym)
 		if (NULL == box)
 			break;
 
-		printf(" up to %1.1s\n", hand->focus->name);
 		bool const set = !box->parent->focus_lock;
 		if (box == hand->focus)
 			/* focus lock makes sense only if we have more
@@ -3864,10 +3910,6 @@ handle_input_event(xcb_ge_generic_event_t const *const event)
 	switch (event->event_type) {
 	case XCB_INPUT_HIERARCHY:
 		handle_input_hierarchy_change((void const *)event);
-		break;
-
-	case XCB_INPUT_FOCUS_OUT:
-		handle_input_focus_out((void const *)event);
 		break;
 
 	case XCB_INPUT_FOCUS_IN:
