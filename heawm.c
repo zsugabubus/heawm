@@ -11,6 +11,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <math.h>
 
 #include <cairo/cairo.h>
 #include <cairo/cairo-xcb.h>
@@ -21,23 +22,36 @@
 #include <xcb/xcb_cursor.h>
 #include <xcb/xcb_event.h>
 #include <xcb/xcb.h>
+#include <xcb/xcb_icccm.h>
 #include <xcb/xcb_image.h>
 #include <xcb/xcb_keysyms.h>
 #include <xcb/xcb_xrm.h>
-#include <xcb/xproto.h>
 #include <xcb/xinput.h>
+#include <xcb/xkb.h>
+#include <xcb/xproto.h>
 #include <xkbcommon/xkbcommon.h>
+#include <xkbcommon/xkbcommon-x11.h>
+
+/* TEST: https://superuser.com/questions/801611/how-to-make-all-applications-respect-my-modified-xkb-layout/844673#844673 */
 
 /* https://github.com/LemonBoy/bar */
 
 /* motif: https://gitlab.gnome.org/GNOME/gtk/-/blob/master/gdk/x11/MwmUtil.h */
 /* https://people.gnome.org/~tthurman/docs/metacity/xprops_8h-source.html */
 
-#include "atoms.h"
+/*
+https://www.x.org/releases/X11R7.7/doc/inputproto/XI2proto.txt
+https://www.x.org/releases/X11R7.5/doc/randrproto/randrproto.txt
+*/
+
+#ifndef M_PHI
+# define M_PHI 1.6180339887
+#endif
 
 #define NAME_LEN 2
 /* sizeof array... but in elements */
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(*x))
+#define offsetof(type, field) (size_t)(&((type*)0)->field)
 
 #ifdef __GNUC__
 # define maybe_unused __attribute__((unused))
@@ -58,9 +72,25 @@
 # define HAND_TIMEOUT_CLOCK CLOCK_MONOTONIC
 #endif
 
+#ifndef HEAWM_NDEBUG
+# define STRINGIFY_(x) #x
+# define STRINGIFY(x) STRINGIFY_(x)
+# define CHECK(request, ...) check_cookie(request##_checked(__VA_ARGS__), STRINGIFY(__LINE__) ": " #request)
+#else
+# define CHECK(request, ...) (request(__VA_ARGS__), 0)
+# define printf
+#endif
+
+#define GET_REPLY(x, request, ...) request##_reply_t *const x = \
+	request##_reply(conn, request##_unchecked(__VA_ARGS__), NULL)
+
 struct box_pointer_xy {
-	xcb_input_fp1616_t x, y; /* relative pointer location */
+	xcb_window_t window; /** relative to */
+	uint16_t x, y; /** percent */
 };
+
+#define NULL_BODY 0xffU
+#define NULL_HAND 0xffU
 
 /** a box that holds smaller boxes. you surely know such box so i do not have
  * to introduce it better */
@@ -70,9 +100,12 @@ struct box {
 	/** dimensions */
 	uint16_t width, height;
 
-	/** user requested boundaries */
+	/** user requested boundaries; mainly for floating windows */
 	int16_t user_x, user_y;
 	uint16_t user_width, user_height;
+
+	/** size granulaty */
+	uint8_t mod_x, mod_y;
 
 	/** client window */
 	xcb_window_t window;
@@ -87,7 +120,7 @@ struct box {
 	 *   possible depth
 	 * - it also makes very convenient to continue the walk where we left
 	 *   off */
-	         iter;
+	         iter,
 
 	/** number of columns
 	 *
@@ -96,7 +129,7 @@ struct box {
 	 * - 1: column,
 	 * - -1: row,
 	 * - other: fixed, user set */
-	uint16_t num_columns;
+	         num_columns;
 	/* TODO: maybe a different name; label/id? */
 	char name[NAME_LEN]; /* permanent name */
 	/** relative size to siblings
@@ -118,10 +151,10 @@ struct box {
 	     content_changed: 1, /* set by children to indicate parent should
 	                            descend with update (means that this flag
 	                            must be propagated upwards until root) */
-	     title_changed: 1,
+	     title_changed: 1, /* for containers, set by children */
 	     close_by_force: 1,
 
-	     focus_hand_changed: 1,
+	     /* focus_hand_changed: 1, */
 	     concealed: 1, /* show only when has focus inside */
 	     focus_lock: 1; /* swap newly focused window with focused window */
 	/** tracking focus without needing heavy linked-lists
@@ -157,20 +190,32 @@ struct box {
 static struct box *root;
 static struct box const EMPTY_BOX;
 
+/** little angels flying around screen */
 struct label {
 	struct box *base;
+	/** the X window */
 	xcb_window_t window;
-	xcb_window_t shape;
-	int x: 3,
-	    y: 3;
-	/* <= num_hands */
-	uint8_t nth;
+	/** shape of bounding box */
+	xcb_pixmap_t shape;
+	/** position of label */
+	int16_t x, y;
+	/** owning hand */
 	uint8_t hand;
+	bool position_changed: 1,
+	     content_changed: 1;
+	enum {
+		/** text only */
+		label_normal,
+		/** draw glory if |base| focused */
+		label_box,
+		/** text with horizontal line */
+		label_hline,
+		/** text with vertical line */
+		label_vline
+	} type: 2;
+	/** name of label, just like for boxes */
 	char name[NAME_LEN];
 };
-
-/* static uint32_t num_heads;
-static struct head *heads; */
 
 struct body {
 	xcb_screen_t *screen;
@@ -187,13 +232,38 @@ static uint8_t num_bodies;
 static struct body *bodies;
 static int default_screen;
 
+/* not a too exact time */
 static int next_timeout_ms = -1;
+
+enum label_mode {
+	mode_boxes,
+	mode_default,
+	mode_setcolumns,
+	mode_move_a,
+	mode_move_b,
+	mode_size_side,
+	mode_size_to,
+	mode_name,
+};
+
+/* NOTE: that we do not store whether it's a mouse or keyboard device since
+ * caller knows that exactly */
+struct hand_device {
+	/* NOTE: XCB uses/handles only uint8_t (possibly because predates XInput2) */
+	xcb_input_device_id_t device_id; /** device id */
+	struct xkb_keymap *map; /** keyboad mapping of device */
+};
 
 /* user */
 struct hand {
-	/** keyboard and pointer are always in pair. except if not. */
-	xcb_input_device_id_t pointer; /** pointer device */
-	xcb_input_device_id_t keyboard; /** key device */
+	/* keyboard and pointer are always in pair */
+	xcb_input_device_id_t master_pointer; /** master pointer device */
+	xcb_input_device_id_t master_keyboard; /** master key device */
+
+	uint32_t num_devices; /** number of |devices */
+	/** slave devices; since every physical device can have its own
+	 * mapping we store them */
+	struct hand_device *devices;
 
 	/** focus freshly mapped related windows */
 	bool auto_focus;
@@ -210,20 +280,10 @@ struct hand {
 	/** show box labels in default mode */
 	bool label_boxes;
 
+	bool mode_changed: 1;
 	/** |mode| related state */
-	struct {
-		struct box *box;
-		uint8_t dir;
-	} mode_base;
-	enum {
-		mode_default,
-		mode_default_label_boxes,
-		mode_setcolumns,
-		mode_move_a,
-		mode_move_b,
-		mode_size_side,
-		mode_name,
-	} mode;
+	struct box *mode_box;
+	enum label_mode mode;
 
 	/** box that last time received keyboard input (only non-container);
 	 * we also store the box that was focused before last time since if
@@ -275,6 +335,8 @@ struct hand {
 	 * receive keyboard events... or any at all. as soon as user starts
 	 * typing focus := input_focus */
 	struct box *focus;
+
+	unsigned int color;
 };
 
 /** number of |hands| */
@@ -283,26 +345,27 @@ static uint8_t num_hands;
  * device (a master device pair) for controlling X */
 static struct hand *hands;
 
+#include "atoms.h"
+
 /* XCB_ATOM_WM_HINTS */
-/* XCB_ATOM_WM_NAME */
-/* XCB_ATOM_WM_CLASS */
-/* XCB_ATOM_WM_TRANSIENT_FOR */
-/* https://www.x.org/releases/X11R7.6/doc/xorg-docs/specs/ICCCM/icccm.html */
 
 static char const *const ATOM_NAMES[] =
 {
+	"_NET_CLIENT_LIST",
+	"_NET_CLOSE_WINDOW",
+	"_NET_ACTIVE_WINDOW",
+	"_NET_WM_NAME",
 	"_NET_WM_STATE",
-	"_NET_WM_STATE_MODAL",
 	"_NET_WM_STATE_DEMANDS_ATTENTION",
 	"_NET_WM_STATE_FULLSCREEN",
+	"_NET_WM_STATE_MODAL",
 	"_NET_WM_TRANSIENT_FOR",
+	"UTF8_STRING",
 	"WM_CLIENT_LEADER",
-	"_NET_WM_PID",
-	"_NET_WM_NAME",
+	"WM_NORMAL_HINTS",
+	"WM_SIZE_HINTS",
 	"WM_DELETE_WINDOW",
 	"WM_PROTOCOLS",
-	"_NET_ACTIVE_WINDOW",
-	"UTF8_STRING"
 #if 0
 	/* https://specifications.freedesktop.org/wm-spec/1.3/ar01s05.html */
 	/* https://specifications.freedesktop.org/wm-spec/1.3/ar01s07.html */
@@ -317,17 +380,21 @@ static xcb_atom_t atoms[ARRAY_SIZE(ATOM_NAMES)];
 
 /** connection to X server */
 static xcb_connection_t *conn;
+static xcb_xrm_database_t *xrm;
 /** user preferred screen; provided by $DISPLAY */
 static int preferred_screen;
 /** major opcode of XInput extension */
 static uint8_t xi_opcode;
 /** beginning of XRandR event range */
-static uint8_t randr_first_event;
+static uint8_t randr_base_event;
+static uint8_t xkb_base_event;
+static struct xkb_context *xkb_context;
 static xcb_key_symbols_t *symbols;
 
 /** */
 static int argc;
 static char **argv;
+#define program (argv[0])
 
 #define for_each_box(x, root, start, block) \
 	for ((x) = (start);;) { \
@@ -347,7 +414,7 @@ out_for_each:;
 
 
 static struct box *
-find_box_by_window(struct box *root, struct box *start, xcb_window_t const window)
+find_box_by_window(struct box *const root, struct box *start, xcb_window_t const window)
 {
 	struct box *box;
 	for_each_box(box, root, start, {
@@ -357,24 +424,91 @@ find_box_by_window(struct box *root, struct box *start, xcb_window_t const windo
 	return box;
 }
 
-static int const LABEL_WIDTH = 50;
-static int const LABEL_HEIGHT = 50;
-static float const LABEL_STROKE = 2.5;
-static float const LABEL_SIZE = 22;
+#define LABEL_CLASS "heawm"
+#define LABEL_CLASSNAME LABEL_CLASS "-label"
+
+static int const LABEL_WIDTH_PT = 50;
+static int const LABEL_HEIGHT_PT = 25;
+static int const LABEL_STROKE = /* 4 */ 2 /* .5 */;
+static int const LABEL_SIZE =
+#if 1
+17
+#else
+22
+#endif
+;
+
+static bool
+box_is_monitor(struct box const *const box)
+{
+	return NULL == box->parent->parent;
+}
+
+static bool
+box_is_leg(struct box const *const box)
+{
+	return box_is_monitor(box->parent);
+}
+
+struct size {
+	int width;
+	int height;
+};
+
+static struct box *
+box_get_monitor(struct box const *box)
+{
+	while (!box_is_monitor(box))
+		box = box->parent;
+	return (struct box *)box;
+}
+
+static struct size
+monitor_convert_pt2px(struct box const *const monitor, struct size const points)
+{
+	assert(box_is_monitor(monitor));
+#define C(dim) (monitor->dim * points.dim * 254 / 720 / monitor->user_##dim)
+	return (struct size){
+		C(width),
+		C(height)
+	};
+#undef C
+}
+
+static bool
+box_is_container(struct box const *const box)
+{
+	return !(box->name[0] & 0x20);
+}
 
 static void
-repaint_label(struct label const *const label, bool shape)
+repaint_label(struct label const *const label, bool const shape)
 {
+	/* POSSIBLE FIXME: take into account screen rotation */
+
 	char name[NAME_LEN + 1];
 
 	memcpy(name, label->name, sizeof label->name);
 	name[NAME_LEN] = '\0';
 
+	struct box const *const monitor = box_get_monitor(label->base);
+	struct size const size = monitor_convert_pt2px(monitor,
+			(struct size){ LABEL_WIDTH_PT, LABEL_HEIGHT_PT });
+	int const font_size = monitor_convert_pt2px(monitor,
+			(struct size){ 0, LABEL_SIZE }).height;
+	int const stroke_width = monitor_convert_pt2px(monitor,
+			(struct size){ LABEL_STROKE, 0 }).width;
+
 	struct body const *const body = &bodies[label->base->body];
 	cairo_surface_t *const surface = shape
-		? cairo_xcb_surface_create_for_bitmap(conn, body->screen, label->shape, LABEL_WIDTH, LABEL_HEIGHT)
-		: cairo_xcb_surface_create(conn, label->window, body->visual_type, LABEL_WIDTH, LABEL_HEIGHT);
+		? cairo_xcb_surface_create_for_bitmap(conn, body->screen, label->shape, size.width, size.height)
+		: cairo_xcb_surface_create(conn, label->window, body->visual_type, size.width, size.height);
 	cairo_t *const cr = cairo_create(surface);
+	cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
+	if (/* no compositor */1)
+		cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
+
+	struct hand *hand = &hands[label->base->focus_hand];
 
 	cairo_select_font_face(cr, "monospace",
 			CAIRO_FONT_SLANT_NORMAL,
@@ -389,37 +523,106 @@ repaint_label(struct label const *const label, bool shape)
 
 	if (shape) {
 		cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
-		cairo_rectangle(cr, 0, 0, LABEL_WIDTH, LABEL_HEIGHT);
+		cairo_rectangle(cr, 0, 0, size.width, size.height);
 		cairo_fill(cr);
 	}
 
-	cairo_set_font_size(cr, LABEL_SIZE);
+	cairo_set_font_size(cr, font_size);
 
 	cairo_text_extents_t te;
 	cairo_text_extents(cr, name, &te);
 
-	cairo_move_to(cr,
-			0.5 - te.x_bearing + (LABEL_WIDTH - te.width) / 2,
-			0.5 - te.y_bearing + (LABEL_HEIGHT - te.height) / 2);
+	int const radius = font_size / 2/*sqrt(te.height * te.height + te.width * te.width)*/;
 
-	cairo_text_path(cr, name);
+	cairo_translate(cr,
+			0.5 - te.x_bearing + size.width / 2,
+			0.5 - te.y_bearing + size.height / 2 - te.height
+	);
+
+	switch (label->type) {
+	case label_normal:
+	normal:
+		/* no extra stuff */
+		break;
+
+	case label_box:
+	{
+		if (root->focus_seq != label->base->focus_seq ||
+		    0 == label->base->focus_seq ||
+		    box_is_container(label->base))
+			goto normal;
+
+		uint8_t i = 0;
+		uint8_t fhands[num_hands];
+		for (uint8_t j = 0; j < num_hands; ++j) {
+			struct hand const *const hand = &hands[j];
+			struct box const *const focus = hand->input_focus;
+
+			if (focus != label->base)
+				continue;
+
+			fhands[i++] = j;
+		}
+		assert(0 < i);
+		if (0 == i)
+			goto normal;
+
+		hand = &hands[fhands[0]];
+
+		assert(hand - hands < num_hands && "glory used with invalid hand");
+		if (!shape)
+			cairo_set_source_rgb(cr,
+					(uint8_t)(hand->color >> 16) / 256.,
+					(uint8_t)(hand->color >> 8 ) / 256.,
+					(uint8_t)(hand->color      ) / 256.
+			);
+		else
+			cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+		cairo_arc(cr, 0, 0, radius * sqrt(M_PHI * .7) + stroke_width / 4, 0, 2 * M_PI);
+		cairo_fill/* _preserve */(cr);
+		/* cairo_set_source_rgb(cr, 1, 1, 1); */
+		/* cairo_set_line_width(cr, 6);
+		cairo_stroke(cr); */
+	}
+		break;
+
+	case label_hline:
+	case label_vline:
+		cairo_set_line_width(cr, 1);
+		if (shape)
+			cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+
+		if (label_hline == label->type) {
+			cairo_move_to(cr, 0, -radius * M_PHI);
+			cairo_line_to(cr, 0, +radius * M_PHI);
+		} else {
+			cairo_move_to(cr, -radius * M_PHI, 0);
+			cairo_line_to(cr, +radius * M_PHI, 0);
+		}
+
+		cairo_set_source_rgb(cr, 0, 0, 0);
+		cairo_stroke(cr);
+		break;
+	}
 
 	if (!shape)
 		/* label stroke */
 		cairo_set_source_rgb(cr, 0, 0, 0);
 	else
 		cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
-	cairo_set_line_width(cr, LABEL_STROKE);
+	cairo_move_to(cr, -te.width / 2, +te.height / 2);
+	cairo_text_path(cr, name);
+	cairo_set_line_width(cr, stroke_width + .5);
 	cairo_stroke(cr);
-
-	cairo_move_to(cr,
-			0.5 - te.x_bearing + (LABEL_WIDTH - te.width) / 2,
-			0.5 - te.y_bearing + (LABEL_HEIGHT - te.height) / 2);
 
 	if (!shape)
 		/* label color */
 		cairo_set_source_rgb(cr, 1, 1, 0);
+	cairo_move_to(cr, -te.width / 2, +te.height / 2);
 	cairo_show_text(cr, name);
+
+	if (!shape)
+		cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
 
 	cairo_surface_flush(surface);
 	cairo_surface_destroy(surface);
@@ -434,36 +637,38 @@ new_label_for(struct box *const box)
 
 	if (body->num_labels_used == body->num_labels) {
 		size_t const new_size = (body->num_labels * 8 / 5/*golden ratio*/) + 1;
-		label = realloc(body->labels, new_size * sizeof *label);
-		if (NULL == label)
-			return NULL;
-		body->labels = label;
+		body->labels = realloc(body->labels, new_size * sizeof *label);
 		body->num_labels = new_size;
 
-		/* initialize new labels */
-		for (uint32_t i = body->num_labels_used;
-		     i < body->num_labels;
-		     ++i)
-		{
-			struct label *label = &body->labels[i];
-			label->window = XCB_WINDOW_NONE;
-		}
+		memset(&body->labels[body->num_labels_used], 0,
+				(body->num_labels - body->num_labels_used) * sizeof *body->labels);
 	}
 
 	label = &body->labels[body->num_labels_used++];
+	label->position_changed |= box != label->base;
 	label->base = box;
+	label->type = label_normal;
 	return label;
 }
 
 static void
 print_error(xcb_generic_error_t const *const error, char const *const request)
 {
-	fprintf(stderr, "%s:%s: X error: %s (serial number: %d, opcode: %d/%d)\n",
+	fprintf(stderr, "%s:%s: X error: "
+#ifndef HEAWM_NDEBUG
+			"%s"
+#else
+			"%d"
+#endif
+			" (seq=%d, opcode=%d/%d)\n",
 			__FILE__, request,
+#ifndef HEAWM_NDEBUG
 			xcb_event_get_error_label(error->error_code),
+#else
+			error->error_code,
+#endif
 			error->sequence,
 			error->major_code, error->minor_code);
-	assert(0);
 }
 
 maybe_unused
@@ -475,127 +680,177 @@ check_cookie(xcb_void_cookie_t const cookie, char const *const request)
 	if (NULL != (error = xcb_request_check(conn, cookie))) {
 		print_error(error, request);
 		free(error);
-		assert(!"check_cookie");
 		return false;
 	} else {
 		return true;
 	}
 }
 
-#define STRINGIFY_(x) #x
-#define STRINGIFY(x) STRINGIFY_(x)
-
-#ifndef HEAWM_NDEBUG
-# define CHECK(request, ...) check_cookie(request##_checked(__VA_ARGS__), STRINGIFY(__LINE__) ": " #request)
-#else
-# define CHECK(request, ...) (request(__VA_ARGS__), 0)
-#endif
-
-#define GET_REPLY(x, request, ...) request##_reply_t *const x = \
-	request##_reply(conn, request##_unchecked(__VA_ARGS__), NULL)
-
-static bool
-box_is_container(struct box const *const box)
+static void
+label_set_name(struct label *label, char name[static NAME_LEN])
 {
-	return !(box->name[0] & 0x20);
+	label->content_changed |= !!strncmp(label->name, name, NAME_LEN);
+	memcpy(label->name, name, sizeof label->name);
 }
 
 static void
-show_label(struct hand *const hand, struct label *const label, int16_t relx, int16_t rely)
+label_set_position(struct label *const label, int16_t const x, int16_t const y)
+{
+	label->position_changed |=
+		x != label->x ||
+		y != label->y;
+	label->x = x;
+	label->y = y;
+}
+
+static void
+label_set_position_from_box(struct label *const label, int relx, int rely)
+{
+	struct box const *const monitor = box_get_monitor(label->base);
+	struct size const size = monitor_convert_pt2px(monitor, (struct size){
+			LABEL_WIDTH_PT,
+			LABEL_HEIGHT_PT
+	});
+
+	uint16_t x = label->base->x + ((relx + 1) * (label->base->width  - size.width )) / 2;
+	uint16_t y = label->base->y + ((rely + 1) * (label->base->height - size.height)) / 2;
+
+#define CLAMP(d, dim) \
+	if (d < monitor->d) \
+		d = monitor->d; \
+	else if (monitor->d + monitor->dim < d + size.dim) \
+		d = monitor->d + monitor->dim - size.dim;
+
+	CLAMP(x, width)
+	CLAMP(y, height)
+
+#undef CLAMP
+
+	label_set_position(label, x, y);
+}
+
+static void
+label_create_window(struct label *label)
 {
 	assert(NULL != label->base);
 	struct body const *const body = &bodies[label->base->body];
 	xcb_screen_t const *const screen = body->screen;
-	int16_t x, y;
 
-	x = label->base->x + relx * label->base->width / 2 - LABEL_WIDTH;
-	y = label->base->y + rely * label->base->height / 2;
-	if (1 == relx)
-		x += LABEL_WIDTH / 2;
-	if (0 == relx)
-		x += LABEL_WIDTH;
-	if (1 == rely)
-		y -= LABEL_WIDTH / 2;
-	if (2 == rely)
-		y -= LABEL_WIDTH;
+	label->window = xcb_generate_id(conn);
 
-	/* FIXME: take into account screen rotation */
+	struct box const *const monitor = box_get_monitor(label->base);
+	struct size const size = monitor_convert_pt2px(monitor, (struct size){
+			LABEL_WIDTH_PT,
+			LABEL_HEIGHT_PT
+	});
 
-	if (XCB_WINDOW_NONE == label->window) {
-		/* setup label window */
-		label->window = xcb_generate_id(conn);
-
-		CHECK(xcb_create_window, conn, XCB_COPY_FROM_PARENT,
-				label->window,
-				screen->root,
-				x, y,
-				LABEL_WIDTH, LABEL_HEIGHT,
-				0,
-				XCB_WINDOW_CLASS_INPUT_OUTPUT,
-				screen->root_visual,
-				/* XCB_CW_BACKING_STORE | */
-				XCB_CW_BACKING_PLANES |
-				XCB_CW_BACKING_PIXEL |
-				XCB_CW_SAVE_UNDER |
-				XCB_CW_OVERRIDE_REDIRECT |
-				XCB_CW_EVENT_MASK,
-				&(uint32_t const[]){
-					0xffFF00,
-					0,
-					true,
-					true,
-					XCB_EVENT_MASK_EXPOSURE
-				});
-
-		/* setup its shape */
-		label->shape = xcb_generate_id(conn);
-
-		CHECK(xcb_create_pixmap, conn,
-			/* mask is on or off */
-			1,
-			label->shape,
+	CHECK(xcb_create_window, conn, XCB_COPY_FROM_PARENT,
 			label->window,
-			LABEL_WIDTH, LABEL_HEIGHT);
+			screen->root,
+			label->x, label->y,
+			size.width, size.height,
+			2,
+			XCB_WINDOW_CLASS_INPUT_OUTPUT,
+			screen->root_visual,
+			/* XCB_CW_BORDER_PIXEL | */
+			/* XCB_CW_BACKING_STORE | */
+			/* XCB_CW_BACKING_PLANES |
+			XCB_CW_BACKING_PIXEL | */
+			XCB_CW_SAVE_UNDER |
+			XCB_CW_OVERRIDE_REDIRECT |
+			XCB_CW_EVENT_MASK,
+			&(uint32_t const[]){
+				/* 0xff0000, */
+				/* 0xffFFff, */
+				/* 0, */
+				true,
+				true,
+				XCB_EVENT_MASK_EXPOSURE
+			});
 
-		/* we need a valid pixmap so we use the bounding mask but we
-		 * use offsets to move it outside of the area making effective
-		 * input region empty */
+	CHECK(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
+			label->window, XCB_ATOM_WM_CLASS ,
+			XCB_ATOM_STRING, 8,
+			sizeof LABEL_CLASSNAME "\0" LABEL_CLASS,
+			LABEL_CLASSNAME "\0" LABEL_CLASS);
+
+	/* TODO: search for labels with the same name and type and copy shape from there */
+	/* setup its shape */
+	label->shape = xcb_generate_id(conn);
+
+	CHECK(xcb_create_pixmap, conn,
+		/* mask is on or off */
+		1,
+		label->shape,
+		label->window,
+		size.width, size.height);
+
+	/* we need a valid pixmap so we use the bounding mask but we
+	 * use offsets to move it outside of the area making effective
+	 * input region empty */
+	CHECK(xcb_shape_mask, conn,
+			XCB_SHAPE_SO_SET, XCB_SHAPE_SK_INPUT,
+			label->window,
+			size.width, size.height,
+			label->shape);
+}
+
+static void
+hide_label(struct label *const label)
+{
+	CHECK(xcb_unmap_window, conn, label->window);
+}
+
+static void
+delete_label(struct label *const label)
+{
+	if (XCB_WINDOW_NONE != label->window) {
+		CHECK(xcb_destroy_window, conn, label->window);
+		CHECK(xcb_free_pixmap, conn, label->shape);
+	}
+}
+
+static void
+update_label(struct label *const label)
+{
+	if (XCB_WINDOW_NONE == label->window)
+		label_create_window(label);
+
+	if (label->position_changed) {
+		label->position_changed = false;
+		/* move label to its place and make sure its above base window */
+		/* FIXME: base->window may not be a sibling of label (for containers without title) */
+		CHECK(xcb_configure_window, conn, label->window,
+				XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
+				/* (!box_is_container(label->base) ? XCB_CONFIG_WINDOW_SIBLING : 0) | */
+				XCB_CONFIG_WINDOW_STACK_MODE,
+				&(const uint32_t[]){
+					label->x, label->y,
+					/* (!box_is_container(label->base) ? label->base->window : XCB_STACK_MODE_ABOVE), */
+					XCB_STACK_MODE_ABOVE
+				});
+	}
+
+	if (1 || label->content_changed) {
+		label->content_changed = false;
+		repaint_label(label, true);
+
 		CHECK(xcb_shape_mask, conn,
-				XCB_SHAPE_SO_SET, XCB_SHAPE_SK_INPUT,
+				XCB_SHAPE_SO_SET, XCB_SHAPE_SK_BOUNDING,
 				label->window,
-				LABEL_WIDTH, LABEL_HEIGHT,
+				0, 0,
 				label->shape);
 	}
 
-	/* move label to its place and make sure its above base window */
-	/* FIXME: base->window may not be a sibling of label (for containers without title) */
-
-	CHECK(xcb_configure_window, conn, label->window,
-			XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
-			(!box_is_container(label->base) ? XCB_CONFIG_WINDOW_SIBLING : 0) |
-			XCB_CONFIG_WINDOW_STACK_MODE,
-			&(const uint32_t[]){
-				x, y,
-				(!box_is_container(label->base) ? label->base->window : XCB_STACK_MODE_ABOVE),
-				XCB_STACK_MODE_ABOVE
-			});
-
-	repaint_label(label, true);
-
-	CHECK(xcb_shape_mask, conn,
-			XCB_SHAPE_SO_SET, XCB_SHAPE_SK_BOUNDING,
-			label->window,
-			0, 0,
-			label->shape);
-
+	/* TODO/FIXME: map only if not mapped */
 	CHECK(xcb_map_window, conn, label->window);
+
+	/* TODO: why it is needed? */
+	repaint_label(label, false);
 }
 
 #define perr(what) \
-	fprintf(stderr, "%s: %s: %s", \
-			__func__, \
-			what, \
-			strerror(errno));
+	fprintf(stderr, "%s: %s: %s: %s", program, __func__, what, strerror(errno));
 
 static void
 restart(void)
@@ -620,14 +875,17 @@ quit(void)
 	/* BROADCAST(quit, &(struct quit_args){0}); */
 
 	if (NULL != conn) {
-		xcb_flush(conn);
-		xcb_key_symbols_free(symbols);
+		if (NULL != xrm)
+			xcb_xrm_database_free(xrm);
+		if (NULL != symbols)
+			xcb_key_symbols_free(symbols);
+
 		xcb_disconnect(conn);
 	}
 }
 
 static void
-sigrestart(int signum)
+handle_signal_restart(int signum)
 {
 	(void)signum;
 
@@ -635,7 +893,7 @@ sigrestart(int signum)
 }
 
 static void
-sigbye(int signum)
+handle_signal_quit(int signum)
 {
 	(void)signum;
 
@@ -643,13 +901,13 @@ sigbye(int signum)
 }
 
 static void
-intern_atoms(void)
+init_atoms(void)
 {
 	xcb_intern_atom_cookie_t cookies[ARRAY_SIZE(ATOM_NAMES)];
 
 	for (unsigned i = 0; i < ARRAY_SIZE(ATOM_NAMES); ++i) {
 		char const *const name = ATOM_NAMES[i];
-		cookies[i] = xcb_intern_atom_unchecked(conn, 0, strlen(name), name);
+		cookies[i] = xcb_intern_atom_unchecked(conn, false, strlen(name), name);
 	}
 
 	for (unsigned i = 0; i < ARRAY_SIZE(ATOM_NAMES); ++i) {
@@ -670,9 +928,11 @@ find_box_by_name(struct box **optimum, char name[static NAME_LEN])
 {
 	*optimum = NULL;
 
-	bool complete = true;
 	uint8_t const n = strnlen(name, NAME_LEN);
+	if (0 == n)
+		return false;
 
+	bool complete = true;
 	struct box *box;
 	for_each_box(box, root, root, {
 		if (0 == memcmp(name, box->name, n)) {
@@ -685,11 +945,14 @@ find_box_by_name(struct box **optimum, char name[static NAME_LEN])
 	return complete;
 }
 
-/* in keychords */
-static uint8_t
-box_path(struct box const *from, struct box const *to, char path[])
+static bool
+box_are_in_same_subtree(struct box const *const one, struct box const *const other)
 {
-	return 1;
+	if (one->parent == other->parent)
+		return true;
+
+
+	return false;
 }
 
 static bool
@@ -707,20 +970,32 @@ name_box(struct box *box, bool iscontainer)
 
 	uint8_t const n = strnlen(box->name, NAME_LEN);
 
-	struct box *to;
+	struct box *to = box->parent;
+
+	/* prohibit same name among children so we can always move horizontally */
+	if (NULL != to)
+		for (uint16_t i = 0; i < to->num_children; ++i) {
+			struct box const *const child = to->children[i];
+			if (0 == memcmp(child->name, box->name, n))
+				letters[(unsigned char)child->name[n]].focus_seq = -1;
+		}
+
+	/* prohibit same name in subtree so we can always move vertically */
+	for (to = box; NULL != (to = to->parent);)
+		if (0 == memcmp(to->name, box->name, n))
+			letters[(unsigned char)to->name[n]].focus_seq = -1;
+
+	unsigned char optimum = '\0';
+	letters[optimum].focus_seq = -1;
+
 	for_each_box(to, root, root, {
 		if (0 == memcmp(to->name, box->name, n)) {
 			uint32_t *const p = &letters[(unsigned char)to->name[n]].focus_seq;
-			if (to->parent != box->parent) {
-				if (*p < to->focus_seq)
-					*p = to->focus_seq;
-			} else {
-				*p = -1;
-			}
+			if (*p < to->focus_seq + 1)
+				*p = to->focus_seq + 1;
 		}
 	})
 
-	unsigned char optimum = '\0';
 	for (unsigned char start = iscontainer ? 'A' : 'a', end = start + ('Z' - 'A');
 	     start <= end;
 	     ++start)
@@ -737,41 +1012,48 @@ name_box(struct box *box, bool iscontainer)
 }
 
 static bool
-box_is_monitor(struct box const *const box)
-{
-	return NULL == box->parent->parent;
-}
-
-static bool
 box_is_floating(struct box const *const box)
 {
 	return 0 < box->user_width;
 }
 
 static uint16_t
-box_compute_num_columns(struct box const *const box)
+box_compute_num_columns(struct box const *const box, uint16_t num_tiles)
 {
 	switch (box->num_columns) {
 	case 0:
 	{
-		uint16_t i = 1;
-		while (i * i < box->num_children)
-			++i;
-		return i;
+		/* compare whether adding a new row or a new column will result
+		 * in more squary tiles. the process repats until we can place
+		 * all tiles. */
+		uint_fast16_t cols = 1, rows = 1;
+		while (cols * rows < num_tiles) {
+#define R(a, b) ((a) < (b) ? (uint32_t)(b) << 16 / (a) : (uint32_t)(a) << 16 / (b))
+
+			if (R(box->width / (cols + 1), box->height / rows) <
+			    R(box->width / cols,       box->height / (rows + 1)))
+				++cols;
+			else
+				++rows;
+
+#undef R
+		}
+
+		return cols;
 	}
 
 	default:
 		return box->num_columns;
 
 	case UINT16_MAX:
-		return box->num_children;
+		return num_tiles;
 	}
 }
 
 static bool
 box_is_split(struct box const *const box)
 {
-	uint16_t const num_columns = box_compute_num_columns(box);
+	uint16_t const num_columns = box_compute_num_columns(box, box->num_children);
 	return 1 == num_columns || box->num_children <= num_columns;
 }
 
@@ -786,7 +1068,7 @@ box_set_position(struct box *const box, int16_t x, int16_t y)
 }
 
 static void
-box_set_size(struct box *const box, uint16_t width, uint16_t height)
+box_set_size(struct box *const box, uint16_t const width, uint16_t const height)
 {
 	box->layout_changed |=
 		width != box->width ||
@@ -809,54 +1091,208 @@ box_get_focus(struct box *const box, struct box **const focus)
 	return true;
 }
 
-static void
-update_focus(struct hand *const hand)
+static xcb_window_t
+hand_get_wanted_focus_window(struct hand const *const hand)
 {
-	struct box *focus = hand->input_focus;
+	return NULL != hand->input_focus
+		? hand->input_focus->window
+		: bodies[0].screen->root;
+}
 
-#if 0
-	xcb_get_property_reply_t *reply;
-	reply =  xcb_get_property_reply(conn,
-				xcb_get_property(conn, 0, focus->window,
-					XCB_ATOM_WM_NAME, XCB_ATOM_STRING, 0, 0),
-				NULL);
-	if (reply) {
-		printf("title=%.*s\n",
-				xcb_get_property_value_length(reply),
-				(char *)xcb_get_property_value(reply));
-	} else {
-		printf("notit %d\n", hand->pointer);
-	}
-#endif
+static void
+update_focus(struct hand const *const hand)
+{
+	struct box const *const focus = hand->input_focus;
+	assert(NULL == focus || !box_is_container(focus));
 
 	assert(NULL == focus || focus->focus_seq == root->focus_seq);
 
 	CHECK(xcb_input_xi_set_focus, conn,
-			NULL != focus
-				? focus->window
-				: bodies[0].screen->root,
-			XCB_CURRENT_TIME, hand->keyboard);
+			hand_get_wanted_focus_window(hand),
+			XCB_CURRENT_TIME, hand->master_keyboard);
 	CHECK(xcb_input_xi_set_client_pointer, conn,
 			NULL != focus ? focus->window : XCB_WINDOW_NONE,
-			hand->pointer);
+			hand->master_pointer);
 
 	if (NULL != focus) {
+		struct box_pointer_xy const *const pointers = (void *)(focus + 1);
+		struct box_pointer_xy pos = pointers[hand - hands];
+		struct body const *const body = &bodies[focus->body];
+
+		if (pos.x == 0 && pos.y == 0) {
+			pos.x = (focus->x + focus->width / 2) << 16;
+			pos.y = (int)(focus->y + focus->height / M_PHI) << 16;
+		}
+
 		CHECK(xcb_input_xi_warp_pointer, conn,
 				XCB_WINDOW_NONE,
-				focus->window,
+				body->screen->root,
 				0, 0, 0, 0,
-				0, 0,
-				hand->pointer);
+				pos.x, pos.y,
+				hand->master_pointer);
+	}
+}
+
+enum {
+	left = -1,
+	top = -1,
+	center = 0,
+	right = 1,
+	bottom = 1,
+};
+
+static bool
+box_is_visible(struct box *const box)
+{
+	return !box->concealed || box->parent->focus_seq == box->focus_seq;
+}
+
+static bool
+box_is_tiled(struct box *const box)
+{
+	return box_is_visible(box) && !box_is_floating(box);
+}
+
+static void
+update_box_label(struct box *const box)
+{
+	char name[NAME_LEN];
+	struct label *label;
+	struct hand *const hand = box->focus_hand != NULL_HAND ? &hands[box->focus_hand] : NULL;
+	enum label_mode const mode = NULL != hand ? hand->mode : mode_boxes;
+
+	switch (mode) {
+	case mode_default:
+		break;
+
+	case mode_boxes:
+	case mode_name:
+		label = new_label_for(box);
+		label_set_name(label, box->name);
+		label_set_position_from_box(label, box_is_container(box) ? center : right, top);
+		label->type = label_box;
+		update_label(label);
+		break;
+
+	case mode_move_a:
+	case mode_move_b:
+	{
+		/* not a real child */
+		if (box_is_monitor(box))
+			break;
+
+		/* FIXME: check if hand really focuses */
+		bool const focused = box->focus_seq == root->focus_seq && !box_is_container(box);
+
+		name[1] = '\0';
+
+		label = new_label_for(box);
+
+		name[0] = focused ? 'h' : 'a' + hand->num_labels++;
+		label = new_label_for(box);
+		label_set_name(label, name);
+		label_set_position_from_box(label, left, center);
+		update_label(label);
+
+		name[0] = focused ? 'j' : 'a' + hand->num_labels++;
+		label = new_label_for(box);
+		label_set_name(label, name);
+		label_set_position_from_box(label, center, bottom);
+		update_label(label);
+
+		name[0] = focused ? 'k' : 'a' + hand->num_labels++;
+		label = new_label_for(box);
+		label_set_name(label, name);
+		label_set_position_from_box(label, center, top);
+		update_label(label);
+
+		name[0] = focused ? 'l' : 'a' + hand->num_labels++;
+		label = new_label_for(box);
+		label_set_name(label, name);
+		label_set_position_from_box(label, right, center);
+		update_label(label);
+	}
+		break;
+
+	case mode_setcolumns:
+	{
+		if (box->parent != hand->mode_box)
+			break;
+
+		printf("LABEL CHILDREN\n");
+		label = new_label_for(box);
+		name[0] = 'a' + hand->num_labels++;
+		name[1] = '\0';
+		label_set_name(label, name);
+		label_set_position_from_box(label, center, center);
+		update_label(label);
+	}
+		break;
+
+	case mode_size_side:
+	{
+		if (box_is_monitor(box))
+			break;
+
+		if (box_is_floating(box))
+			goto all_four;
+
+		if (!box_is_split(box->parent))
+			break;
+
+	all_four:
+		label = new_label_for(box);
+		strncpy(name, "h", sizeof name);
+		label_set_name(label, name);
+		label_set_position_from_box(label, left, center);
+		update_label(label);
+
+		label = new_label_for(box);
+		strncpy(name, "j", sizeof name);
+		label_set_name(label, name);
+		label_set_position_from_box(label, center, bottom);
+		update_label(label);
+
+		label = new_label_for(box);
+		strncpy(name, "k", sizeof name);
+		label_set_name(label, name);
+		label_set_position_from_box(label, center, top);
+		update_label(label);
+
+		label = new_label_for(box);
+		strncpy(name, "l", sizeof name);
+		label_set_name(label, name);
+		label_set_position_from_box(label, right, center);
+		update_label(label);
+
+	}
+		break;
+
+	case mode_size_to:
+	{
+		if (box != hand->mode_box)
+			break;
+
+		printf("A\n");
+
+		struct box const *const monitor = box_get_monitor(box);
+		struct size const size = monitor_convert_pt2px(monitor,
+				(struct size){ LABEL_WIDTH_PT, LABEL_HEIGHT_PT });
+
+		for (char ch = 'a'; ch <= 'z'; ++ch) {
+			label = new_label_for(box);
+			name[0] = ch;
+			name[1] = '\0';
+			label_set_name(label, name);
+			label_set_position(label, box->x + (ch - 'a') * size.width, box->y + box->height / 2);
+			update_label(label);
+		}
+		printf("B\n");
+
+	}
+		break;
 	}
 
-	if (hand == &hands[0]) {
-		/* FIXME: use appropriate body */
-		CHECK(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
-				bodies[0].screen->root, ATOM_NET_ACTIVE_WINDOW,
-				XCB_ATOM_WINDOW, 32, 1, &(xcb_window_t){
-					NULL != focus ? focus->window : XCB_WINDOW_NONE
-				});
-	}
 }
 
 static void
@@ -864,18 +1300,27 @@ update_box(struct box *const box)
 {
 	static int depth = 0;
 
-	depth += 3;
+	printf("%*.sbox %p { N=%d title=\"%s\" %sfocus=#%d/%d name=%.*s %s}\n",
+			depth, "",
+			(void *)box,
+			box->num_children,
+			box->title,
+			box->focus_lock ? "focus_lock " : "",
+			box->focus_seq, box->focus_hand,
+			NAME_LEN, box->name,
+			box->concealed ? "concealed " : "");
 
-	printf("%*.supdate box %p (children=%d container=%d flock=%d title=\"%s\")\n",
-			depth, "", (void *)box, box->num_children, box_is_container(box), box->focus_lock, box->title);
+	depth += 3;
 
 	uint32_t mask = 0;
 	uint32_t list[7];
 	uint8_t i = 0;
 
-	printf("%*.sw=%x pos=(%d,%d) size=(%d,%d)\n", depth, "",
+	printf("%*.sw=%x pos=%s(%d,%d) size=%s(%d,%d)\n", depth, "",
 			box->window,
+			box->position_changed ? "*" : "",
 			box->x, box->y,
+			box->layout_changed ? "*" : "",
 			box->width, box->height);
 
 	if (box->position_changed) {
@@ -899,6 +1344,7 @@ update_box(struct box *const box)
 			list[i++] = box->height;
 
 			uint16_t num_children = box->num_children;
+			uint16_t tiled_children = 0;
 
 			if (0 == num_children && NULL != box->parent && NULL != box->parent->parent)
 				goto not_a_container;
@@ -906,63 +1352,81 @@ update_box(struct box *const box)
 			if (0 == num_children)
 				goto empty_container;
 
-			if (0) {
-				for (uint32_t i = 0; i < num_children; ++i) {
-					struct box *child = box->children[i];
+			uint32_t total_weight = 0;
 
-					if (box->focus_seq == child->focus_seq) {
-						box_set_position(child, box->x + 0, box->y + 0);
-						box_set_size(child, box->width, box->height);
+			for (uint16_t i = 0; i < box->num_children; ++i) {
+				struct box *child = box->children[i];
+				if (!box_is_tiled(child))
+					continue;
+
+				total_weight += child->weight;
+				++tiled_children;
+			}
+
+			uint16_t num_columns = box_compute_num_columns(box, tiled_children);
+			uint16_t num_rows = (tiled_children + num_columns - 1) / num_columns, col = 0;
+			int16_t y = 0, x = 0;
+			uint16_t height = box->height / (!num_rows ? 1 : num_rows);
+			uint32_t i = 0;
+
+			printf("%*.sgrid=N=%d; tiles=%d; cols=%d\n", depth, "", box->num_children, tiled_children, num_columns);
+			uint16_t width = box->width / num_columns;
+			for (uint16_t i = 0; i < box->num_children; ++i) {
+				struct box *child = box->children[i];
+
+				printf("%*.s[#%d]:\n", depth, "", i);
+
+				if (box_is_tiled(child)) {
+					struct {
+						uint16_t left;
+						uint16_t top;
+						uint16_t right;
+						uint16_t bottom;
+					} gap = {box_is_container(child) || box->focus_lock ? 0 : 3, 0, 0, 0};
+					gap.top = gap.left;
+					gap.right = gap.left;
+					gap.bottom = gap.left;
+					/* per window width/height:
+					 * - last children in column or row eats up all space,
+					 * - size is rounded to the nearest mod_{x,y}
+					 */
+					uint16_t const wwidth =
+						col + 1 == num_columns
+						? box->width - x
+						: width + (1 == num_rows && 1 < tiled_children ? child->mod_x / 2 - (width + child->mod_x / 2) % child->mod_x : 0);
+					uint16_t const wheight =
+						1 == tiled_children
+						? box->height - y
+						: height + (1 == num_columns && 1 < tiled_children ? child->mod_y / 2 - (height + child->mod_y / 2) % child->mod_y : 0);
+					box_set_position(child, box->x + x + gap.left, box->y + y + gap.top);
+					box_set_size(child, wwidth - (gap.left + gap.right), wheight - (gap.top + gap.bottom));
+
+					--tiled_children;
+					if (++col < num_columns) {
+						x += wwidth;
 					} else {
-						box_set_size(child, 0, 0);
-					}
-				}
-			} else {
-				uint16_t num_columns = box_compute_num_columns(box);
-				uint16_t width_error = box->width - num_children;
-				uint16_t row = (num_children + num_columns - 1) / num_columns;
-				int16_t y = 0;
-				uint16_t height = box->height / row;
-				uint32_t total_weight = 0;
-				uint32_t i = 0;
+						col = 0;
+						x = 0;
+						y += wheight;
 
-				if (1 == num_columns || 1 == row) {
-					for (uint16_t i = 0; i < box->num_children; ++i)
-						total_weight += box->children[i]->weight;
+						if (0 < tiled_children && tiled_children < num_columns) {
+							num_columns = tiled_children;
+							width = box->width / num_columns;
+						}
+					}
+				} else if (!box_is_visible(child)) {
+					box_set_size(child, 0, 0);
 				}
 
-				printf("%*.sgrid=%d/%d\n", depth, "", box->num_children, num_columns);
-				for (uint16_t width = box->width / num_columns,
-					      width_error = box->width - width * num_columns;
-				     0 < num_children;
-				     --row, y += height, num_children -= num_columns)
-				{
-					if (num_children < num_columns) {
-						num_columns = num_children;
-						width = box->width / num_columns;
-					}
-
-					int16_t x = 0;
-					for (uint16_t col = 0; col < num_columns; ++col, ++i) {
-						struct box *child = box->children[i];
-
-						printf("%*.sgrid[y=^%d,x=%d]:\n", depth, "", row, col);
-
-						int GAP = box->focus_lock ? 0 : 4;
-						box_set_position(child, box->x + x + GAP, box->y + y + GAP);
-						box_set_size(child, width - GAP * 2, height - GAP * 2);
-
-						update_box(child);
-
-						x += width;
-					}
-				}
+				update_box(child);
 			}
 		not_a_container:;
 		} else {
 		empty_container:
 			if (box->window != XCB_WINDOW_NONE)
-				CHECK(xcb_unmap_window, conn, box->window);
+				xcb_unmap_window(conn, box->window);
+			depth -= 3;
+			return;
 		}
 	} else if (1 || box->content_changed) {
 		for (uint16_t i = 0; i < box->num_children; ++i) {
@@ -974,145 +1438,42 @@ update_box(struct box *const box)
 	/* if (e->value_mask & XCB_CONFIG_WINDOW_SIBLING) */
 	/* if (e->value_mask & XCB_CONFIG_WINDOW_STACK_MODE) */
 
-	printf("%*.sname=%.*s\n", depth, "", NAME_LEN, box->name);
+# if 0
+					CHECK(xcb_change_window_attributes, conn, box->window,
+							XCB_CW_BORDER_PIXEL, &(uint32_t const){
+								hand->color
+							});
+			CHECK(xcb_change_window_attributes, conn, box->window,
+					XCB_CW_BORDER_PIXEL, &(uint32_t const){
+						0xff0000
+					});
+
+		CHECK(xcb_configure_window, conn, box->window, XCB_CONFIG_WINDOW_BORDER_WIDTH, &(uint32_t const){ 0 });
+#endif
+
 	if (box->window != XCB_WINDOW_NONE) {
 		if (0 < i) {
-			mask |= XCB_CONFIG_WINDOW_BORDER_WIDTH;
-			list[i++] = box->parent->focus_lock ? 0 : (box->parent && box->parent->focus_seq == box->focus_seq && 0 != box->focus_seq ? 2 : 2);
-		}
-
-		CHECK(xcb_change_window_attributes, conn, box->window,
-				XCB_CW_BORDER_PIXEL, &(uint32_t){
-					root->focus_seq == box->focus_seq && 0 != box->focus_seq ? 0xffaf5f : 0xaf5fff
-				});
-
-		printf("%*.sfocus_seq=%d\n", depth, "", box->focus_seq);
-		if (0 < i) {
-			printf("%*.sconfigure\n", depth, "");
+			printf("%*.s configure %d\n", depth, "", i);
 			CHECK(xcb_configure_window, conn, box->window, mask, list);
 		}
-		/* we only after configure happened */
-		CHECK(xcb_map_window, conn, box->window);
+		/* map only after configured */
+		if (/* was not visible before */1)
+			CHECK(xcb_map_window, conn, box->window);
 
-		if (box->parent->focus_changed && box->focus_seq == root->focus_seq && !box_is_container(box)) {
-			assert(0 != box->focus_seq && "focus changed from 0 -> 0?");
-			/* so now hand input_focus surely mapped (at least request sent to the
-			 * server, so we can focus them now */
+		/* xcb_configure_window(conn, box->window, XCB_CONFIG_WINDOW_BORDER_WIDTH, &(uint32_t const){ 4 }); */
+
+		if (box->focus_seq == root->focus_seq && !box_is_container(box) && box->focus_changed) {
+			/* hand focus can only be updated after window is mapped */
 			for (uint8_t i = 0; i < num_hands; ++i) {
-				struct hand *const hand = &hands[i];
+				struct hand const *const hand = &hands[i];
 				struct box const *const focus = hand->input_focus;
 
-				if (box != focus)
-					continue;
-
-				update_focus(hand);
+				if (box == focus)
+					update_focus(hand);
 			}
 		}
 
-		struct hand *const hand = box->focus_hand != 0xff ? &hands[box->focus_hand] : NULL;
-		if (NULL != hand) {
-			struct label *label;
-
-			/* box->focus_seq == root->focus_seq */
-			switch (hand->mode) {
-			case mode_default:
-			{
-				if (!hand->label_boxes)
-					break;
-			case mode_default_label_boxes:
-				/* always show label boxes when nameing */
-			case mode_name:
-
-				label = new_label_for(box);
-
-				memcpy(label->name, box->name, sizeof box->name);
-				show_label(hand, label, box_is_container(box) ? 1 : 2, 0);
-			}
-				break;
-
-				/* ez */
-				break;
-
-			case mode_move_a:
-			case mode_move_b:
-			{
-				/* not a real child */
-				if (box_is_monitor(box))
-					break;
-
-				/* FIXME: check if hand really focuses */
-				bool const focused = box->focus_seq == root->focus_seq && !box_is_container(box);
-
-				label = new_label_for(box);
-				label->name[0] = focused ? 'h' : 'a' + hand->num_labels++;
-				label->name[1] = '\0';
-				show_label(hand, label, 0, 0);
-
-				label = new_label_for(box);
-				label->name[0] = focused ? 'j' : 'a' + hand->num_labels++;
-				label->name[1] = '\0';
-				show_label(hand, label, 0, 2);
-
-				label = new_label_for(box);
-				label->name[0] = focused ? 'l' : 'a' + hand->num_labels++;
-				label->name[1] = '\0';
-				show_label(hand, label, 2, 0);
-
-				label = new_label_for(box);
-				label->name[0] = focused ? 'k' : 'a' + hand->num_labels++;
-				label->name[1] = '\0';
-				show_label(hand, label, 2, 2);
-
-
-			}
-				break;
-
-			case mode_setcolumns:
-			{
-				if (box->parent != hand->mode_base.box)
-					break;
-
-				printf("LABEL CHILDREN\n");
-				label = new_label_for(box);
-				label->name[0] = 'a' + hand->num_labels++;
-				label->name[1] = '\0';
-				show_label(hand, label, 1, 1);
-			}
-				break;
-
-			case mode_size_side:
-			{
-				if (box_is_monitor(box))
-					break;
-
-				if (box_is_floating(box))
-					goto all_four;
-
-				if (!box_is_split(box->parent))
-					break;
-
-			all_four:
-				label = new_label_for(box);
-				strncpy(label->name, "h", sizeof label->name);
-				show_label(hand, label, 0, 1);
-
-				label = new_label_for(box);
-				strncpy(label->name, "j", sizeof label->name);
-				show_label(hand, label, 1, 2);
-
-				label = new_label_for(box);
-				strncpy(label->name, "k", sizeof label->name);
-				show_label(hand, label, 1, 0);
-
-				label = new_label_for(box);
-				strncpy(label->name, "l", sizeof label->name);
-				show_label(hand, label, 2, 1);
-
-			}
-				break;
-
-			}
-		}
+		update_box_label(box);
 	}
 
 	box->position_changed = false;
@@ -1120,16 +1481,25 @@ update_box(struct box *const box)
 	box->focus_changed = false;
 	box->content_changed = false;
 	box->title_changed = false;
-	/* box->self_focus_changed = false; */
-
 
 	depth -= 3;
 }
 
-/* realize our virtual boxes for the X server */
+/* realize our virtual boxes for the X server and flush */
 static void
 do_update(void)
 {
+	/* TODO: remove this hack as soon as labels will not be regenareted unconditionally */
+	if (!root->position_changed &&
+	    !root->layout_changed &&
+	    !root->focus_changed &&
+	    !root->content_changed &&
+	    !root->title_changed)
+		goto flush;
+
+	static int nn = 0;
+	printf("<<update %d hand->mode=%d>>\n", ++nn, hands[0].mode);
+
 	/* will regenerate labels */
 	for (uint8_t i = 0; i < num_bodies; ++i) {
 		struct body *const body = &bodies[i];
@@ -1142,18 +1512,18 @@ do_update(void)
 		hand->num_labels = 0;
 	}
 
-	/* xcb_aux_sync(conn); */
 	update_box(root);
 
-	printf("%d\n", bodies[0].num_labels_used);
 	for (uint8_t i = 0; i < num_bodies; ++i) {
 		struct body *const body = &bodies[i];
 		while (body->num_labels_used < body->num_labels_mapped) {
 			struct label *label = &body->labels[--body->num_labels_mapped];
-			CHECK(xcb_unmap_window, conn, label->window);
+			hide_label(label);
 		}
 	}
 
+flush:;
+	/* printf("flushed\n"); */
 }
 
 /* ensure that parent maximum */
@@ -1162,6 +1532,7 @@ box_update_focus_seq(struct box *box)
 {
 	assert(box_is_container(box));
 	uint32_t old_focus_idx = box->focus_seq;
+
 	do {
 		uint32_t max_focus_seq = 0;
 		for (uint16_t i = 0; i < box->num_children; ++i) {
@@ -1171,18 +1542,24 @@ box_update_focus_seq(struct box *box)
 		}
 		/* we unparented the focused box so maximum dropped */
 		if (box->focus_seq == max_focus_seq)
-			return;
+			break;
 
+		box->content_changed = true;
 		/* maximum may changed but not the focused children */
 		box->focus_changed = box->focus_seq != old_focus_idx;
+		/* if (NULL != box->parent)
+			box->parent->layout_changed = true; */
 
 		old_focus_idx = box->focus_seq;
 		box->focus_seq = max_focus_seq;
 	} while (NULL != (box = box->parent));
+
+	for (; NULL != box; box = box->parent)
+		box->content_changed = true;
 }
 
 static void
-unparent_box(struct box *const box, bool const forget)
+take_box(struct box *const box, bool const out_of_parent)
 {
 	struct box *parent = box->parent;
 	struct box **child = &parent->children[0];
@@ -1198,40 +1575,49 @@ unparent_box(struct box *const box, bool const forget)
 		(--parent->num_children - pos) * sizeof *child
 	);
 
-	if (!forget)
+	if (!out_of_parent)
 		return;
 
 	box_update_focus_seq(parent);
 }
 
-static void auto_delete_box(struct box *box);
+/* called after box lost a child */
+static void vaacum_box(struct box *box);
 
 static void
 focus_box(struct hand *hand, struct box *box);
 
-static struct box *
-find_most_recent_box(struct hand *hand, struct box *root, uint32_t focus_seq)
+static void
+find_most_recent_box(struct hand *hand, struct box *root, uint32_t const focus_seq, struct box **boxes, uint32_t n)
 {
 	/* use a dummy box so we do not have to check for NULL */
-	struct box const *optimum = &EMPTY_BOX;
+	for (uint32_t i = 0; i < n; ++i)
+		/* cast is safe because we do not write boxes and they
+		 * will be NULLed out at the end */
+		boxes[i] = (struct box *)&EMPTY_BOX;
 
 	struct box *box;
 	for_each_box(box, root, root, {
 		if (/* is it a client window? */
 		    !box_is_container(box) &&
 		    /* if not find a box that... */
-		    ((/* is not focused by any hand; so we do not interfere */
-		      focus_seq != box->focus_seq &&
-		      /* but was focused by the current hand; it's in the history */
-		      box->focus_hand == hand - hands &&
-		      /* and we need the most recent one */
-		      optimum->focus_seq < box->focus_seq) ||
-		     /* or fallback to a never focused window */
-		     (box->focus_seq == 0 && optimum == &EMPTY_BOX)))
-			optimum = box;
+		    (box->focus_hand == NULL_HAND || (/* is not focused by any hand; so we do not interfere */
+		     focus_seq != box->focus_seq &&
+		     /* but was focused by the current hand; it's in the history */
+		     box->focus_hand == hand - hands) || (box == hand->input_focus)))
+		{
+			uint32_t i = n;
+			while (i > 0 && boxes[i - 1]->focus_seq <= box->focus_seq)
+				--i;
+			if (i < n) {
+				memmove(&boxes[i], &boxes[i + 1], (n - i - 1) * sizeof *boxes);
+				boxes[i] = box;
+			}
+		}
 	})
 
-	return &EMPTY_BOX != optimum ? (struct box *)optimum : NULL;
+	for (uint32_t i = n; 0 < i && &EMPTY_BOX == boxes[--i];)
+		boxes[i] = NULL;
 }
 
 /* focus something */
@@ -1244,10 +1630,11 @@ focus_all_hands(uint32_t focus_seq)
 		if (NULL != hand->input_focus)
 			continue;
 
-		struct box const *optimum = find_most_recent_box(hand, root, focus_seq);
+		struct box *optimum;
+		find_most_recent_box(hand, root, focus_seq, &optimum, 1);
 
 		if (NULL != optimum) {
-			focus_box(hand, (struct box *)optimum);
+			focus_box(hand, optimum);
 			focus_seq = root->focus_seq;
 		} else {
 			hand->focus = NULL;
@@ -1262,87 +1649,156 @@ increase_focus_seq(void);
 static void
 hand_leave_mode(struct hand *const hand)
 {
-	printf("-- leave mode\n");
-	hand->mode = mode_default;
-	hand->mode_base.box = NULL;
+	hand->mode = mode_boxes;
+	hand->mode_box = NULL;
 }
 
-/* for containers only */
 static void
-delete_box(struct box *box)
+ewmh_append_client_list(struct box const *const box)
 {
-	/* xcb_destroy_window(conn, box->window); */
+	CHECK(xcb_change_property, conn, XCB_PROP_MODE_APPEND,
+			bodies[box->body].screen->root, ATOM(_NET_CLIENT_LIST),
+			XCB_ATOM_WINDOW, 32, 1, &box->window);
+}
 
-	struct box *const parent = box->parent;
+static void
+ewmh_delete_client_list(struct body const *const body)
+{
+	CHECK(xcb_delete_property, conn, body->screen->root, ATOM(_NET_CLIENT_LIST));
+}
 
-	parent->layout_changed = true;
+static void
+ewmh_update_client_list(struct body const *const body)
+{
+	/* FIXME: maybe we hit max message len? */
+	xcb_window_t windows[1000];
+	uint32_t num_windows = 0;
+	xcb_prop_mode_t mode = XCB_PROP_MODE_REPLACE;
 
-	bool focus_changed;
-
-	/* if we removed the currently selected box, and there is only one
-	 * hand, root->focus_seq will dropped that could make a previously
-	 * selected seems like it's selected (possibly by someone other) */
-	uint32_t const real_focus_seq = root->focus_seq;
-
-	/* hands only reference focused boxes, so if this box is not focused we
-	 * can skip that */
-	if ((focus_changed = box->focus_seq == root->focus_seq)) {
-		for (uint8_t i = 0; i < num_hands; ++i) {
-			struct hand *hand = &hands[i];
-
-			/* forget current focus */
-			if (box == hand->focus)
-				hand->focus = NULL;
-			if (box == hand->input_focus)
-				hand->input_focus = NULL;
-			if (box == hand->mode_base.box)
-				hand_leave_mode(hand);
+	struct box *box;
+	for_each_box(box, root, root, {
+		if (box->body == (body - bodies) && !box_is_container(box)) {
+			windows[num_windows++] = box->window;
+			if (ARRAY_SIZE(windows) == num_windows) {
+				CHECK(xcb_change_property, conn, mode,
+						body->screen->root, ATOM(_NET_CLIENT_LIST),
+						XCB_ATOM_WINDOW, 32, num_windows, windows);
+				num_windows = 0;
+				mode = XCB_PROP_MODE_APPEND;
+			}
 		}
+	})
 
-		increase_focus_seq();
-	}
+	if (0 < num_windows)
+		CHECK(xcb_change_property, conn, mode,
+				body->screen->root, ATOM(_NET_CLIENT_LIST),
+				XCB_ATOM_WINDOW, 32, num_windows, windows);
+}
 
-	printf("delete %x\n", box->window);
-	unparent_box(box, true);
+static void
+free_box(struct box *box)
+{
+	if (XCB_WINDOW_NONE != box->frame)
+		xcb_destroy_window(conn, box->frame);
 
-	if (focus_changed)
-		focus_all_hands(real_focus_seq);
-
-	auto_delete_box(parent);
-
+	free(box->title);
 	free(box);
 }
 
 static void
-auto_delete_box(struct box *box)
+box_propagate_change(struct box *box)
+{
+	while (NULL != (box = box->parent))
+		box->content_changed = true;
+}
+
+static void
+delete_box(struct box *box)
+{
+	/* if we removed the currently selected box, and there is only one
+	 * hand, root->focus_seq will dropped that could make a previously
+	 * selected seems like it's selected (possibly by someone other) */
+	uint32_t const real_focus_seq = root->focus_seq;
+	bool const focus_changed = box->focus_seq == root->focus_seq;
+
+	/* hands only reference focused boxes, so if this box is not focused we
+	 * can skip that */
+	if (focus_changed) {
+		for (uint8_t i = 0; i < num_hands; ++i) {
+			struct hand *const hand = &hands[i];
+
+			/* forget current focus */
+			if (box == hand->focus)
+				hand->focus = NULL;
+
+			if (box == hand->input_focus)
+				hand->input_focus = NULL;
+
+			if (box == hand->latest_input[0]) {
+				hand->latest_input[0] = hand->latest_input[1];
+				hand->latest_input[1] = NULL;
+				assert(hand->latest_input[0] != box);
+			} else if (box == hand->latest_input[1]) {
+				hand->latest_input[1] = NULL;
+			}
+
+			if (box == hand->mode_box)
+				hand_leave_mode(hand);
+		}
+
+		increase_focus_seq();
+	} else {
+		for (uint8_t i = 0; i < num_hands; ++i) {
+			struct hand *const hand = &hands[i];
+			assert(box != hand->focus && box != hand->input_focus);
+		}
+	}
+
+	take_box(box, true);
+
+	if (focus_changed)
+		focus_all_hands(real_focus_seq);
+
+	if (!box_is_container(box))
+		/* TODO: do not update immediately */
+		ewmh_update_client_list(&bodies[box->body]);
+
+	vaacum_box(box->parent);
+	free_box(box);
+}
+
+static uint16_t
+box_get_pos(struct box const *const box)
+{
+	uint16_t pos = 0;
+	while (box->parent->children[pos] != box)
+		++pos;
+	return pos;
+}
+
+static void
+vaacum_box(struct box *box)
 {
 	assert(box_is_container(box) && "for containers only");
 
-	/* only care about useless boxes */
-	if (0 != box->num_children)
-		return;
+	if (box == root ||
+	    box_is_monitor(box))
+		goto not_empty;
 
-	struct box *const parent = box->parent;
-
-	assert(NULL != parent && "user cannot address |root| so cannot delete");
-
-	/* user tried drag-n-dropping monitor to trash */
-	/* TODO: initiate the kill sequence and burn out some pixels */
-	if (NULL == parent->parent)
-		return;
+	/* if (1 == box->num_children && !box_is_leg(box)) */
+	if (0 < box->num_children)
+		goto not_empty;
 
 	/* body boxes are special because they can be deleted only if their
 	 * twin boxes on heads are empty too */
-	if (NULL == parent->parent->parent) {
-		uint16_t pos = 0;
-		while (parent->children[pos] != box)
-			++pos;
+	if (box_is_leg(box)) {
+		uint16_t const pos = box_get_pos(box);
 
 		for (uint16_t i = 0; i < root->num_children; ++i) {
 			struct box const *const head = root->children[i];
 			struct box const *const leg = head->children[pos];
 			if (0 < leg->num_children)
-				return;
+				goto not_empty;
 		}
 
 		for (uint16_t i = 0; i < root->num_children; ++i) {
@@ -1353,68 +1809,87 @@ auto_delete_box(struct box *box)
 	} else {
 		delete_box(box);
 	}
+
+	return;
+
+not_empty:
+	/* ...but still changed */
+	box->layout_changed = true;
+	box_propagate_change(box);
+}
+
+static struct box *
+move_box(struct box *const new, void const *const old)
+{
+	if (old == new)
+		return new;
+
+/* update |var| if that points to the old reference of |new| */
+#define UPDATE_REF(var) if (old == (var)) var = new;
+
+	for (uint8_t i = 0; i < num_hands; ++i) {
+		struct hand *hand = &hands[i];
+		UPDATE_REF(hand->latest_input[0]);
+		UPDATE_REF(hand->latest_input[1]);
+		UPDATE_REF(hand->focus);
+		/* NOTE: |input_focus| do not need to be updated since |old| is a container */
+		UPDATE_REF(hand->mode_box);
+	}
+
+	/* UPDATE_REF(iter); */
+
+	/* update parent references */
+	if (NULL != new->parent) {
+		struct box **child = new->parent->children;
+
+		while (old != *child)
+			++child;
+
+		*child = new;
+	} else {
+		root = new;
+	}
+
+	/* update children references */
+	for (uint16_t i = 0; i < new->num_children; ++i) {
+		struct box *const child = new->children[i];
+		child->parent = new;
+	}
+
+#undef UPDATE_REF
+
+	return new;
 }
 
 /* box must not be a root because box->parent == NULL => new box */
-static bool
-move_box_(struct box *into, uint32_t const pos, struct box *box)
+static void
+insert_box_(struct box *into, uint16_t const pos, struct box *box)
 {
+	assert(box_is_container(into));
+
 	struct box *const boxparent = box->parent;
 
 	/* unparent |box| */
 	if (NULL != boxparent)
-		unparent_box(box, into != boxparent);
+		take_box(box, into != boxparent);
 
 	/* already its parent */
 	if (into == boxparent)
 		goto insert;
 
 	/* first check if we can make place for |box| in |into| */
-	struct box *const new = realloc(into, sizeof *into + sizeof box * (into->num_children + 1));
-	if (NULL == new)
-		/* FIXME: undo creation body */
-		return false;
-
-	/* if |into| location changed because of realloc(), update all
-	 * references to it */
-	if (new != into) {
-/* update |var| if that points to the old reference of |new| */
-		for (uint8_t i = 0; i < num_hands; ++i) {
-#define UPDATE_REF(var) if (into == (var)) var = new;
-
-			struct hand *hand = &hands[i];
-			UPDATE_REF(hand->latest_input[0]);
-			UPDATE_REF(hand->latest_input[1]);
-			UPDATE_REF(hand->focus);
-			UPDATE_REF(hand->mode_base.box);
-
-#undef UPDATE_REF
-		}
-
-		/* update parent references */
-		if (NULL != new->parent) {
-			struct box **child = new->parent->children;
-
-			while (into != *child)
-				++child;
-
-			*child = new;
-		} else {
-			root = new;
-		}
-
-		into = new;
-
-		/* update children references */
-		for (uint16_t i = 0; i < into->num_children; ++i) {
-			struct box *const child = into->children[i];
-			child->parent = new;
-		}
+	{
+		struct box *const new = realloc(into, offsetof(struct box, children[into->num_children + 1]));
+		into = move_box(new, into);
 	}
+
 	box->parent = into;
 	++into->num_children;
-	if (NULL != into->parent)
-		box->focus_lock = into->parent->focus_lock; /* inherit */
+	/* inherit some values from parent */
+	if (NULL != into->parent) {
+		box->focus_lock = into->parent->focus_lock;
+		box->body = into->parent->body;
+	}
 
 insert:
 	assert(pos <= into->num_children - 1);
@@ -1425,79 +1900,77 @@ insert:
 		(into->num_children - 1 - pos) * sizeof *into->children
 	);
 	into->children[pos] = box;
+	into->layout_changed = true;
 
-	if (NULL != boxparent) {
-		boxparent->layout_changed = true;
-		auto_delete_box(boxparent);
-	}
+	if (NULL != boxparent)
+		vaacum_box(boxparent);
 
 	if (into != boxparent)
 		box_update_focus_seq(into);
-
-	into->layout_changed = true;
-	return true;
 }
 
-static bool
-move_box(struct box *into, uint32_t const pos, struct box *box)
+static struct box*
+new_box(void)
 {
-	/* is monitor? */
-	if (box_is_monitor(into)) {
-		/* alread there */
-		if (into == box->parent) {
-			uint16_t leg_pos = 0;
-			while (into->children[leg_pos] != box)
-				++leg_pos;
+	struct box *box = calloc(1, sizeof *box + num_hands * sizeof(struct box_pointer_xy));
+	box->mod_x = 1;
+	box->mod_y = 1;
+	box->focus_hand = NULL_HAND;
+	return box;
+}
 
-			for (uint16_t i = 0; i < root->num_children; ++i) {
-				struct box *const head = root->children[i];
-				(void)move_box_(head, pos, head->children[leg_pos]);
-			}
+static void
+insert_box(struct box *into, uint32_t const pos, struct box *box)
+{
+	if (!box_is_monitor(into)) {
+		insert_box_(into, pos, box);
+		return;
+	}
 
-			return true;
-		}
+	/* if parent box is a monitor it needs special handling, namely:
+	 * - first,
+	 * - second.
+	 */
 
-		char *name;
+	/* alread there */
+	if (into == box->parent) {
+		uint16_t const pos = box_get_pos(box);
 
 		for (uint16_t i = 0; i < root->num_children; ++i) {
 			struct box *const head = root->children[i];
-			struct box *const leg = calloc(1, sizeof *leg);
-
-			if (0 == i) {
-				name_box(leg, true);
-				name = leg->name;
-			} else {
-				/* copy assigned name for further body_roots */
-				memcpy(leg->name, name, sizeof leg->name);
-			}
-
-			if (!move_box_(head, pos, leg)) {
-				assert(0);
-#if 0
-				while (i > 0)
-					delete_box(heads[--i].root->children[pos]);
-
-				return false;
-#endif
-			}
-
-			if (into == head) {
-				/* NOTE: |head| may be moved */
-				struct box *const head = root->children[i];
-				if (!move_box_(head->children[pos], 0, box)) {
-					assert(0);
-				}
-			}
+			insert_box_(head, pos, head->children[pos]);
 		}
 
-		return true;
+		return;
 	}
 
-	return move_box_(into, pos, box);
+	char *name;
+	for (uint16_t i = 0; i < root->num_children; ++i) {
+		struct box *const head = root->children[i];
+		struct box *const leg = new_box();
+
+		if (0 == i) {
+			name_box(leg, true);
+			name = leg->name;
+		} else {
+			/* copy assigned name for further body_roots */
+			memcpy(leg->name, name, sizeof leg->name);
+		}
+
+		/* leg->concealed = true; */
+
+		insert_box_(head, pos, leg);
+
+		if (into == head) {
+			/* NOTE: |head| may be moved */
+			struct box *const head = root->children[i];
+			insert_box_(head->children[pos], 0, box);
+		}
+	}
 }
 
-static void \
-box_set_focus_lock(struct box *const box, bool enable) \
+static void
+box_set_focus_lock(struct box *const box, bool const enable)
 {
 	if (enable != box->focus_lock) {
 		box->focus_lock = enable;
@@ -1505,61 +1978,32 @@ box_set_focus_lock(struct box *const box, bool enable) \
 	}
 }
 
-static struct box *
-box_screen(xcb_screen_t const *const screen)
-{
-	struct box *box = calloc(1, sizeof *box);
-
-	box->x = 0;
-	box->y = 0;
-	box->width = screen->width_in_pixels;
-	box->height = screen->height_in_pixels;
-
-	box->window = screen->root;
-	box->focus_lock = true;
-	box->layout_changed = true;
-
-	strncpy(box->name, "Q", sizeof box->name);
-
-	return box;
-}
-
 #if 0
-static struct box
-new_box(void)
-{
-	struct box *box = calloc(1, sizeof *box);
-	if (NULL == box)
-		return NULL;
+box->window = xcb_generate_id(conn);
 
-	box->window = xcb_generate_id(conn);
-
-	xcb_void_cookie_t const cookie =
-		xcb_create_window_checked(conn,
-			XCB_COPY_FROM_PARENT, /* depth */
-			box->window, /* window id */
-			screen->root, /* parent */
-			0, /* x */
-			0, /* y */
-			1000, /* width */
-			700, /* height */
-			0, /* border width */
-			XCB_WINDOW_CLASS_INPUT_OUTPUT, /* class */
-			screen->root_visual, /* visual */
-			0,
-			NULL);
-	if (!check_cookie(cookie)) {
-		return NULL;
-	}
-
-	xcb_change_window_attributes(conn, box->window, XCB_CW_EVENT_MASK, &(uint32_t const[]){
-		XCB_EVENT_MASK_STRUCTURE_NOTIFY |
-		XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
-		XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT
-	});
-
-	return box;
+xcb_void_cookie_t const cookie =
+	xcb_create_window_checked(conn,
+		XCB_COPY_FROM_PARENT, /* depth */
+		box->window, /* window id */
+		screen->root, /* parent */
+		0, /* x */
+		0, /* y */
+		1000, /* width */
+		700, /* height */
+		0, /* border width */
+		XCB_WINDOW_CLASS_INPUT_OUTPUT, /* class */
+		screen->root_visual, /* visual */
+		0,
+		NULL);
+if (!check_cookie(cookie)) {
+	return NULL;
 }
+
+xcb_change_window_attributes(conn, box->window, XCB_CW_EVENT_MASK, &(uint32_t const[]){
+	XCB_EVENT_MASK_STRUCTURE_NOTIFY |
+	XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
+	XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT
+	});
 #endif
 
 static void
@@ -1578,6 +2022,7 @@ increase_focus_seq(void)
 		box->focus_hand = i;
 
 		do {
+			box->content_changed = true;
 			box->focus_seq = root->focus_seq;
 			box->focus_changed |= box->focus_seq != old_focus_seq;
 		} while (NULL != (box = box->parent));
@@ -1587,11 +2032,13 @@ increase_focus_seq(void)
 static void
 swap_boxes(struct box *one, struct box *other)
 {
-	if (one == other)
+	if (NULL == one || NULL == other)
 		return;
 
 	printf("swap %.*s <-> mostrecent=%.*s\n", NAME_LEN, one->name, NAME_LEN, other->name);
 	printf("  %d %d rootfq=%d\n", one->focus_seq, other->focus_seq, root->focus_seq);
+	if (one == other)
+		return;
 
 	struct box **pone;
 	struct box **pother;
@@ -1611,81 +2058,124 @@ swap_boxes(struct box *one, struct box *other)
 }
 
 static void
+save_pointer(struct hand const *const hand, struct box *const box)
+{
+	struct body const *const body = &bodies[box->body];
+	GET_REPLY(reply, xcb_input_xi_query_pointer, conn, body->screen->root, hand->master_pointer);
+	if (NULL == reply)
+		return;
+
+	struct box_pointer_xy *const pointer =
+		&((struct box_pointer_xy *)&box->children[box->num_children])[hand - hands];
+
+	pointer->window = reply->child;
+	pointer->x = reply->win_x;
+	pointer->y = reply->win_y;
+
+	free(reply);
+}
+
+static void
 focus_box(struct hand *hand, struct box *box)
 {
-	if (NULL != hand->input_focus) {
-		GET_REPLY(pointer, xcb_input_xi_query_pointer, conn, hand->input_focus->window, hand->pointer);
-		if (NULL != pointer) {
-			/* hand->input_focus->pointer_x = reply->root_x;
-			hand->input_focus->pointer_y = reply->root_y; */
-			free(pointer);
-		}
-	}
+	if (NULL != hand->input_focus)
+		save_pointer(hand, hand->input_focus);
 
-	hand->focus = box->parent;
-	assert(hand->focus);
-	assert(box->num_children == 0);
-	hand->input_focus = box;
-	assert(!box_is_container(hand->input_focus) && "input_focus must be a client window");
+	if (NULL != hand->input_focus)
+		box_propagate_change(hand->input_focus);
+	else if (NULL != hand->focus)
+		box_propagate_change(hand->focus);
 
-	uint32_t const old_focus_seq = root->focus_seq;
-
-	/* TODO: correctly set hand->input_focus */
-	/* while (hand->input_focus-> */
-	
 	struct box *locked = box;
 	while (NULL != locked->parent && locked->parent->focus_lock)
 		locked = locked->parent;
 
-	printf("focus\n");
+	struct box *recents[2];
+	find_most_recent_box(hand, locked, root->focus_seq, recents, ARRAY_SIZE(recents));
+	if (locked != box && recents[0] != box)
+		swap_boxes(recents[1], recents[0]);
+
+	hand->focus = box;
+	hand->input_focus = !box_is_container(box)
+		? box
+		: recents[0];
+
+	uint32_t const old_focus_seq = root->focus_seq;
+
 	increase_focus_seq();
-	assert(box->focus_changed);
 
 	if (locked != box) {
-		struct box *const most_recent = find_most_recent_box(hand, locked, root->focus_seq);
-		if (NULL != most_recent)
-			swap_boxes(box, most_recent);
+		swap_boxes(box, recents[1]);
 		/* if there was no such box, that's not a problem: |box| will
 		 * be that beginning from now */
 	}
 
 }
 
+static struct body *
+get_body_by_root(xcb_window_t const root_window)
+{
+	struct body *body = bodies;
+	while (root_window != body->screen->root)
+		++body;
+	return body;
+}
+
+static void
+box_update_size_hints(struct box *const box, xcb_size_hints_t const *const hints)
+{
+	if (XCB_ICCCM_SIZE_HINT_P_RESIZE_INC & hints->flags) {
+		box->mod_y = hints->height_inc;
+		box->mod_x = hints->width_inc;
+	}
+}
+
 /* manage window */
 static struct box *
 box_window(xcb_window_t const root_window, xcb_window_t const window)
 {
-	printf("box\n");
-	struct box *box = calloc(1, sizeof *box);
-
 	CHECK(xcb_change_window_attributes, conn, window,
 			XCB_CW_EVENT_MASK,
 			&(uint32_t const []){
-				XCB_EVENT_MASK_KEY_PRESS
+				/* XCB_EVENT_MASK_KEY_PRESS */
+				XCB_EVENT_MASK_PROPERTY_CHANGE
 			});
 
-	xcb_get_property_cookie_t cookies[2];
-	void *values;
+	xcb_get_property_cookie_t cookies[] = {
+		xcb_get_property(conn, 0, window, ATOM(_NET_WM_STATE),       XCB_ATOM_ATOM,       0, 1),
+		xcb_get_property(conn, 0, window, XCB_ATOM_WM_TRANSIENT_FOR, XCB_ATOM_WINDOW,     0, 1),
+		xcb_get_property(conn, 0, window, ATOM(WM_CLIENT_LEADER),    XCB_ATOM_WINDOW,     0, 1),
+		xcb_get_property(conn, 0, window, ATOM(WM_NORMAL_HINTS),     ATOM(WM_SIZE_HINTS), 0, 1),
+		/* cookies[2] = xcb_get_property(conn, 0, window, XCB_ATOM_WM_CLASS, XCB_ATOM_STRING, 0, 1); */
+	};
+
+	struct box *box = new_box();
+	box->window = window;
+
 	xcb_get_property_reply_t *reply;
-	xcb_window_t transient_for = XCB_WINDOW_NONE;
+
 	xcb_atom_t state = XCB_ATOM_NONE;
-
-	cookies[0] = xcb_get_property(conn, 0, window, ATOM_NET_WM_STATE,         XCB_ATOM_ATOM,   0, 1);
-	cookies[1] = xcb_get_property(conn, 0, window, XCB_ATOM_WM_TRANSIENT_FOR, XCB_ATOM_WINDOW, 0, 1);
-	/* cookies[2] = xcb_get_property(conn, 0, window, XCB_ATOM_WM_CLASS, XCB_ATOM_STRING, 0, 1); */
-
 	if (NULL != (reply = xcb_get_property_reply(conn, cookies[0], NULL))) {
 		state = *(xcb_atom_t const *)xcb_get_property_value(reply);
 		free(reply);
 	}
+
+	xcb_window_t transient_for = XCB_WINDOW_NONE;
 	if (NULL != (reply = xcb_get_property_reply(conn, cookies[1], NULL))) {
 		transient_for = *(xcb_window_t const *)xcb_get_property_value(reply);
 		free(reply);
 	}
 
-	printf("box %d\n", window);
-	box->window = window;
-	/* box->frame = XCB_WINDOW_NONE; */
+	xcb_window_t leader = XCB_WINDOW_NONE;
+	if (NULL != (reply = xcb_get_property_reply(conn, cookies[2], NULL))) {
+		leader = *(xcb_window_t const *)xcb_get_property_value(reply);
+		free(reply);
+	}
+
+	if (NULL != (reply = xcb_get_property_reply(conn, cookies[3], NULL))) {
+		box_update_size_hints(box, xcb_get_property_value(reply));
+		free(reply);
+	}
 
 	struct hand *hand = NULL;
 	struct box *parent = NULL;
@@ -1696,6 +2186,8 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 		struct box *box = NULL;
 		if (XCB_WINDOW_NONE != transient_for)
 			box = find_box_by_window(root, root, transient_for);
+		if (NULL == box && XCB_WINDOW_NONE != leader)
+			box = find_box_by_window(root, root, leader);
 
 		/* find the hand that could possibly created this window */
 		if (NULL != box) {
@@ -1718,6 +2210,7 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 				/* inactive window opened another window so do not focus */
 			}
 		} else {
+			/* we use first hand even if its auto_focus is off */
 			hand = &hands[0];
 			for (uint8_t i = 0; i < num_hands; ++i) {
 				if (hands[i].auto_focus) {
@@ -1728,17 +2221,31 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 			focus = hand->auto_focus;
 		}
 
-		assert(focus <= (mode_default == hand->mode || mode_default_label_boxes == hand->mode) && "should not focus window when not in default mode");
-		parent = hand->focus;
+		assert(focus <= (mode_default == hand->mode || mode_boxes == hand->mode) && "should not focus window when not in default mode");
+		if (NULL != hand->focus) {
+			parent = hand->focus;
+			if (!box_is_container(parent))
+				parent = parent->parent;
+			pos = 0;
+
+			struct box *child = hand->input_focus;
+			if (NULL != child) {
+				/* place after currently focused hand */
+				while (parent != child->parent)
+					child = child->parent;
+
+				while (pos < parent->num_children &&
+				       parent->children[pos++] != child);
+			}
+		}
+
 	}
 
 	if (NULL == parent) {
 		assert(root->num_children && "no monitors");
 
-		/* get default monitor (0th) of screen with |root_window| */
-		struct body *body = bodies;
-		while (root_window != body->screen->root)
-			++body;
+		/* get primary monitor (will be the first) of screen with |root_window| */
+		struct body *body = get_body_by_root(root_window);
 		struct box **head = root->children;
 		while ((body - bodies) != (*head)->body)
 			++head;
@@ -1751,57 +2258,23 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 		pos = parent->num_children;
 	}
 
-	if (NULL != hand) {
-		/* place after currently focused hand */
-		for (pos = 0;
-		     pos < parent->num_children &&
-		     parent->children[pos++] != hand->input_focus;);
-	}
+	insert_box(parent, pos, box);
 
-	move_box(parent, pos, box);
-
-	box->name[0] = 'a';
+	box->name[0] = 'a' - 1;
 	if (NULL != hand && (NULL == hand->focus || focus))
 		focus_box(hand, box);
 	box->name[0] = 0;
 
 	name_box(box, false);
+
+	ewmh_append_client_list(box);
+
 	return box;
-}
-
 #if 0
-static void
-manage_client(xcb_window_t window)
-{
-	printf("manage %d\n", window);
-
-	xcb_void_cookie_t cookie;
-
-	/* tell X server not to destroy this subwindow when our window manager
-	 * terminates; such windows will be reparented to root */
 	xcb_change_save_set(conn, XCB_SET_MODE_INSERT, window);
-
 	cookie = xcb_reparent_window_checked(conn, window, box->window, 0, 0);
-	if (!check_cookie(cookie)) {
-		return;
-	}
-
-	cookie = xcb_map_window_checked(conn, window);
-	if (!check_cookie(cookie)) {
-		/* window may be destroyed */
-		return;
-	}
-
-	cookie = xcb_map_window_checked(conn, box->window);
-	if (!check_cookie(cookie)) {
-		return;
-	}
-
-	auto_name_box(box);
-
-	printf("managed\n");
-}
 #endif
+}
 
 static void
 setup_sighandlers(void)
@@ -1816,7 +2289,7 @@ setup_sighandlers(void)
 	 * .B SIGHUP
 	 * Restart program, by replacing program image with itself.
 	 */
-	sa.sa_handler = sigrestart;
+	sa.sa_handler = handle_signal_restart;
 	sigaction(SIGHUP, &sa, NULL);
 
 	/*MAN(SIGNALS)
@@ -1824,7 +2297,7 @@ setup_sighandlers(void)
 	 * .B SIGINT, SIGTERM
 	 * Terminate program gracefully.
 	 */
-	sa.sa_handler = sigbye;
+	sa.sa_handler = handle_signal_quit;
 	sigaction(SIGINT, &sa, NULL);
 	sigaction(SIGTERM, &sa, NULL);
 
@@ -1834,24 +2307,82 @@ setup_sighandlers(void)
 }
 
 static void
-fd_set_cloexec(int const fd)
-{
-	if (-1 == fcntl(fd, F_SETFD, fcntl(fd, F_GETFD) | FD_CLOEXEC))
-		perr("fcntl");
-}
+update_hands(void);
 
 static void
-update_inputs(void);
+init_extensions(void)
+{
+	xcb_query_extension_reply_t const *ext;
+
+	xcb_prefetch_extension_data(conn, &xcb_input_id);
+	xcb_prefetch_extension_data(conn, &xcb_randr_id);
+	xcb_prefetch_extension_data(conn, &xcb_shape_id);
+	xcb_prefetch_extension_data(conn, &xcb_xkb_id);
+
+	ext = xcb_get_extension_data(conn, &xcb_input_id);
+	if (!ext->present)
+		fprintf(stderr,
+				"%s: XInput extension missing."
+				" Input will not work.\n",
+				program);
+	else
+		xi_opcode = ext->major_opcode;
+
+	ext = xcb_get_extension_data(conn, &xcb_randr_id);
+	if (!ext->present)
+		fprintf(stderr,
+				"%s: RandR extension missing."
+				" Multi-head display will not work properly.\n",
+				program);
+	else
+		randr_base_event = ext->first_event;
+
+	ext = xcb_get_extension_data(conn, &xcb_shape_id);
+	if (!ext->present)
+		fprintf(stderr,
+				"%s: Shape extension missing."
+				" Labels will look crappy.\n",
+				program);
+
+	ext = xcb_get_extension_data(conn, &xcb_xkb_id);
+	if (!ext->present) {
+		fprintf(stderr,
+				"%s: XKB extension missing."
+				" Keyboard input will not work.\n",
+				program);
+	} else {
+		xkb_base_event = ext->first_event;
+
+		/* initialize */
+		xcb_xkb_use_extension_reply_t *const reply = xcb_xkb_use_extension_reply(conn,
+				xcb_xkb_use_extension_unchecked(conn, XCB_XKB_MAJOR_VERSION, XCB_XKB_MINOR_VERSION),
+				NULL);
+		if (!reply->supported) {
+			fprintf(stderr,
+					"%s: Requested XKB version %d.%d not supported by server; got %d.%d."
+					" Keyboard input may not work.\n",
+					program,
+					XCB_XKB_MAJOR_VERSION, XCB_XKB_MINOR_VERSION,
+					reply->serverMajor, reply->serverMinor);
+		}
+
+		free(reply);
+
+		xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+	}
+}
 
 static void
 connect_display(void)
 {
 	while (xcb_connection_has_error((conn = xcb_connect(NULL, &default_screen)))) {
 		if (NULL != getenv("DISPLAY")) {
-			fprintf(stderr, "could not open display %s\n",
-					getenv("DISPLAY"));
+			fprintf(stderr,
+					"%s: Could not open display %s.\n",
+					program, getenv("DISPLAY"));
 		} else {
-			fprintf(stderr, "DISPLAY is not set\n");
+			fprintf(stderr, "%s: DISPLAY is not set.\n",
+					program);
 
 			if (!setenv("DISPLAY", ":0", 0))
 				continue;
@@ -1860,80 +2391,24 @@ connect_display(void)
 		exit(EXIT_FAILURE);
 	}
 
-	root = calloc(1, sizeof *root);
+	root = new_box();
 
-	fd_set_cloexec(xcb_get_file_descriptor(conn));
-
-	intern_atoms();
+	init_atoms();
 
 	symbols = xcb_key_symbols_alloc(conn);
 
-	/* i3 xkb_x11_setup_xkb_extension */
-	/* xcb_xkb_use_extension_reply(conn,
-			xcb_xkb_use_extension_unchecked(conn, XCB_XKB_MAJOR_VERSION,
-				XCB_XKB_MINOR_VERSION); */
+	init_extensions();
 
-	for (xcb_query_extension_reply_t const *const xi = xcb_get_extension_data(conn, &xcb_input_id);;) {
-		if (!xi->present)
-			fprintf(stderr, "XInput extension missing; multi-hand will not work\n");
-
-		xi_opcode = xi->major_opcode;
-		break;
-	}
-
-	/* XCB_XKB_NEW_KEYBOARD_NOTIFY */
-
-	for (xcb_query_extension_reply_t const *const randr = xcb_get_extension_data(conn, &xcb_randr_id);;) {
-		if (!randr->present)
-			fprintf(stderr, "RandR extension missing; multi-head will not work\n");
-
-		randr_first_event = randr->first_event;
-		break;
-	}
-
+	if (NULL == (xrm = xcb_xrm_database_from_default(conn)))
+		fprintf(stderr,
+				"%s: Could not load X resources.\n",
+				program);
 
 	/* BROADCAST(connected, &(struct connected_args){ }); */
-
-#if 0
-	xcb_input_list_input_devices_reply_t *in =
-			xcb_input_list_input_devices_reply(conn, xcb_input_list_input_devices_unchecked(conn), NULL);
-	printf("device count=%d strlen=%d\n",
-			xcb_input_list_input_devices_infos_length(in),
-			xcb_input_list_input_devices_names_length(in));
-
-	;
-	for (xcb_input_device_info_iterator_t iter = xcb_input_list_input_devices_devices_iterator(in);
-	     0 < iter.rem;
-	     xcb_input_device_info_next(&iter))
-	{
-		xcb_input_device_info_t *const device = iter.data;
-
-		printf("  id=%d\n", device->device_id);
-		printf("  use=%d %d\n", device->device_use,
-				device->device_use == XCB_INPUT_DEVICE_USE_IS_X_EXTENSION_POINTER ||
-				device->device_use == XCB_INPUT_DEVICE_USE_IS_X_POINTER);
-	}
-#else
-
-#endif
-
-#if 0
-	xcb_xrm_database_t *database = xcb_xrm_database_from_default(conn);
-	if (NULL == database) {
-
-	}
-
-	char *value;
-	if (0 <= xcb_xrm_resource_get_string(database, "Xft.dpi", NULL, &value)) {
-		printf("val=%s\n", value);
-	}
-
-	xcb_xrm_database_free(database);
-#endif
 }
 
 static void
-manage_screen_windows(xcb_screen_t *screen)
+screen_query_windows(xcb_screen_t *screen)
 {
 	xcb_query_tree_reply_t *const reply =
 		xcb_query_tree_reply(conn,
@@ -1947,8 +2422,6 @@ manage_screen_windows(xcb_screen_t *screen)
 
 	xcb_get_window_attributes_cookie_t *const cookies =
 		malloc(num_children * sizeof *cookies);
-	if (NULL == cookies)
-		goto out_free_reply;
 
 	for (int i = 0; i < num_children; ++i)
 		cookies[i] = xcb_get_window_attributes_unchecked(conn, children[i]);
@@ -1956,7 +2429,6 @@ manage_screen_windows(xcb_screen_t *screen)
 	for (int i = 0; i < num_children; ++i) {
 		xcb_get_window_attributes_reply_t *const reply =
 			xcb_get_window_attributes_reply(conn, cookies[i], NULL);
-
 		if (NULL == reply)
 			continue;
 
@@ -1970,91 +2442,37 @@ manage_screen_windows(xcb_screen_t *screen)
 	}
 
 	free(cookies);
-
-out_free_reply:
 	free(reply);
-
-
-	/* xcb_randr_get_screen_resources_current_cookie_t rcookie = xcb_randr_get_screen_resources_current(conn, root);
-	xcb_randr_get_output_primary_cookie_t pcookie = xcb_randr_get_output_primary(conn, root); */
-
-	/* xcb_randr_get_output_primary_reply_t *primary = NULL;
-	xcb_randr_get_screen_resources_current_reply_t *res = NULL; */
-
-	/* if ((primary = xcb_randr_get_output_primary_reply(conn, pcookie, NULL)) == NULL) {
-	LOG("Could not determine the primary output.\n");
-	goto free_resources;
-	} */
-
-	/* if ((res = xcb_randr_get_screen_resources_current_reply(conn, rcookie, NULL)) == NULL) {
-	LOG("Could not query screen resources.\n");
-	goto free_resources;
-	} */
-
-
 }
 
 static void
-setup_screen_cursor(xcb_screen_t *screen)
+screen_setup_cursor(xcb_screen_t *const screen, char const *const cursor_name)
 {
 	xcb_cursor_context_t *ctx;
 
-	if (0 <= xcb_cursor_context_new(conn, screen, &ctx)) {
-		xcb_cursor_t const cursor = xcb_cursor_load_cursor(ctx, "default");
+	if (xcb_cursor_context_new(conn, screen, &ctx) < 0)
+		return;
 
-		xcb_change_window_attributes(conn, screen->root,
-				XCB_CW_CURSOR, &cursor);
+	xcb_cursor_t const cursor = xcb_cursor_load_cursor(ctx, cursor_name);
 
-		xcb_free_cursor(conn, cursor);
-		xcb_cursor_context_free(ctx);
-	}
+	CHECK(xcb_change_window_attributes, conn, screen->root,
+			XCB_CW_CURSOR, &cursor);
+
+	xcb_free_cursor(conn, cursor);
+	xcb_cursor_context_free(ctx);
 }
 
 static void
-setup_screen_keys(xcb_screen_t *screen)
+body_setup_screen(struct body *body)
 {
-#if 0
-	xcb_keycode_t *const keycodes = xcb_key_symbols_get_keycode(symbols, XK_space);
-
-	for (xcb_keycode_t const *keycode = keycodes;
-	     XCB_NO_SYMBOL != *keycode;
-	     ++keycode)
-		xcb_grab_key(conn, 1, screen->root,
-				XCB_NONE, *keycode,
-				XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
-	free(keycodes);
-#endif
-
-	/* xcb_grab_key(conn, 1, screen->root,
-			0, 133,
-			XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC); */
-/*
-	xcb_grab_key(conn, false, screen->root,
-			XCB_MOD_MASK_4, XCB_GRAB_ANY,
-			XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
-
-	xcb_grab_button(conn, false, screen->root,
-			XCB_EVENT_MASK_BUTTON_PRESS,
-			XCB_GRAB_MODE_SYNC, XCB_GRAB_MODE_ASYNC,
-			XCB_NONE,
-			XCB_NONE,
-			XCB_BUTTON_INDEX_1,
-			XCB_BUTTON_MASK_ANY); */
-
-}
-
-static void
-manage_body(struct body *body)
-{
-	xcb_screen_t *screen = body->screen;
+	xcb_screen_t *const screen = body->screen;
 
 	for (xcb_generic_error_t *error;
 	     NULL != (error = xcb_request_check(conn,
 			xcb_change_window_attributes_checked(conn, screen->root,
 				XCB_CW_EVENT_MASK,
 				&(uint32_t const []){
-					XCB_EVENT_MASK_EXPOSURE |
-					/* XCB_EVENT_MASK_FOCUS_CHANGE | */
+					/* XCB_EVENT_MASK_EXPOSURE | */
 					XCB_EVENT_MASK_PROPERTY_CHANGE |
 					XCB_EVENT_MASK_STRUCTURE_NOTIFY |
 					XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
@@ -2062,19 +2480,21 @@ manage_body(struct body *body)
 			})));)
 	{
 		if (XCB_ACCESS == error->error_code) {
-			fprintf(stderr, "fatal: running window manager detected\n");
+			fprintf(stderr,
+					"%s: Running window manager detected.\n",
+					program);
 			/* it is a fatal error because we have input devices
 			 * that we do not know if that WM handles or not that
-			 * could cause a conflict */
+			 * will surely cause conflict */
+			/* also: it can crash X */
 			exit(EXIT_FAILURE);
 		} else {
 			print_error(error, "");
 		}
-		return;
 	}
 
 	CHECK(xcb_input_xi_select_events, conn, screen->root, 1,
-		(xcb_input_event_mask_t const *)&(struct mask_values {
+			(xcb_input_event_mask_t const *)&(struct mask_values {
 				xcb_input_event_mask_t mask;
 				uint32_t values[1];
 			} const){
@@ -2093,12 +2513,10 @@ manage_body(struct body *body)
 		}
 	);
 
-	setup_screen_cursor(screen);
+	ewmh_delete_client_list(body);
 
-	manage_screen_windows(screen);
-
-	setup_screen_keys(screen);
-
+	screen_setup_cursor(screen, "default");
+	screen_query_windows(screen);
 }
 
 static xcb_visualtype_t *
@@ -2119,18 +2537,92 @@ lookup_visual_type(xcb_screen_t const *const screen)
 	return NULL;
 }
 
-static void
-update_monitors(struct body *const body)
+static struct box *
+find_head_by_name(uint8_t const body, char const *const name)
 {
-	/* TODO */
-	if (root->num_children > 0)
-		return;
+	if (NULL == name)
+		return NULL;
+
+	for (uint16_t i = 0; i < root->num_children; ++i) {
+		struct box *const head = root->children[i];
+		if (body != head->body)
+			continue;
+
+		if (NULL == head->title)
+			continue;
+
+		if (0 != strcmp(head->title, name))
+			continue;
+
+		return head;
+	}
+
+	return NULL;
+}
+
+static bool
+box_has_name(struct box const *const box)
+{
+	return !!box->name[0];
+}
+
+static void
+kill_head(struct box *const head)
+{
+	head->user_width = 0;
+}
+
+static bool
+head_is_alive(struct box const *const head)
+{
+	return 0 < head->user_width;
+}
+
+static void
+body_update_heads(struct body *const body)
+{
+	for (uint16_t i = 0; i < root->num_children; ++i) {
+		struct box *const head = root->children[i];
+		if ((body - bodies) != head->body)
+			continue;
+
+		kill_head(head);
+	}
 
 	GET_REPLY(monitors, xcb_randr_get_monitors, conn, body->screen->root, true);
-	if (NULL == monitors)
-		return;
+	if (NULL == monitors) {
+		fprintf(stderr,
+				"%s: Failed to query RandR monitors."
+				" Using whole screen.\n",
+				program);
+
+		struct box *const head = new_box();
+		head->window = body->screen->root;
+		head->title = "";
+		insert_box_(root, 0, head);
+
+		name_box(head, true);
+
+		head->body = body - bodies;
+		head->user_width = body->screen->width_in_millimeters;
+		head->user_height = body->screen->height_in_millimeters;
+		box_set_size(head, body->screen->width_in_pixels, body->screen->height_in_pixels);
+		box_set_position(head, 0, 0);
+		goto vacuum;
+	}
 
 	int const num_monitors = xcb_randr_get_monitors_monitors_length(monitors);
+	assert(0 < num_monitors);
+
+	xcb_get_atom_name_cookie_t *cookies = malloc(num_monitors * sizeof *cookies);
+
+	for (xcb_randr_monitor_info_iterator_t iter = xcb_randr_get_monitors_monitors_iterator(monitors);
+	     0 < iter.rem;
+	     xcb_randr_monitor_info_next(&iter))
+	{
+		xcb_randr_monitor_info_t const *const monitor = iter.data;
+		cookies[iter.rem - 1] = xcb_get_atom_name_unchecked(conn, monitor->name);
+	}
 
 	for (xcb_randr_monitor_info_iterator_t iter = xcb_randr_get_monitors_monitors_iterator(monitors);
 	     0 < iter.rem;
@@ -2138,42 +2630,80 @@ update_monitors(struct body *const body)
 	{
 		xcb_randr_monitor_info_t const *const monitor = iter.data;
 
-		struct box *const head = calloc(1, sizeof *head);
-		head->window = body->screen->root;
-		head->x = monitor->x;
-		head->y = monitor->y;
-		head->width = monitor->width;
-		head->height = monitor->height;
+		xcb_get_atom_name_reply_t *const name_reply =
+			xcb_get_atom_name_reply(conn, cookies[iter.rem - 1], NULL);
+		char *name = NULL;
+		if (NULL != name_reply) {
+			int const len = xcb_get_atom_name_name_length(name_reply);
+			name = malloc(len + 1);
+			memcpy(name, xcb_get_atom_name_name(name_reply), len);
+			name[len] = '\0';
+		}
 
-		GET_REPLY(name, xcb_get_atom_name, conn, monitor->name);
+		free(name_reply);
 
-		int const len = xcb_get_atom_name_name_length(name);
-		head->title = malloc(len + 1);
-		if (NULL != head->title)
-			((char *)memcpy(head->title, xcb_get_atom_name_name(name), len))[len] = '\0';
+		struct box *head = find_head_by_name(NULL_BODY, name);
+		if (NULL == head) {
+			head = new_box();
+			head->window = body->screen->root;
+			head->title = name, name = NULL; /* move */
+			insert_box_(root, monitor->primary ? 0 : root->num_children, head);
+
+			/* if it is a primary monitor name it immediately;
+			 * non-primary monitors will be named in a second pass */
+			if (monitor->primary)
+				name_box(head, true);
+		}
+
+		head->body = body - bodies;
+		head->user_width = monitor->width_in_millimeters;
+		head->user_height = monitor->height_in_millimeters;
+		box_set_size(head, monitor->width, monitor->height);
+		box_set_position(head, monitor->x, monitor->y);
 
 		free(name);
-
-		move_box_(root, monitor->primary ? 0 : root->num_children, head);
 	}
 
+	free(cookies);
 	free(monitors);
+
+vacuum:
+	for (uint16_t i = 0; i < root->num_children; ++i) {
+		struct box *const head = root->children[i];
+
+		if (!box_has_name(head)) {
+			assert(head->body == (body - bodies));
+			name_box(head, true);
+		}
+
+		if (head_is_alive(head))
+			continue;
+
+		/* make it floating */
+		/* TODO */
+		head->x = 0;
+		head->y = 0;
+		head->user_width = 300;
+		head->user_height = 400;
+	}
+
+	root->content_changed = true;
 
 	assert(root->num_children);
 }
 
 static void
-manage_each_screen(void)
+setup_display(void)
 {
 	/* prevent windows from changing */
-	/* CHECK(xcb_grab_server, conn); */
+	CHECK(xcb_grab_server, conn);
 
 	xcb_setup_t const *const setup = xcb_get_setup(conn);
 
 	num_bodies = xcb_setup_roots_length(setup);
 	bodies = calloc(num_bodies, sizeof *bodies);
 
-	uint32_t i = 0;
+	int i = 0;
 	for (xcb_screen_iterator_t iter = xcb_setup_roots_iterator(setup);
 	     0 < iter.rem;
 	     ++i, xcb_screen_next(&iter))
@@ -2187,15 +2717,12 @@ manage_each_screen(void)
 		CHECK(xcb_randr_select_input, conn, screen->root,
 				XCB_RANDR_NOTIFY_MASK_SCREEN_CHANGE);
 
-		update_monitors(body);
-
-		manage_body(body);
+		/* we can manage windows only if we have some heads */
+		body_update_heads(body);
+		body_setup_screen(body);
 	}
 
-	/* CHECK(xcb_ungrab_server, conn); */
-
-	for (uint16_t i = 0; i < root->num_children; ++i)
-		name_box(root->children[i], true);
+	CHECK(xcb_ungrab_server, conn);
 }
 
 static void
@@ -2207,152 +2734,212 @@ handle_error(xcb_generic_error_t const *const event)
 static void
 handle_property_notify(xcb_property_notify_event_t const *const event)
 {
-	char *atom = xcb_get_atom_name_name(
-		xcb_get_atom_name_reply(conn, xcb_get_atom_name(conn, event->atom), NULL)
-	);
-	printf("w=%x %s\n", event->window, atom);
+	xcb_get_property_reply_t *reply;
+
+#define REQUEST_PROPERTY(object, type, length) \
+	if (NULL == (reply =  xcb_get_property_reply(conn, xcb_get_property(conn, 0, (object)->window, event->atom, (type), 0, (length)), NULL))) \
+		return;
+#define FIND_BOX \
+	struct box *const box = find_box_by_window(root, root, event->window); \
+	if (NULL == box) \
+		return;
+
+	if (ATOM(_NET_WM_NAME) == event->atom) {
+		FIND_BOX;
+		REQUEST_PROPERTY(box, XCB_ATOM_STRING, 128 / sizeof(uint32_t))
+
+		size_t const len = xcb_get_property_value_length(reply);
+		box->title = realloc(box->title, (len + 1) * sizeof(char));
+		memcpy(box->title, xcb_get_property_value(reply), len);
+		box->title[len] = '\0';
+	} else if (ATOM(WM_NORMAL_HINTS) == event->atom) {
+		FIND_BOX;
+		REQUEST_PROPERTY(box, ATOM(WM_SIZE_HINTS), sizeof(xcb_size_hints_t) / sizeof(uint32_t));
+
+		box_update_size_hints(box, xcb_get_property_value(reply));
+	}
+
+#undef FIND_BOX
+#undef REQUEST_PROPERTY
 }
 
 static void
 handle_input_focus_out(xcb_input_focus_out_event_t const *const event)
 {
-	/* assert(0); */
 	printf("focus out from %d\n", event->event);
-	/* CHECK(xcb_input_xi_set_focus, conn, event->event, XCB_CURRENT_TIME, event->sourceid); */
-	/* xcb_input_xi_set_client_pointer(conn, focus->window, hand->pointer); */
+}
 
-	/* update_focus(); */
+static bool
+hand_get_grab_state(struct hand const *const hand)
+{
+	return hand->auto_focus || (mode_default != hand->mode && mode_boxes != hand->mode);
 }
 
 static void
-grab_hand_keyboard(xcb_window_t root, xcb_input_device_id_t deviceid, bool grab_all)
+hand_grab_pointer(struct hand const *const hand)
 {
-	printf("GRAB: %d\n", grab_all);
-	if (grab_all) {
-		/* listen for every key so we can record whether input
-		 * happened at the current window or not */
-		xcb_input_xi_passive_grab_device(conn, XCB_CURRENT_TIME, root,
-				XCB_CURSOR_NONE, XCB_GRAB_ANY,
-				deviceid, 1, 1,
-				XCB_INPUT_GRAB_TYPE_KEYCODE,
+	for (uint8_t i = 0; i < num_bodies; ++i) {
+		struct body *const body = &bodies[i];
+		xcb_window_t const root_window = body->screen->root;
+
+		xcb_input_xi_passive_grab_device(conn, XCB_CURRENT_TIME, root_window,
+				XCB_CURSOR_NONE,
+				/*button */1,
+				hand->master_pointer, 1, 1,
+				XCB_INPUT_GRAB_TYPE_BUTTON,
 				XCB_INPUT_GRAB_MODE_22_SYNC,
 				XCB_INPUT_GRAB_MODE_22_ASYNC,
 				false,
 				&(uint32_t const){
-					XCB_INPUT_XI_EVENT_MASK_KEY_PRESS |
-					XCB_INPUT_XI_EVENT_MASK_KEY_RELEASE
+					XCB_INPUT_XI_EVENT_MASK_BUTTON_PRESS
 				},
 				&(uint32_t const){
-					XCB_INPUT_MODIFIER_MASK_ANY
+					XCB_MOD_MASK_4
 				});
+	}
+}
 
-	} else {
-		/* or just grab enter */
-		/* NOTE: because we previously grabbed every key we can
-		 * undo it if we ungrab all keys. however it also
-		 * contains our WM specific Super+... keys too, that we
-		 * do not want to remove, so we need to add them back */
-		xcb_input_xi_passive_ungrab_device(conn, root, XCB_GRAB_ANY, deviceid,
-			1, XCB_INPUT_GRAB_TYPE_KEYCODE, &(uint32_t const){
-				XCB_INPUT_MODIFIER_MASK_ANY
-			});
+static void
+hand_grab_keyboard(struct hand const *const hand)
+{
+	for (uint8_t i = 0; i < num_bodies; ++i) {
+		struct body *const body = &bodies[i];
+		xcb_window_t const root_window = body->screen->root;
 
-		xcb_keycode_t *const keycodes = xcb_key_symbols_get_keycode(symbols, XKB_KEY_Return);
-
-		for (xcb_keycode_t const *keycode = keycodes;
-		     XCB_NO_SYMBOL != *keycode;
-		     ++keycode)
-		{
-			xcb_input_xi_passive_grab_device(conn, XCB_CURRENT_TIME, root,
-					XCB_CURSOR_NONE, *keycode,
-					deviceid, 1, 1,
+		if (hand_get_grab_state(hand)) {
+			printf(">> grab all\n");
+			/* listen for every key so we can record whether input
+			 * happened at the current window or not */
+			xcb_input_xi_passive_grab_device(conn, XCB_CURRENT_TIME, root_window,
+					XCB_CURSOR_NONE, XCB_GRAB_ANY,
+					hand->master_keyboard, 1, 1,
 					XCB_INPUT_GRAB_TYPE_KEYCODE,
 					XCB_INPUT_GRAB_MODE_22_SYNC,
 					XCB_INPUT_GRAB_MODE_22_ASYNC,
 					false,
 					&(uint32_t const){
-						XCB_INPUT_XI_EVENT_MASK_KEY_PRESS
+						XCB_INPUT_XI_EVENT_MASK_KEY_PRESS  /* | */
+						/* XCB_INPUT_XI_EVENT_MASK_KEY_RELEASE */
 					},
 					&(uint32_t const){
 						XCB_INPUT_MODIFIER_MASK_ANY
 					});
-		}
 
-		free(keycodes);
+		} else {
+			printf(">> UNgrab all\n");
+			/* or just grab enter */
+			/* NOTE: because we previously grabbed every key we can
+			 * undo it if we ungrab all keys. however it also
+			 * contains our WM specific Super+... keys too, that we
+			 * do not want to remove, so we need to add them back */
+			xcb_input_xi_passive_ungrab_device(conn, root_window, XCB_GRAB_ANY, hand->master_keyboard,
+				1, XCB_INPUT_GRAB_TYPE_KEYCODE, &(uint32_t const){
+					XCB_INPUT_MODIFIER_MASK_ANY
+				});
 
-		uint32_t const MASKS[] = {
-			0,
-			XCB_MOD_MASK_SHIFT,
-			XCB_MOD_MASK_CONTROL,
-			XCB_MOD_MASK_1,
-		};
+			xcb_keycode_t *const keycodes = xcb_key_symbols_get_keycode(symbols, XKB_KEY_Return);
 
-		for (uint8_t i = 0; i < ARRAY_SIZE(MASKS); ++i) {
-			xcb_input_xi_passive_grab_device(conn, XCB_CURRENT_TIME, root,
-					XCB_CURSOR_NONE, XCB_GRAB_ANY,
-					deviceid, 1, 1,
-					XCB_INPUT_GRAB_TYPE_KEYCODE,
-					XCB_INPUT_GRAB_MODE_22_SYNC,
-					XCB_INPUT_GRAB_MODE_22_ASYNC,
-					false,
-					&(uint32_t const){
-						XCB_INPUT_XI_EVENT_MASK_KEY_PRESS
-					},
-					&(uint32_t const){
-						XCB_MOD_MASK_4 | MASKS[i]
-					});
+			for (xcb_keycode_t const *keycode = keycodes;
+			     XCB_NO_SYMBOL != *keycode;
+			     ++keycode)
+			{
+				xcb_input_xi_passive_grab_device(conn, XCB_CURRENT_TIME, root_window,
+						XCB_CURSOR_NONE, *keycode,
+						hand->master_keyboard, 1, 1,
+						XCB_INPUT_GRAB_TYPE_KEYCODE,
+						XCB_INPUT_GRAB_MODE_22_SYNC,
+						XCB_INPUT_GRAB_MODE_22_ASYNC,
+						false,
+						&(uint32_t const){
+							XCB_INPUT_XI_EVENT_MASK_KEY_PRESS
+						},
+						&(uint32_t const){
+							XCB_INPUT_MODIFIER_MASK_ANY
+						});
+			}
+
+			free(keycodes);
+
+			uint32_t const MASKS[] = {
+				0,
+				XCB_MOD_MASK_SHIFT,
+				XCB_MOD_MASK_CONTROL,
+				XCB_MOD_MASK_1,
+			};
+
+			for (uint8_t i = 0; i < ARRAY_SIZE(MASKS); ++i) {
+				xcb_input_xi_passive_grab_device(conn, XCB_CURRENT_TIME, root_window,
+						XCB_CURSOR_NONE, XCB_GRAB_ANY,
+						hand->master_keyboard, 1, 1,
+						XCB_INPUT_GRAB_TYPE_KEYCODE,
+						XCB_INPUT_GRAB_MODE_22_SYNC,
+						XCB_INPUT_GRAB_MODE_22_ASYNC,
+						false,
+						&(uint32_t const){
+							XCB_INPUT_XI_EVENT_MASK_KEY_PRESS
+						},
+						&(uint32_t const){
+							XCB_MOD_MASK_4 | MASKS[i]
+						});
+			}
 		}
 	}
 }
 
+static struct hand *
+get_hand_from_master_keyboard(xcb_input_device_id_t const master_keyboard)
+{
+	/* FIXME: if we can receive master devices, remove this check */
+	for (uint8_t i = 0; i < num_hands; ++i) {
+		struct hand *hand = &hands[i];
+		if (master_keyboard == hand->master_keyboard)
+			return hand;
+	}
+
+	/* FIXME: ... and this */
+	return NULL;
+}
 
 static void
 handle_input_focus_in(xcb_input_focus_in_event_t const *const event)
 {
-	/* TODO */
-	/* clear current box->pointers[hand index] because we do not already
-	 * want to restore it to that value */
-
-	/* printf(">>>>> focus in <<<<<<<\n"); */
-	/* the first character updates head->latest_input */
-	/* grab_hand_keyboard(event->root, event->deviceid, true); */
+	struct hand *const hand = get_hand_from_master_keyboard(event->deviceid);
+	/* stole back the focus */
+	if (event->child != hand_get_wanted_focus_window(hand))
+		update_focus(hand);
 }
 
 static void
 handle_unmap_notify(xcb_unmap_notify_event_t const *const event)
 {
-	for (struct box *start = root, *box;
-	     NULL != (box = find_box_by_window(root, start, event->window));)
-	{
-		start = box->parent;
-		assert(NULL != start && "root box unmapped by X server");
+	struct box *box;
+	if (NULL != (box = find_box_by_window(root, root, event->window)))
 		delete_box(box);
-		break;
-	}
-
-	do_update();
 }
 
 static void
 handle_map_request(xcb_map_request_event_t const *const event)
 {
 	box_window(event->parent, event->window);
-
-	do_update();
 }
 
 static void
 handle_configure_notify(xcb_configure_notify_event_t const *const event)
 {
 #if 0
-	for (uint32_t i = 0; i < num_heads; ++i) {
-		struct head const *const head = &heads[i];
-		if (event->window != head->screen->root)
+	struct body *body = bodies
+	while (body->screen->root != event->event)
+		++body;
+
+	for (uint16_t i = 0; i < num_heads; ++i) {
+		struct box *const head = &heads[i];
+		if ((body - bodies) != head->body)
 			continue;
 
-		box_set_size(head->root, event->width, event->height);
-		do_update();
+		struct box *const box = find_box_by_window(head, head, event->window);
 
+		box->user_x = event->x;
+		box->user_y = event->y;
 		break;
 	}
 #endif
@@ -2377,160 +2964,6 @@ handle_expose(xcb_expose_event_t const *const event)
 }
 
 static void
-handle_mapping_notify(xcb_mapping_notify_event_t *const event)
-{
-	for (uint8_t i = 0; i < num_bodies; ++i) {
-		struct body const *const body = &bodies[i];
-
-		/* xcb_ungrab_key(conn, XCB_GRAB_ANY, head->screen->root, XCB_BUTTON_MASK_ANY); */
-
-		xcb_refresh_keyboard_mapping(symbols, event);
-
-		setup_screen_keys(body->screen);
-	}
-}
-
-static void
-handle_client_message(xcb_client_message_event_t const *const event)
-{
-	(void)event;
-}
-
-static struct hand *
-get_hand_from_pointer(xcb_input_device_id_t const pointer);
-
-static void
-update_inputs(void)
-{
-	GET_REPLY(devices, xcb_input_xi_query_device, conn,
-			XCB_INPUT_DEVICE_ALL);
-	if (NULL == devices)
-		return;
-
-	/* according to specification devices above 127 are invisible to clients */
-	uint8_t hand_map[128];
-
-	/* reassign boxes of deattached hands to an invalid hand */
-	memset(hand_map, 0xff, num_hands);
-
-	uint8_t new_num_hands = 0;
-	struct hand *const new_hands = calloc(xcb_input_xi_query_device_infos_length(devices), sizeof *new_hands);
-
-	for (xcb_input_xi_device_info_iterator_t iter = xcb_input_xi_query_device_infos_iterator(devices);
-	     0 < iter.rem;
-	     xcb_input_xi_device_info_next(&iter))
-	{
-		xcb_input_xi_device_info_t *const device = iter.data;
-
-		/* master devices are cursors on the screen. we only have to deal with them */
-		/* any slave device can control master */
-		if (XCB_INPUT_DEVICE_TYPE_MASTER_POINTER != device->type)
-			continue;
-
-		struct hand *const old_hand = get_hand_from_pointer(device->deviceid);
-
-		/* they are always come in pairs */
-		struct hand *const hand = &new_hands[new_num_hands++];
-
-		if (NULL != old_hand) {
-			memcpy(hand, old_hand, sizeof *hand);
-			/* grabbers are already setup and consistent; focus do
-			 * not have to be touched */
-			hand_map[old_hand - hands] = hand - new_hands;
-			continue;
-		}
-
-		hand->pointer = device->deviceid;
-		hand->keyboard = device->attachment;
-		hand->auto_focus = true;
-		hand->focus = NULL;
-		hand->input_focus = NULL;
-		hand->label_boxes = true;
-
-		for (uint8_t i = 0; i < num_bodies; ++i) {
-			struct body *const body = &bodies[i];
-			xcb_window_t const root_window = body->screen->root;
-
-			grab_hand_keyboard(root_window, hand->keyboard, hand->auto_focus);
-			xcb_input_xi_passive_grab_device(conn, XCB_CURRENT_TIME, root_window,
-					XCB_CURSOR_NONE,
-					1/* button 1 */,
-					new_hands[i].pointer, 1, 1,
-					XCB_INPUT_GRAB_TYPE_BUTTON,
-					XCB_INPUT_GRAB_MODE_22_SYNC,
-					XCB_INPUT_GRAB_MODE_22_ASYNC,
-					false,
-					&(uint32_t const){
-						XCB_INPUT_XI_EVENT_MASK_BUTTON_PRESS
-					},
-					&(uint32_t const){
-						XCB_MOD_MASK_4
-					});
-		}
-
-		update_focus(hand);
-	}
-
-	free(devices);
-
-	struct box *box;
-	for_each_box(box, root, root, {
-		box->focus_hand = hand_map[box->focus_hand];
-	});
-
-	/* refocus all boxes to forget focus of deattached hands */
-	increase_focus_seq();
-
-	free(hands), hands = new_hands;
-	num_hands = new_num_hands;
-
-	focus_all_hands(root->focus_seq);
-}
-
-static void
-handle_input_hierarchy_change(xcb_input_hierarchy_event_t const *const event)
-{
-	if (!(event->flags & (
-		XCB_INPUT_HIERARCHY_MASK_MASTER_ADDED |
-		XCB_INPUT_HIERARCHY_MASK_MASTER_REMOVED
-	)))
-		return;
-
-	update_inputs();
-}
-
-/*
-https://www.x.org/releases/X11R7.7/doc/inputproto/XI2proto.txt
-https://www.x.org/releases/X11R7.5/doc/randrproto/randrproto.txt
-*/
-
-static struct hand *
-get_hand_from_keyboard(xcb_input_device_id_t const keyboard)
-{
-	/* FIXME: if we can receive master devices, remove this check */
-	for (uint8_t i = 0; i < num_hands; ++i) {
-		struct hand *hand = &hands[i];
-		if (keyboard == hand->keyboard)
-			return hand;
-	}
-
-	/* FIXME: ... and this */
-	return NULL;
-}
-
-static struct hand *
-get_hand_from_pointer(xcb_input_device_id_t const pointer)
-{
-	for (uint8_t i = 0; i < num_hands; ++i) {
-		struct hand *hand = &hands[i];
-		if (pointer == hand->pointer)
-			return hand;
-	}
-
-	return NULL;
-}
-
-static void
 close_box(struct box *const box)
 {
 	assert(!box_is_container(box));
@@ -2551,14 +2984,250 @@ close_box(struct box *const box)
 				.type = ATOM_WM_PROTOCOLS,
 				.data = {
 					.data32 = {
-						ATOM_WM_DELETE_WINDOW,
+						ATOM(WM_DELETE_WINDOW),
 					}
 				}
 			});
 }
 
-static struct label *
-find_hand_label(struct hand *hand)
+static void
+handle_client_message(xcb_client_message_event_t const *const event)
+{
+	if (ATOM(_NET_CLOSE_WINDOW) == event->type) {
+		struct box *const box = find_box_by_window(root, root, event->window);
+		if (NULL != box)
+			close_box(box);
+	} else if (ATOM(_NET_ACTIVE_WINDOW) == event->type) {
+		if (2 != event->data.data32[0])
+			return;
+
+		struct box *const box = find_box_by_window(root, root, event->window);
+		if (NULL != box) {
+			struct hand *hand;
+			if (NULL_HAND == box->focus_hand) {
+				if (1 == num_hands)
+					hand = &hands[0];
+				else
+					return;
+			} else {
+				hand = &hands[box->focus_hand];
+			}
+			focus_box(hand, box);
+		}
+	}
+}
+
+static struct hand *
+find_hand_from_pointer(xcb_input_device_id_t const pointer);
+
+static bool
+load_resource(char **const value, char const *const format, ...)
+{
+	if (NULL == xrm)
+		return false;
+
+	va_list argp;
+
+	va_start(argp, format);
+
+	char name[vsnprintf(NULL, 0, format, argp) + 1/*NULL*/];
+	vsprintf(name, format, argp);
+
+	va_end(argp);
+
+	return 0 == xcb_xrm_resource_get_string(xrm, name, NULL, value);
+}
+
+static void
+update_hands(void)
+{
+	GET_REPLY(devices, xcb_input_xi_query_device, conn,
+			XCB_INPUT_DEVICE_ALL);
+	if (NULL == devices)
+		return;
+
+	/* map old hand indexes to new hand indexes for correct stack history */
+	/* according to specification devices above 127 are invisible to clients */
+	uint8_t hand_map[NULL_HAND + 1];
+
+	/* reassign boxes of deattached hands to an invalid hand */
+	memset(hand_map, NULL_HAND, num_hands);
+	hand_map[NULL_HAND] = NULL_HAND;
+
+	uint8_t new_num_hands = 0;
+	struct hand *const new_hands = calloc(xcb_input_xi_query_device_infos_length(devices), sizeof *new_hands);
+
+	for (xcb_input_xi_device_info_iterator_t iter = xcb_input_xi_query_device_infos_iterator(devices);
+	     0 < iter.rem;
+	     xcb_input_xi_device_info_next(&iter))
+	{
+		xcb_input_xi_device_info_t *const device = iter.data;
+
+		/* master devices are cursors on the screen. we only have to deal with them */
+		/* any slave device can control master */
+		if (XCB_INPUT_DEVICE_TYPE_MASTER_POINTER != device->type)
+			continue;
+
+		struct hand *const old_hand = find_hand_from_pointer(device->deviceid);
+
+		/* they are always come in pairs */
+		struct hand *const hand = &new_hands[new_num_hands++];
+
+		if (NULL != old_hand) {
+			memcpy(hand, old_hand, sizeof *hand);
+			/* grabbers are already setup and consistent; focus do
+			 * not have to be touched */
+			hand_map[old_hand - hands] = hand - new_hands;
+			/* NOTE: grabbing have been already set up */
+			continue;
+		}
+
+		char *value;
+		if (load_resource(&value, "heawm.color.hand.%zu", hand - hands)) {
+			sscanf(value, "0x%6x", &hand->color);
+			free(value);
+		} else {
+			hand->color = 0xfe0202, 0xffaf5f;
+		}
+
+		hand->master_pointer = device->deviceid;
+		hand->master_keyboard = device->attachment;
+		hand->auto_focus = true;
+		hand->focus = NULL;
+		hand->input_focus = NULL;
+		hand->label_boxes = true;
+
+		assert(0 < num_bodies);
+
+		hand_grab_pointer(hand);
+		hand_grab_keyboard(hand);
+
+		uint32_t const mask =
+			/* send good state in events */
+			XCB_XKB_PER_CLIENT_FLAG_GRABS_USE_XKB_STATE |
+			XCB_XKB_PER_CLIENT_FLAG_LOOKUP_STATE_WHEN_GRABBED;
+
+		xcb_xkb_per_client_flags(conn,
+				hand->master_keyboard,
+				mask,
+				mask,
+				0, 0, 0);
+
+		/* xkbcommon-x11 */
+		uint16_t const REQUIRED_EVENTS =
+			XCB_XKB_EVENT_TYPE_MAP_NOTIFY |
+			XCB_XKB_EVENT_TYPE_NEW_KEYBOARD_NOTIFY;
+		uint16_t const REQUIRED_MAP_PARTS =
+			XCB_XKB_MAP_PART_KEY_TYPES |
+			XCB_XKB_MAP_PART_KEY_SYMS |
+			XCB_XKB_MAP_PART_MODIFIER_MAP |
+			XCB_XKB_MAP_PART_EXPLICIT_COMPONENTS |
+			XCB_XKB_MAP_PART_KEY_ACTIONS |
+			XCB_XKB_MAP_PART_VIRTUAL_MODS |
+			XCB_XKB_MAP_PART_VIRTUAL_MOD_MAP;
+
+		CHECK(xcb_xkb_select_events, conn, hand->master_keyboard,
+				REQUIRED_EVENTS,
+				0,
+				REQUIRED_EVENTS,
+				REQUIRED_MAP_PARTS,
+				REQUIRED_MAP_PARTS,
+				NULL);
+
+		/* it is safe to call because we know that hand currently
+		 * has no focus */
+		update_focus(hand);
+	}
+
+	free(devices);
+
+	/* update focus history */
+	struct box *box;
+	for_each_box(box, root, root, {
+		box->focus_hand = hand_map[box->focus_hand];
+
+		if (!box_is_container(box)) {
+			struct box_pointer_xy xys[num_hands];
+			{
+				struct box *const new = realloc(box, sizeof(struct box) + new_num_hands * sizeof(struct box_pointer_xy));
+				box = move_box(new, box);
+			}
+
+			/* HACK: find out why memmove() does not work */
+			memcpy(xys, box + 1, num_hands * sizeof(struct box_pointer_xy));
+			memset(box + 1, 0, num_hands * sizeof(struct box_pointer_xy));
+
+			struct box_pointer_xy *pointers = (void *)(box + 1);
+			for (uint8_t i = 0; i < num_hands; ++i) {
+				if (NULL_HAND == hand_map[i])
+					continue;
+				pointers[hand_map[i]] = xys[i];
+			}
+		}
+	});
+
+	/* forget deattached hands' focus by incrementing focus number of
+	 * hands alive */
+	increase_focus_seq();
+
+	free(hands), hands = new_hands;
+	num_hands = new_num_hands;
+
+	focus_all_hands(root->focus_seq);
+}
+
+static void
+handle_input_hierarchy_change(xcb_input_hierarchy_event_t const *const event)
+{
+#if 0
+	for (xcb_input_hierarchy_info_iterator_t iter = xcb_input_hierarchy_infos_iterator(event);
+	     0 < iter.rem;
+	     xcb_input_hierarchy_info_next(&iter))
+	{
+		xcb_input_hierarchy_info_t const *const info = iter.data;
+		printf("handle_input_hierarchy_change: %d %d %d\n", info->deviceid, info->attachment, info->type);
+	}
+	printf("%x ---------\n", event->flags);
+#endif
+
+	if (event->flags & (XCB_INPUT_HIERARCHY_MASK_MASTER_ADDED |
+	                    XCB_INPUT_HIERARCHY_MASK_MASTER_REMOVED))
+		update_hands();
+}
+
+static struct hand *
+find_hand_from_pointer(xcb_input_device_id_t const master_pointer)
+{
+	for (uint8_t i = 0; i < num_hands; ++i) {
+		struct hand *hand = &hands[i];
+		if (master_pointer == hand->master_pointer)
+			return hand;
+	}
+
+	return NULL;
+}
+
+static void
+clear_hand_labels(struct hand *hand)
+{
+	for (uint8_t i = 0; i < num_bodies; ++i) {
+		struct body *const body = &bodies[i];
+		for (uint32_t j = 0; j < body->num_labels_used; ++j) {
+			struct label *const label = &body->labels[j];
+			if ((hand - hands) != label->hand)
+				continue;
+
+			struct label const tmp = *label;
+			body->labels[j] = body->labels[--body->num_labels_used];
+			body->labels[body->num_labels_used] = tmp;
+		}
+	}
+
+}
+
+/* TODO: accept numbers and minus prefix */
+static bool
+hand_input_find_label(struct hand *hand, struct label **out)
 {
 	uint8_t n = strnlen(hand->user_input, NAME_LEN);
 	if (n < NAME_LEN)
@@ -2568,13 +3237,15 @@ find_hand_label(struct hand *hand)
 		struct body const *const body = &bodies[i];
 		for (uint32_t j = 0; j < body->num_labels_used; ++j) {
 			struct label *const label = &body->labels[j];
-			if (0 == memcmp(label->name, hand->user_input, n))
-				return label;
+			if (0 != memcmp(label->name, hand->user_input, n))
+				continue;
+			*out = label;
+			return true;
 		}
 	}
 
 	memset(hand->user_input, 0, sizeof hand->user_input);
-	return NULL;
+	return false;
 }
 
 static void
@@ -2597,13 +3268,23 @@ hand_set_timeout(struct hand *const hand, int const timeout_ms)
 
 }
 
+/** modifiers we are interested in */
+#define KEY_MOD_MASK ( \
+	XCB_MOD_MASK_CONTROL | \
+	XCB_MOD_MASK_1       | \
+	XCB_MOD_MASK_2       | \
+	XCB_MOD_MASK_3       | \
+	XCB_MOD_MASK_4       | \
+	XCB_MOD_MASK_5       )
+
+#if 0
 static void
 handle_input_key_release(xcb_input_key_press_event_t const *const event)
 {
 	xcb_keysym_t const sym = xcb_key_symbols_get_keysym(symbols, event->detail, event->mods.effective & XCB_MOD_MASK_SHIFT);
 
 	printf("kep\n");
-	struct hand *const hand = get_hand_from_keyboard(event->deviceid);
+	struct hand *const hand = get_hand_from_master_keyboard(event->deviceid);
 #ifndef HEAWM_NDEBUG
 	/* FIXME: just under Xephyr but root key press reports slave device */
 	if (!hand)
@@ -2612,9 +3293,8 @@ handle_input_key_release(xcb_input_key_press_event_t const *const event)
 
 	if (XKB_KEY_Super_L == sym || XKB_KEY_Super_R == sym) {
 		hand_set_timeout(hand, -1);
-		if (mode_default_label_boxes == hand->mode)
+		if (mode_boxes == hand->mode)
 			hand->mode = mode_default;
-		do_update();
 	}
 
 out:
@@ -2623,16 +3303,411 @@ out:
 			0, 0);
 
 }
+#endif
+
+static void
+hand_handle_input_key_normal(struct hand *const hand, xcb_keysym_t const sym)
+{
+	hand->auto_focus = XKB_KEY_Return == sym || XKB_KEY_KP_Enter == sym;
+
+	if (NULL != hand->input_focus) {
+		hand->input_focus->close_by_force = false;
+		hand->focus = hand->input_focus;
+
+		if (hand->latest_input[0] != hand->input_focus) {
+			hand->latest_input[1] = hand->latest_input[0];
+			hand->latest_input[0] = hand->input_focus;
+		}
+	}
+}
+
+static void
+hand_input_reset(struct hand *const hand)
+{
+	memset(hand->user_input, '\0', sizeof hand->user_input);
+}
+
+static void
+hand_input_try_jump(struct hand *const hand)
+{
+	printf("jump %.*s\n", 4, hand->user_input);
+
+	struct box *box;
+	if (!find_box_by_name(&box, hand->user_input))
+		return;
+
+	assert(box != root);
+
+	hand_input_reset(hand);
+
+	if (NULL == box)
+		return;
+
+	if (box == hand->input_focus)
+		box = hand->latest_input[box == hand->latest_input[0]];
+
+	if (NULL == box)
+		return;
+
+	focus_box(hand, box);
+}
+
+static bool
+hand_handle_input(struct hand *const hand, xcb_keysym_t const sym)
+{
+#define INPUT_BETWEEN(lower_char, lower, upper) \
+	((lower) <= sym && sym <= (upper)) \
+		hand->user_input[input_len] = (lower_char) + (sym - (lower))
+
+	uint8_t const input_len = strnlen(hand->user_input, NAME_LEN);
+	if INPUT_BETWEEN('a', XKB_KEY_a, XKB_KEY_z);
+	else if INPUT_BETWEEN('A', XKB_KEY_A, XKB_KEY_Z);
+	else if INPUT_BETWEEN('0', XKB_KEY_0, XKB_KEY_9);
+	else if INPUT_BETWEEN('0', XKB_KEY_KP_0, XKB_KEY_KP_9);
+	else return false;
+
+	return true;
+
+#undef INPUT_BETWEEN
+}
+
+static bool
+hand_handle_input_key_super(struct hand *const hand, xcb_keysym_t const sym)
+{
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B Mod+{a-zA-Z}...
+	 * Focus window by name. If there is no such window,
+	 * keybinding is treated like
+	 * .B Ctrl
+	 * was pressed.
+	 */
+	if (hand_handle_input(hand, sym)) {
+		hand_input_try_jump(hand);
+	} else switch (sym) {
+	case XKB_KEY_Return:
+		/*MAN(Keybindings)
+		 * .TP
+		 * .B Mod+Return
+		 * Open $
+		 * .B TERMINAL .
+		 */
+		if (0 == fork()) {
+			setsid(); /* move process into its own session */
+
+			char const *terminal;
+			(terminal = getenv("TERMINAL")) ||
+			(terminal = "xterm");
+
+			execlp(terminal, terminal, NULL);
+			perr("execlp");
+			_exit(127);
+		}
+		break;
+
+	default:
+		return true;
+	}
+
+	return false;
+}
+
+static void
+box_set_num_columns(struct box *const box, uint16_t const num_columns)
+{
+	assert(box_is_container(box));
+	if (num_columns == box->num_columns)
+		return;
+
+	box->num_columns = num_columns;
+	box->layout_changed = true;
+	box_propagate_change(box);
+}
+
+static void
+hand_handle_input_key_mode(struct hand *const hand, xcb_keysym_t const sym)
+{
+	struct label *label;
+
+	switch (hand->mode) {
+	case mode_default:
+	case mode_boxes:
+		unreachable;
+		return;
+
+	case mode_move_a:
+	case mode_move_b:
+		assert(!"TODO");
+		return;
+
+	case mode_size_side:
+	{
+		if (hand_input_find_label(hand, &label)) {
+			hand->mode = mode_size_to;
+			hand->mode_box = label->base;
+			return;
+		}
+		break;
+	}
+		return;
+
+	case mode_size_to:
+	{
+		if (hand_input_find_label(hand, &label)) {
+			return;
+		}
+	}
+		break;
+
+
+	case mode_name:
+	{
+		if (XKB_KEY_Return == sym ||
+		    NAME_LEN == strnlen(hand->user_input, NAME_LEN))
+		{
+			if (NULL != hand->input_focus) {
+				bool const iscontainer = box_is_container(hand->input_focus);
+				memcpy(hand->input_focus->name, hand->user_input, NAME_LEN);
+				char *const c = &hand->input_focus->name[0];
+				if (iscontainer)
+					*c &= ~0x20;
+				else
+					*c |= 0x20;
+				name_box(hand->input_focus, iscontainer);
+				assert(box_is_container(hand->input_focus) == iscontainer);
+			}
+			break;
+		}
+	}
+		return;
+
+	case mode_setcolumns:
+	{
+		uint16_t num_columns;
+		if (hand_input_find_label(hand, &label)) {
+			if (NULL == label)
+				return;
+
+			for (num_columns = 0;
+			     hand->mode_box->children[num_columns++] != label->base;);
+
+			if (num_columns == hand->mode_box->num_children)
+				num_columns = UINT16_MAX;
+		} else switch (sym) {
+		case XKB_KEY_equal:
+			num_columns = 0;
+			break;
+
+		case XKB_KEY_slash:
+			num_columns = 1;
+			break;
+
+		case XKB_KEY_asterisk:
+			num_columns = UINT16_MAX;
+			break;
+
+		default:
+			num_columns = hand->mode_box->num_columns;
+			break;
+		}
+
+		box_set_num_columns(hand->mode_box, num_columns);
+	}
+		break;
+
+	}
+
+	hand_leave_mode(hand);
+}
+
+/* command for wm */
+static bool
+hand_handle_input_key_command(struct hand *const hand, xcb_keysym_t const sym)
+{
+	switch (sym) {
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B [focus] Mod+Ctrl+c {child}
+	 * Set the number of columns of the focused grid.
+	 * .B child
+	 * specifies the first window that should appear at the end of the first row.
+	 * .IP
+	 * .B =
+	 * sets auto layout.
+	 */
+	case XKB_KEY_c:
+		if (NULL == hand->input_focus)
+			break;
+
+		hand->mode = mode_setcolumns;
+		hand->mode_box = hand->input_focus->parent;
+		hand_input_reset(hand);
+		break;
+
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B [focus] Mod+Ctrl+r {what} {to-where}
+	 * Resize a split or a side of a floating window.
+	 * .IP
+	 * .B =
+	 * sets equalizes sizes for all splits in the grid.
+	 */
+	case XKB_KEY_r:
+		/* TODO: take account window gravity */
+		hand->mode = mode_size_side;
+		break;
+
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B [focus] Mod+Ctrl+m {point-a} {point-b}
+	 * Move focused window to the place of line from {point-a} to {point-b}.
+	 */
+	case XKB_KEY_m:
+		hand->mode = mode_move_a;
+		break;
+
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B [focus] Mod+Ctrl+l
+	 * Lock focus position. On a focused window unlock.
+	 */
+	case XKB_KEY_l:
+	{
+		struct box *box = hand->input_focus;
+		if (NULL == box)
+			break;
+
+		printf(" up to %1.1s\n", hand->focus->name);
+		bool const set = !box->parent->focus_lock;
+		if (box == hand->focus)
+			/* focus lock makes sense only if we have more
+			 * children, so move upwards till we set the
+			 * focus lock on a container that has more than
+			 * one children */
+			do
+				box_set_focus_lock(box, set);
+			while (box->num_children <= 1 &&
+			       NULL != (box = box->parent));
+		else
+			/* set focus lock from input_focus up to focus */
+			do
+				box_set_focus_lock((box = box->parent), set);
+			while (hand->focus != box);
+
+		/* we change properties only at a subtree so it is enough if we
+		 * propagate changes upwards from the very bottom */
+		box_propagate_change(box);
+	}
+		break;
+
+	/* ~fullscreen~ fuck, i can't see anything: set concealed for
+	 * all upper windows till monitor level
+	 *
+	 * if nothing to do: unfullscreen
+	 */
+	case XKB_KEY_f:
+	{
+		if (NULL == hand->focus)
+			break;
+
+		struct box *box = hand->focus->parent;
+		box->layout_changed = true;
+		box_propagate_change(box);
+		for (uint16_t i = 0; i < box->num_children; ++i) {
+			struct box *child = box->children[i];
+			child->concealed = true;
+		}
+	}
+		break;
+
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B Mod+Ctrl+n {a-zA-Z}... Return
+	 * Name window.
+	 */
+	case XKB_KEY_n:
+		if (NULL == hand->input_focus)
+			break;
+
+		hand->mode = mode_name;
+		hand_input_reset(hand);
+		break;
+
+	/* wlose/xlose */
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B [focus] Mod+Ctrl+w
+	 * Close window(s) in focus just like user would clicked
+	 * \*(lqX\*(rq in the title bar. Second press kills by force.
+	 */
+	case XKB_KEY_w:
+	{
+		if (NULL == hand->focus)
+			break;
+
+		struct box *box;
+		for_each_box(box, hand->focus, hand->focus, {
+			if (!box_is_container(box))
+				close_box(box);
+		})
+	}
+		break;
+
+	case XKB_KEY_z:
+	{
+		struct box *box = hand->focus;
+		if (NULL == box)
+			break;
+
+		struct body const *const body = &bodies[box->body];
+
+		CHECK(xcb_input_xi_warp_pointer, conn,
+				XCB_WINDOW_NONE,
+				body->screen->root,
+				0, 0, 0, 0,
+				(box->x + box->width  / 2) << 16,
+				(box->y + box->height / 2) << 16,
+				hand->master_pointer);
+	}
+		break;
+
+
+	default:
+		return true;
+	}
+
+	return false;
+}
+
+static struct hand_device *
+hand_find_slave_device(struct hand const *const hand, xcb_input_device_id_t const device_id)
+{
+	for (uint32_t i = 0; i < hand->num_devices; ++i) {
+		struct hand_device const *const device = &hand->devices[i];
+		if (device_id == device->device_id)
+			return (struct hand_device *)device;
+	}
+
+	return NULL;
+}
 
 static void
 handle_input_key_press(xcb_input_key_press_event_t const *const event)
 {
-	xcb_keysym_t const sym = xcb_key_symbols_get_keysym(symbols, event->detail, event->mods.effective & XCB_MOD_MASK_SHIFT);
-	printf("key=0x%x mods=%d deviceid=%d\n", sym, event->mods.base, event->deviceid);
+	/* TODO/FIXME: cache keymap */
+	struct xkb_keymap *const keymap = xkb_x11_keymap_new_from_device(xkb_context, conn, event->sourceid, XKB_KEYMAP_COMPILE_NO_FLAGS);
+
+	xkb_keysym_t const *syms;
+	int n = xkb_keymap_key_get_syms_by_level(keymap, event->detail, 0, XCB_MOD_MASK_SHIFT & event->mods.effective ? 1 : 0, &syms);
+	if (0 == n)
+		goto out;
+
+	xkb_keysym_t const sym = syms[0];
+	printf("key=0x%x mods=%d deviceid=%d sourceid=%d\n", sym, event->mods.base, event->deviceid, event->sourceid);
 
 	bool propagate;
 
-	struct hand *const hand = get_hand_from_keyboard(event->deviceid);
+	struct hand *const hand = get_hand_from_master_keyboard(event->deviceid);
 #ifndef HEAWM_NDEBUG
 	/* FIXME: just under Xephyr but root key press reports slave device */
 	if (!hand) {
@@ -2641,388 +3716,146 @@ handle_input_key_press(xcb_input_key_press_event_t const *const event)
 	}
 #endif
 
-#define KEY_MOD_MASK ( \
-	XCB_MOD_MASK_SHIFT   | \
-	XCB_MOD_MASK_CONTROL | \
-	XCB_MOD_MASK_1       | \
-	XCB_MOD_MASK_2       | \
-	XCB_MOD_MASK_3       | \
-	XCB_MOD_MASK_4       | \
-	XCB_MOD_MASK_5       )
+	bool const grab_state = hand_get_grab_state(hand);
 
 	printf("key press; %d; focus=%x\n", hand->mode, xcb_input_xi_get_focus_reply(conn, xcb_input_xi_get_focus(conn, event->deviceid), NULL)->focus);
 
-	if (mode_default != hand->mode && mode_default_label_boxes != hand->mode) {
-		propagate = false;
+	switch (hand->mode) {
+	case mode_boxes:
+	case mode_default:
+		/* if (XKB_KEY_Super_L == sym || XKB_KEY_Super_R == sym) {
+			propagate = false; */
+			/* hand_set_timeout(hand, 70); */
+		/* 	goto out;
+		} */
 
-		printf("submode\n");
-
-		if (XKB_KEY_Escape == sym) {
-		leave_mode:
-			hand_leave_mode(hand);
-			do_update();
-			goto out_check_focus;
+#if 0
+		/* hand_set_timeout(hand, -1); */
+		if (mode_boxes == hand->mode && 0) {
+			hand->mode = mode_default;
+			hand_grab_keyboard(event->root, event->deviceid);
 		}
+#endif
+
+		switch (KEY_MOD_MASK & event->mods.effective) {
+		default:
+			propagate = (hand_handle_input_key_normal(hand, sym), true);
+			break;
+
+		case XCB_MOD_MASK_4:
+			propagate = hand_handle_input_key_super(hand, sym);
+			break;
+
+		case XCB_MOD_MASK_4 | XCB_MOD_MASK_CONTROL:
+		case XCB_MOD_MASK_4 | XCB_MOD_MASK_1:
+			propagate = hand_handle_input_key_command(hand, sym);
+			break;
+		}
+
+		if (NULL == hand->input_focus)
+			propagate = false;
+		break;
+
+	default:
+		propagate = false;
 
 		/* RIP. dumb user get stuck and tries to escape */
-		if ((KEY_MOD_MASK & ~XCB_MOD_MASK_SHIFT) & event->mods.effective)
+		if (KEY_MOD_MASK & event->mods.effective)
 			/* but we just let this little shit shuffering a bit */
-			/* NOTE: that if we not reach this comment at
-			 * runtime we can be sure user uninstalled us
-			 * under one clock cycle :( */
-			goto out;
-
-		if ((XKB_KEY_a <= sym && sym <= XKB_KEY_z)) {
-			hand->user_input[strnlen(hand->user_input, NAME_LEN)] = 'a' + (sym - XKB_KEY_a);
-		} else if ((XKB_KEY_A <= sym && sym <= XKB_KEY_Z)) {
-			hand->user_input[strnlen(hand->user_input, NAME_LEN)] = 'A' + (sym - XKB_KEY_A);
-		} else if (XKB_KEY_BackSpace == sym) {
-			hand->user_input[strnlen(hand->user_input + 1, NAME_LEN - 1)] = '\0';
-		}
-
-		printf("%d => inp %.*s\n", sym, NAME_LEN, hand->user_input);
-
-		switch (hand->mode) {
-		case mode_name:
-		{
-			if (XKB_KEY_Return == sym ||
-			    NAME_LEN == strnlen(hand->user_input, NAME_LEN))
-			{
-				if (NULL != hand->input_focus) {
-					bool const iscontainer = box_is_container(hand->input_focus);
-					memcpy(hand->input_focus->name, hand->user_input, NAME_LEN);
-					char *const c = &hand->input_focus->name[0];
-					if (iscontainer)
-						*c &= ~0x20;
-					else
-						*c |= 0x20;
-					name_box(hand->input_focus, iscontainer);
-					assert(box_is_container(hand->input_focus) == iscontainer);
-				}
-				goto leave_mode;
-			}
-		}
 			break;
 
-		case mode_setcolumns:
-		{
-			struct label *label = find_hand_label(hand);
-		printf("mode_setcolumns %d\n", !!label);
-			if (NULL != label) {
-				uint16_t pos = 0;
-				while (hand->mode_base.box->children[pos++] != label->base);
-
-				if (pos == hand->mode_base.box->num_children)
-				vertical_split:
-					pos = UINT16_MAX;
-
-				hand->mode_base.box->num_columns = pos;
-				hand->mode_base.box->layout_changed = true;
-				goto leave_mode;
-			} else if (XKB_KEY_minus == sym) {
-				goto vertical_split;
-			} else if (XKB_KEY_equal == sym) {
-				hand->mode_base.box->num_columns = 0;
-				hand->mode_base.box->layout_changed = true;
-				goto leave_mode;
-			}
-		}
-			break;
-
-		}
-		goto out;
-	}
-
-	if (XKB_KEY_Super_L == sym || XKB_KEY_Super_R == sym) {
-		propagate = false;
-		hand_set_timeout(hand, 70);
-		goto out;
-	}
-
-	hand_set_timeout(hand, -1);
-	if (mode_default_label_boxes == hand->mode) {
-		hand->mode = mode_default;
-		grab_hand_keyboard(event->root, event->deviceid, hand->auto_focus);
-	}
-
-	/* otherwise root window receives input that sends
-	 * forward to its children based on pointer location */
-	/* and we cannot disable keyboard focus since then user
-	 * will not be able to control wm afterwards */
-	propagate = NULL != hand->input_focus;
-	bool new_auto_focus;
-
-	if (!(event->mods.effective & XCB_MOD_MASK_4)) {
-		new_auto_focus = XKB_KEY_Return == sym || XKB_KEY_KP_Enter == sym;
-
-		if (NULL != hand->input_focus) {
-			hand->input_focus->close_by_force = false;
-
-			if (hand->latest_input[0] != hand->input_focus) {
-				hand->latest_input[1] = hand->latest_input[0];
-				hand->latest_input[0] = hand->input_focus;
-			}
-		}
-
-		goto out_check_focus;
-	} else {
-		new_auto_focus = true;
-	}
-
-	switch ((KEY_MOD_MASK & event->mods.effective) & ~(XCB_MOD_MASK_4 | XCB_MOD_MASK_SHIFT)) {
-	case 0:
-		/*MAN(Keybindings)
-		 * .TP
-		 * .B Mod+{a-zA-Z}...
-		 * Focus window by name. If there is no such window,
-		 * keybinding is treated like
-		 * .B Ctrl
-		 * was pressed.
-		 */
-		if ((XKB_KEY_a <= sym && sym <= XKB_KEY_z)) {
-			hand->user_input[strlen(hand->user_input)] = 'a' + (sym - XKB_KEY_a);
-			propagate = false;
-		} else if ((XKB_KEY_A <= sym && sym <= XKB_KEY_Z)) {
-			hand->user_input[strlen(hand->user_input)] = 'A' + (sym - XKB_KEY_A);
-			propagate = false;
-		} else if (XKB_KEY_Return == sym) {
-			/*MAN(Keybindings)
-			 * .TP
-			 * .B Mod+Return
-			 * Open $
-			 * .B TERMINAL .
-			 */
-			if (0 == fork()) {
-				setsid(); /* move process into its own session */
-				execlp(getenv("TERMINAL"), getenv("TERMINAL"), NULL);
-				perr("execlp");
-				_exit(127);
-			}
-
-			break;
-		} else {
+		if (XKB_KEY_Escape == sym) {
+			hand_leave_mode(hand);
 			break;
 		}
 
-		struct box *box;
+		hand_handle_input(hand, sym);
 
-		printf("jump %.*s\n", 4, hand->user_input);
-
-		if (find_box_by_name(&box, hand->user_input)) {
-			memset(hand->user_input, 0, sizeof hand->user_input);
-
-			if (NULL != box) {
-				struct hand *hand = &hands[0];
-				if (NULL != hand->input_focus &&
-				    box == hand->input_focus)
-					box = hand->latest_input[box == hand->latest_input[0]];
-
-				if (NULL != box) {
-					focus_box(hand, box);
-					do_update();
-				}
-				break;
-			}
-		}
-		break;
-
-	case XCB_MOD_MASK_CONTROL:
-	case XCB_MOD_MASK_1:
-		switch (sym) {
-		/*MAN(Keybindings)
-		 * .TP
-		 * .B [focus] Mod+Ctrl+c {child}
-		 * Set the number of columns of the focused grid.
-		 * .B child
-		 * specifies the first window that should appear at the end of the first row.
-		 * .IP
-		 * .B =
-		 * sets auto layout.
-		 */
-		case XKB_KEY_c:
-			if (NULL == hand->input_focus)
-				break;
-
-			hand->mode = mode_setcolumns;
-			hand->mode_base.box = hand->input_focus->parent;
-			new_auto_focus = false;
-			memset(hand->user_input, 0, sizeof hand->user_input);
-			break;
-
-		/*MAN(Keybindings)
-		 * .TP
-		 * .B [focus] Mod+Ctrl+r {what} {to-where}
-		 * Resize a split or a side of a floating window.
-		 * .IP
-		 * .B =
-		 * sets equalizes sizes for all splits in the grid.
-		 */
-		case XKB_KEY_r:
-			/* TODO: take account window gravity */
-			hand->mode = mode_size_side;
-			new_auto_focus = false;
-			break;
-
-		/*MAN(Keybindings)
-		 * .TP
-		 * .B [focus] Mod+Ctrl+m {point-a} {point-b}
-		 * Move focused window to the place of line from {point-a} to {point-b}.
-		 */
-		case XKB_KEY_m:
-			hand->mode = mode_move_a;
-			new_auto_focus = false;
-			break;
-
-		/*MAN(Keybindings)
-		 * .TP
-		 * .B [focus] Mod+Ctrl+l
-		 * Lock focus position in focus. On a focused window unlock.
-		 */
-		case XKB_KEY_l:
-		{
-			struct box *box = hand->input_focus;
-			if (NULL == box)
-				break;
-
-			bool const set = !box->parent->focus_lock;
-			if (box->parent == hand->focus)
-				/* focus lock makes sense only if we have more
-				 * children, so move upwards till we set the
-				 * focus lock on a container that has more than
-				 * one children */
-				do
-					box_set_focus_lock(box, set);
-				while (box->num_children <= 1 &&
-				       NULL != (box = box->parent));
-			else
-				for (; hand->focus != box; box = box->parent)
-					box_set_focus_lock(box, set);
-
-			do_update();
-		}
-			break;
-
-		/* ~fullscreen~ fuck, i can't see anything: set concealed for
-		 * all upper windows till monitor level
-		 *
-		 * if nothing to do: unfullscreen
-		 */
-		case XKB_KEY_f:
-			assert(!"unimplemented");
-			break;
-
-		/*MAN(Keybindings)
-		 * .TP
-		 * .B Mod+Ctrl+n {a-zA-Z}... Return
-		 * Name window.
-		 */
-		case XKB_KEY_n:
-			if (NULL == hand->input_focus)
-				break;
-
-			hand->mode = mode_name;
-			new_auto_focus = true; /* FIXME: should be false, but keys must be grabbed */
-			memset(hand->user_input, 0, sizeof hand->user_input);
-			break;
-
-		/* wlose/xlose */
-		/*MAN(Keybindings)
-		 * .TP
-		 * .B [focus] Mod+Ctrl+w
-		 * Close window(s) in focus just like user would clicked
-		 * \*(lqX\*(rq in the title bar. Second press kills by force.
-		 */
-		case XKB_KEY_w:
-			if (NULL != hand->focus) {
-				struct box *box;
-				for_each_box(box, hand->focus, hand->focus, {
-					if (!box_is_container(box))
-						close_box(box);
-				})
-			}
-			break;
-		default:
-			goto out_check_focus;
-		}
-
-		propagate = false;
-		do_update();
+		hand_handle_input_key_mode(hand, sym);
 		break;
 	}
 
-out_check_focus:;
-	if (NULL == hand->input_focus) {
-		new_auto_focus = mode_default == hand->mode || mode_default_label_boxes == hand->mode;
-		propagate = false;
-	}
+	if (grab_state != hand_get_grab_state(hand))
+		hand_grab_keyboard(hand);
 
-	if (new_auto_focus != hand->auto_focus) {
-		hand->auto_focus = new_auto_focus;
-		grab_hand_keyboard(event->root, event->deviceid, hand->auto_focus || (mode_default != hand->mode && mode_default_label_boxes != hand->mode));
-	}
-
+#ifndef HEAWM_NDEBUG
 out:
+#endif
 	xcb_input_xi_allow_events(conn, XCB_CURRENT_TIME, event->deviceid,
 			propagate
 				? XCB_INPUT_EVENT_MODE_REPLAY_DEVICE
 				: XCB_INPUT_EVENT_MODE_SYNC_DEVICE,
 			0, 0);
+	/* if event gets propagated, flush as soon as possible in order to minimize delay */
+	if (propagate)
+		xcb_flush(conn);
+
+	xkb_keymap_unref(keymap);
+}
+
+static struct box *
+find_box_in_body_by_window(struct body *const body, xcb_window_t const window)
+{
+	uint8_t const body_pos = body - bodies;
+
+	for (uint16_t i = 0; i < root->num_children; ++i) {
+		struct box *const head = root->children[i];
+		if (body_pos != head->body)
+			continue;
+
+		struct box *box = find_box_by_window(head, head, window);
+		if (NULL != box)
+			return box;
+	}
+
+	return NULL;
 }
 
 static void
 handle_input_button_press(xcb_input_button_press_event_t const *const event)
 {
-	struct hand *const hand = get_hand_from_pointer(event->deviceid);
+	struct hand *const hand = find_hand_from_pointer(event->deviceid);
+#ifndef HEAWM_NDEBUG
 	if (NULL == hand)
 		return;
+#endif
 
+	/* assert(XCB_MOD_MASK_4 == (event->mods.effective & KEY_MOD_MASK)); */
 	printf("button\n");
+
 	bool propagate = true;
-	/* if (1 || XCB_MOD_MASK_4 == (event->mods.effective & MOD_MASK)) { */
-	struct body *body = bodies;
-	while (event->root != body->screen->root)
-		++body;
-
-	for (uint16_t i = 0; i < root->num_children; ++i) {
-		struct box *const head = root->children[i];
-		if ((body - bodies) != head->body)
-			continue;
-
-		struct box *box = find_box_by_window(head, head, event->child);
-		if (NULL == box)
-			continue;
-
-		if (box_is_container(box))
-			break;
-
+	struct body *const body = get_body_by_root(event->root);
+	struct box *box = find_box_in_body_by_window(body, event->child);
+	if (NULL != box) {
 		propagate = false;
 		focus_box(hand, box);
-		assert(box->num_children == 0);
-		do_update();
-
-		break;
 	}
-	/* } */
 
 	xcb_input_xi_allow_events(conn, XCB_CURRENT_TIME, event->deviceid,
 			propagate
 				? XCB_INPUT_EVENT_MODE_REPLAY_DEVICE
 				: XCB_INPUT_EVENT_MODE_SYNC_DEVICE,
 			0, 0);
-# if 0
-	xcb_allow_events(conn,
-			propagate
-				? XCB_ALLOW_REPLAY_POINTER
-				: XCB_ALLOW_SYNC_POINTER,
-			XCB_CURRENT_TIME);
-
-#endif
 }
 
 static void
 handle_input_enter(xcb_input_enter_event_t const *const event)
 {
 	xcb_input_xi_set_client_pointer(conn, event->child, event->deviceid);
+}
+
+
+static void
+handle_mapping_notify(xcb_mapping_notify_event_t *const event)
+{
+	if (event->request != XCB_MAPPING_KEYBOARD &&
+	    event->request != XCB_MAPPING_MODIFIER)
+		return;
+
+	xcb_refresh_keyboard_mapping(symbols, event);
+	for (uint8_t i = 0; i < num_hands; ++i) {
+		struct hand *hand = &hands[i];
+	}
 }
 
 static void
@@ -3034,11 +3867,11 @@ handle_input_event(xcb_ge_generic_event_t const *const event)
 		break;
 
 	case XCB_INPUT_FOCUS_OUT:
-		/* handle_input_focus_out((void const *)event); */
+		handle_input_focus_out((void const *)event);
 		break;
 
 	case XCB_INPUT_FOCUS_IN:
-		/* handle_input_focus_in((void const *)event); */
+		handle_input_focus_in((void const *)event);
 		break;
 
 	case XCB_INPUT_BUTTON_PRESS:
@@ -3049,9 +3882,11 @@ handle_input_event(xcb_ge_generic_event_t const *const event)
 		handle_input_key_press((void const *)event);
 		break;
 
+#if 0
 	case XCB_INPUT_KEY_RELEASE:
 		handle_input_key_release((void const *)event);
 		break;
+#endif
 
 	case XCB_INPUT_UNGRAB_DEVICE_KEY:
 		break;
@@ -3071,19 +3906,67 @@ handle_input_event(xcb_ge_generic_event_t const *const event)
 static void
 handle_randr_screen_change_notify(xcb_randr_screen_change_notify_event_t const *const event)
 {
-	struct body *body = bodies;
-	while (body->screen->root != event->root)
-		++body;
-
-	update_monitors(body);
+	struct body *const body = get_body_by_root(event->root);
+	body_update_heads(body);
 }
 
 static bool
 handle_randr_event(xcb_generic_event_t const *const event)
 {
-	switch (XCB_EVENT_RESPONSE_TYPE(event) - randr_first_event) {
+	if (0 == randr_base_event)
+		return false;
+
+	switch (XCB_EVENT_RESPONSE_TYPE(event) - randr_base_event) {
 	case XCB_RANDR_SCREEN_CHANGE_NOTIFY:
 		handle_randr_screen_change_notify((void *)event);
+		break;
+
+	default:
+		return false;
+	}
+
+	return true;
+}
+
+static void
+handle_keyboard_mapping(uint8_t const device_id)
+{
+	/* forget device */
+}
+
+static void
+handle_xkb_new_keyboard_notify(xcb_xkb_new_keyboard_notify_event_t *const event)
+{
+	if (!(event->changed & (XCB_XKB_NKN_DETAIL_DEVICE_ID |
+	                        XCB_XKB_NKN_DETAIL_KEYCODES)))
+		return;
+
+	uint8_t const deviceid = event->changed & XCB_XKB_NKN_DETAIL_DEVICE_ID
+		? event->oldDeviceID
+		: event->deviceID;
+
+	 handle_keyboard_mapping(deviceid);
+}
+
+static void
+handle_xkb_map_notify(xcb_xkb_map_notify_event_t *const event)
+{
+	handle_keyboard_mapping(event->deviceID);
+}
+
+static bool
+handle_xkb_event(xcb_generic_event_t const *const event)
+{
+	if (0 == xkb_base_event)
+		return false;
+
+	switch (XCB_EVENT_RESPONSE_TYPE(event) - xkb_base_event) {
+	case XCB_XKB_NEW_KEYBOARD_NOTIFY:
+		handle_xkb_new_keyboard_notify((void *)event);
+		break;
+
+	case XCB_XKB_MAP_NOTIFY:
+		handle_xkb_map_notify((void *)event);
 		break;
 
 	default:
@@ -3096,7 +3979,9 @@ handle_randr_event(xcb_generic_event_t const *const event)
 static bool
 handle_extension_event(xcb_generic_event_t const *const event)
 {
-	return handle_randr_event(event);
+	return
+		handle_randr_event(event) ||
+		handle_xkb_event(event);
 }
 
 static void
@@ -3111,10 +3996,9 @@ handle_generic_event(xcb_ge_generic_event_t const *const event)
 static void
 hand_timed_out(struct hand *const hand)
 {
-	assert(mode_default_label_boxes == hand->mode || mode_default == hand->mode);
+	assert(mode_boxes == hand->mode || mode_default == hand->mode);
 	printf("hand_timed_out(()\n");
-	hand->mode = mode_default_label_boxes;
-	do_update();
+	hand->mode = mode_boxes;
 }
 
 static void
@@ -3166,8 +4050,7 @@ main(int _argc, char *_argv[])
 		case '?':
 		case ':':
 			fprintf(stderr, "%s: Option -%c is invalid or requires an argument.\n",
-					argv[0],
-					optopt);
+					program, optopt);
 			exit(EXIT_FAILURE);
 
 		default:
@@ -3178,41 +4061,47 @@ main(int _argc, char *_argv[])
 	/* BROADCAST(start, &(struct start_args){0}); */
 
 	connect_display();
+	setup_display();
+	update_hands();
 
-	manage_each_screen();
-
-	update_inputs();
-
-	do_update();
-
-	/* xcb_flush + wait for all replies */
-	/* xcb_aux_sync(conn); */
-	xcb_flush(conn);
+	system("~/.xinit &");
 
 	struct pollfd pfd;
 	pfd.fd = xcb_get_file_descriptor(conn);
-	pfd.events = POLLIN | POLLPRI;
+	pfd.events = POLLIN;
 
 	for (xcb_generic_event_t *event;; free(event)) {
-		while (NULL == (event = xcb_poll_for_event(conn))) {
+		while (NULL == (event = xcb_poll_for_event(conn)) &&
+		       /* update screen if we have no more pending requests */
+		       /* FIXME: investigate whether starvation could be a problem */
+		       (do_update(), xcb_flush(conn),
+		        /* make XCB poll()-ing again to see whether we
+		         * have received something after flushing. poll()
+		         * should be level-triggered so not sure why it
+		         * is needed... */
+		        NULL == (event = xcb_poll_for_event(conn))))
+		{
 			struct timespec poll_start;
 
 			if (0 < next_timeout_ms)
 				clock_gettime(HAND_TIMEOUT_CLOCK, &poll_start);
 			assert(0 != next_timeout_ms && "next_timeout_ms should never be 0");
 
+			assert(next_timeout_ms == -1);
 			if (0 == poll(&pfd, 1, next_timeout_ms)) {
+				assert(0);
 				hands_time_elapsed(next_timeout_ms);
 				continue;
 			} else if (0 < next_timeout_ms) {
+				assert(0);
 				struct timespec now;
 				clock_gettime(HAND_TIMEOUT_CLOCK, &now);
 				hands_time_elapsed(((now.tv_sec - poll_start.tv_sec) << 10) + ((now.tv_nsec - poll_start.tv_nsec) >> 20));
 				assert(0 != next_timeout_ms);
 			}
 
-			if (!(pfd.revents & POLLIN))
-				return EXIT_SUCCESS;
+			if (pfd.revents & ~POLLIN)
+				return EXIT_FAILURE;
 		}
 
 		/* printf("event = (%d)%s\n", event->response_type, xcb_event_get_label(event->response_type)); */
@@ -3231,7 +4120,7 @@ main(int _argc, char *_argv[])
 			break;
 
 		case XCB_MAPPING_NOTIFY:
-			handle_mapping_notify((void *)event);
+			/* handle_mapping_notify((void *)event); */
 			break;
 
 		case XCB_UNMAP_NOTIFY:
@@ -3255,13 +4144,8 @@ main(int _argc, char *_argv[])
 			break;
 
 		default:
-			if (!handle_extension_event((void *)event))
-				continue;
+			handle_extension_event((void *)event);
 			break;
 		}
-
-		xcb_flush(conn);
 	}
-
-	return EXIT_SUCCESS;
 }

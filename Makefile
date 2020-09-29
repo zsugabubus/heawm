@@ -13,8 +13,20 @@ INSTALL ?= install
 INSTALL_PROGRAM ?= $(INSTALL)
 INSTALL_DATA ?= $(INSTALL)
 
-CFLAGS += -std=c99 -pedantic -O0 -Wall -g -D_POSIX_C_SOURCE=200809L -Wno-unused
-CFLAGS += $$(pkg-config --libs --cflags xcb{,-cursor,-keysyms,-shape,-util,-xinput,-randr} cairo)  # ,-xrm
+CFLAGS += -std=c99 -pedantic -Wall -Wextra -g -D_XOPEN_SOURCE=700 -Wno-unused -fstrict-aliasing
+CFLAGS += $(shell pkg-config --libs --cflags xcb{,-cursor,-keysyms,-shape,-xinput,-randr,-xrm,-xkb} cairo xkbcommon-x11)
+
+# release | debug
+BUILD ?= debug
+
+$(info BUILD = $(BUILD))
+ifeq ($(BUILD),release)
+CFLAGS += -DHEAWM_NDEBUG -DNDEBUG -O2
+else ifeq ($(BUILD),debug)
+CFLAGS += $(shell pkg-config --libs --cflags xcb-util) -O0
+else
+$(error unknown BUILD mode)
+endif
 
 VERSION := $(shell git describe --always --tags --dirty --match 'v*')
 
@@ -25,11 +37,7 @@ all : $(TARGET)
 	  echo '(use "make reload" to live reload running instances)' || \
 	  true
 
-xephyr :
-	Xephyr -resizeable $(DISPLAY) &
-
 run : $(TARGET)
-	# -batch -ex 'handle SIGINT pass' 
 	gdb ./$< -q -ex run
 
 run-cycle :
@@ -60,4 +68,4 @@ install : $(TARGET) docs/$(TARGET).1 installdirs
 clean :
 	$(RM) $(TARGET)
 
-.PHONY: all docs reload run install installdirs uninstall xephyr
+.PHONY: all docs reload run install installdirs uninstall

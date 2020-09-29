@@ -2,17 +2,17 @@
 = {wmname}
 :toc:
 
-Lightweight, keyboard-centric‌footnote:[No, no, not like others… this one
-is really.], infinitely nestable, primitive semi-dynamic‌footnote:[WTF!?]
-tiling window manager for X Window System with multi-head‌footnote:[Here
-be dragons.], multi-hand‌footnote:[Stuff that requires at least three
-limbs: multi-pointer and friends. Not for introverts. You have been warned.],
-multi-leg‌footnote:[This program is so much crap you will surely use
-both of your legs.] support‌footnote:[That’s actually a lie.]. Infinite
-possibilities, single layout. Replace all windows on all monitors at once for
-better separating different kinds of work.
+{wmname} is a keyboard-centric‌footnote:[No, no, not like others… this one
+is really.], semidynamic tiling window manager for the X Window System with
+multihead‌footnote:[Here be dragons.],
+multihand‌footnote:[Stuff that requires at least three limbs:
+multi-pointer and friends. Not for introverts. You have been warned.],
+multi-leg‌footnote:[This program is so much crap you will surely use both
+of your legs.] support, aiming to provide O(1) navigation.
 
-Configuration currently happens in C in a compile yourself manner. Do not be afraid.
+- Configure in C with some X resources.
+- Minimal ICCCM and NetWM support—mainly because they are useless and/or against the concept.
+- Script by sending messages to root.
 
 == Philosophy
 
@@ -40,7 +40,9 @@ You will need the following tools and libraries.
 
 * `cc -std=c11`
 * `make`
-* `xcb{,-cursor,-keysyms,-shape,-util,-xinput}`
+* `xcb{,-cursor,-keysyms,-shape,-xinput,-xrm}`
+* `xcb-util` footnote:[Debug build only.]
+* `xcb-icccm` footnote:[Headers only, compile time.]
 * `cairo`
 
 === Compiling from source
@@ -50,10 +52,8 @@ You will need the following tools and libraries.
 git clone https://github.com/zsugabubus/{wmname} &&
 cd {wmname} &&
 make &&
-make install # <1>
+make install
 ----
-
-<1> Or use `make xephyr && make run` if you want to give it a try first.
 
 == Usage
 

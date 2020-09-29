@@ -6,15 +6,14 @@ heawm \- X11 window manager from the angels
 .
 .B heawm
 .
-.\" tag::intro[]
 .SH DESCRIPTION
 .B heawm
-is a keyboard-centric, semi-dynamic, tiling window manager for the X Window
+is a keyboard\(hycentric, semidynamic tiling window manager for the X Window
 System, aiming to provide amortized O(1) navigation\(emin the number of
 screens, monitors, windows and users.
 .
 .PP
-For multi-head and multi-hand support server must have the
+For multihead and multihand support display server must have the
 .B XRandR
 and the
 .B XInput2
@@ -38,12 +37,11 @@ from its neightbors.
 .TP
 .B Floating
 Windows are manually positioned, sized by the user and kept above of
-tiles–seems like they are \*(lqfloating\*(rq.
+tiles\(emseems like they are \(lqfloating\(rq.
 .IP
 When such a window obscures large area of a focused window, it temporarily gets
 repositioned to get out of the way.
 .
-.\" end::intro[]
 .SH OPTIONS
 INCLUDE(OPTIONS)
 .SH USAGE
