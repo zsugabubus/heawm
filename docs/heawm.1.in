@@ -60,17 +60,18 @@ INCLUDE(SIGNALS)
 (any)
 Indicates that program does not run anymore.
 .
-.SH "RESOURCES"
+.SH RESOURCES
 .B heawm
 understands the following X resources:
 .
 INCLUDE(RESOURCES)
 .
 .SH AUTHORS
-SHELL(git shortlog -sn </dev/tty | cut -f2|sed -e 'i.UR' -e 'a.UE')
+Written by zsugabubus.
 .
 .SH "SEE ALSO"
 .B xinput(1)
 .B Xorg(1)
+.B xpenguins(1)
 .B xrandr(1)
 .B xrdb(1)

@@ -13,7 +13,7 @@ INSTALL ?= install
 INSTALL_PROGRAM ?= $(INSTALL)
 INSTALL_DATA ?= $(INSTALL)
 
-CFLAGS += -std=c99 -pedantic -Wall -Wextra -g -D_XOPEN_SOURCE=700 -Wno-unused -fstrict-aliasing
+CFLAGS += -std=c11 -pedantic -Wall -Wextra -g -D_XOPEN_SOURCE=700 -Wno-unused -fstrict-aliasing
 CFLAGS += $(shell pkg-config --libs --cflags xcb{,-cursor,-keysyms,-shape,-xinput,-randr,-xrm,-xkb} cairo xkbcommon-x11)
 
 # release | debug
@@ -50,10 +50,10 @@ reload :
 docs : docs/$(TARGET).1
 
 docs/$(TARGET).1 : % : docs/manpage.gen %.in $(TARGET).c
-	$^
+	$+
 
 atoms.h : atoms.gen $(TARGET).c
-	./$^
+	./$+
 
 $(TARGET) : $(TARGET).c atoms.h Makefile
 	$(CC) $(CFLAGS) -DVERSION=\"$(VERSION)\" -o $@ $<
@@ -64,6 +64,10 @@ installdirs :
 install : $(TARGET) docs/$(TARGET).1 installdirs
 	$(INSTALL_PROGRAM) $(TARGET) $(DESTDIR)$(bindir)
 	$(INSTALL_DATA) -m644 docs/$(TARGET).1 $(DESTDIR)$(man1dir)
+
+uninstall :
+	$(RM) $(DESTDIR)$(bindir)/$(TARGET)
+	$(RM) $(DESTDIR)$(man1dir)/$(TARGET).1*
 
 clean :
 	$(RM) $(TARGET)

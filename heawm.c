@@ -2,16 +2,17 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <math.h>
 #include <memory.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdalign.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-#include <math.h>
 
 #include <cairo/cairo.h>
 #include <cairo/cairo-xcb.h>
@@ -57,6 +58,11 @@ https://www.x.org/releases/X11R7.5/doc/randrproto/randrproto.txt
 # define M_PHI 1.6180339887 /* Golden Ratio */
 #endif
 
+/** who we are? */
+#ifndef WM_NAME
+# define WM_NAME "LG3D"
+#endif
+
 #define RGB8_TO_FLOATS(color) \
 	(uint8_t)((color) >> 16) / 256., \
 	(uint8_t)((color) >> 8 ) / 256., \
@@ -64,7 +70,8 @@ https://www.x.org/releases/X11R7.5/doc/randrproto/randrproto.txt
 
 /* sizeof array... but in elements */
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(*x))
-#define offsetof(type, field) (size_t)(&((type*)0)->field)
+#define offsetof(type, member) (size_t)(&((type *)0)->member)
+#define membersizeof(type, member) (sizeof(((type *)0)->member))
 
 #if defined(__GNUC__)
 # define maybe_unused __attribute__((unused))
@@ -96,6 +103,21 @@ https://www.x.org/releases/X11R7.5/doc/randrproto/randrproto.txt
 
 #define GET_REPLY(x, request, ...) request##_reply_t *const x = \
 	request##_reply(conn, request##_unchecked(__VA_ARGS__), NULL)
+
+#define MAX(x, y) ((x) < (y) ? (y) : (x))
+
+/* because xcb_send_event() does not take an |event| length argument, no matter
+ * what, it will copy a fixed number of bytes. to avoid reading (then sending)
+ * out-of-bounds bytes we must make sure we have as many bytes as XCB needs. */
+#define XCB_SEND_EVENT_EVENT(event, ...) \
+	(char const *)&(alignas(membersizeof(xcb_send_event_request_t, ev##ent)) \
+	struct { \
+		event data; \
+		char pad[MAX(membersizeof(xcb_send_event_request_t, ev##ent) - sizeof(event), 1)]; \
+	}){ \
+		.data = { __VA_ARGS__ }, \
+		.pad = { 0 } \
+	}
 
 struct box_pointer_xy {
 	xcb_window_t window; /** relative to */
@@ -389,6 +411,7 @@ static char const *const ATOM_NAMES[] =
 	"_NET_CLOSE_WINDOW",
 	"_NET_ACTIVE_WINDOW",
 	"_NET_WM_NAME",
+	"_NET_SUPPORTING_WM_CHECK",
 	"_NET_WM_STATE",
 	"_NET_WM_STATE_DEMANDS_ATTENTION",
 	"_NET_WM_STATE_FULLSCREEN",
@@ -1017,7 +1040,8 @@ name_box(struct box *const box, bool const iscontainer)
 	if (!box_is_container(box))
 		CHECK(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
 				box->window, ATOM(_HEAWM_NAME),
-				XCB_ATOM_STRING, 8, n + 1, box->name);
+				XCB_ATOM_STRING, 8,
+				n + 1, box->name);
 
 	return true;
 }
@@ -1031,9 +1055,7 @@ box_is_floating(struct box const *const box)
 static uint16_t
 box_compute_num_columns(struct box const *const box, uint16_t num_tiles)
 {
-	switch (box->num_columns) {
-	case 0:
-	{
+	if (0 == box->num_columns) {
 		/* compare whether adding a new row or a new column will result
 		 * in more squary tiles. the process repats until we can place
 		 * all tiles. */
@@ -1051,13 +1073,10 @@ box_compute_num_columns(struct box const *const box, uint16_t num_tiles)
 		}
 
 		return cols;
-	}
-
-	default:
-		return box->num_columns;
-
-	case UINT16_MAX:
-		return num_tiles;
+	} else {
+		return box->num_columns <= num_tiles
+			? box->num_columns
+			: num_tiles;
 	}
 }
 
@@ -1379,7 +1398,8 @@ update_box(struct box *const box)
 			uint16_t height = box->height / (!num_rows ? 1 : num_rows);
 			uint32_t i = 0;
 
-			printf("%*.sgrid=N=%d; tiles=%d; cols=%d\n", depth, "", box->num_children, tiled_children, num_columns);
+			printf("%*.sgrid=N=%d; tiles=%d; cols=%d\n",
+					depth, "", box->num_children, tiled_children, num_columns);
 			uint16_t width = box->width / num_columns;
 			for (uint16_t i = 0; i < box->num_children; ++i) {
 				struct box *child = box->children[i];
@@ -1466,6 +1486,7 @@ update_box(struct box *const box)
 			printf("%*.s configure %d\n", depth, "", i);
 			CHECK(xcb_configure_window, conn, box->window, mask, list);
 		}
+
 		/* map only after configured */
 		if (/* was not visible before */1)
 			CHECK(xcb_map_window, conn, box->window);
@@ -1670,7 +1691,8 @@ ewmh_append_client_list(struct box const *const box)
 {
 	CHECK(xcb_change_property, conn, XCB_PROP_MODE_APPEND,
 			bodies[box->body].screen->root, ATOM(_NET_CLIENT_LIST),
-			XCB_ATOM_WINDOW, 32, 1, &box->window);
+			XCB_ATOM_WINDOW, 32,
+			1, &box->window);
 }
 
 static void
@@ -1694,7 +1716,8 @@ ewmh_update_client_list(struct body const *const body)
 			if (ARRAY_SIZE(windows) == num_windows) {
 				CHECK(xcb_change_property, conn, mode,
 						body->screen->root, ATOM(_NET_CLIENT_LIST),
-						XCB_ATOM_WINDOW, 32, num_windows, windows);
+						XCB_ATOM_WINDOW, 32,
+						num_windows, windows);
 				num_windows = 0;
 				mode = XCB_PROP_MODE_APPEND;
 			}
@@ -1704,7 +1727,8 @@ ewmh_update_client_list(struct body const *const body)
 	if (0 < num_windows)
 		CHECK(xcb_change_property, conn, mode,
 				body->screen->root, ATOM(_NET_CLIENT_LIST),
-				XCB_ATOM_WINDOW, 32, num_windows, windows);
+				XCB_ATOM_WINDOW, 32,
+				num_windows, windows);
 }
 
 static void
@@ -1731,40 +1755,35 @@ delete_box(struct box *box)
 	 * hand, root->focus_seq will dropped that could make a previously
 	 * selected seems like it's selected (possibly by someone other) */
 	uint32_t const real_focus_seq = root->focus_seq;
-	bool const focus_changed = box->focus_seq == root->focus_seq;
+	bool focus_changed = false;
 
-	/* hands only reference focused boxes, so if this box is not focused we
-	 * can skip that */
-	if (focus_changed) {
-		for (uint8_t i = 0; i < num_hands; ++i) {
-			struct hand *const hand = &hands[i];
+	for (uint8_t i = 0; i < num_hands; ++i) {
+		struct hand *const hand = &hands[i];
 
-			/* forget current focus */
-			if (box == hand->focus)
-				hand->focus = NULL;
+		/* forget current focus */
+		if (box == hand->focus)
+			hand->focus = NULL;
 
-			if (box == hand->input_focus)
-				hand->input_focus = NULL;
-
-			if (box == hand->latest_input[0]) {
-				hand->latest_input[0] = hand->latest_input[1];
-				hand->latest_input[1] = NULL;
-				assert(hand->latest_input[0] != box);
-			} else if (box == hand->latest_input[1]) {
-				hand->latest_input[1] = NULL;
-			}
-
-			if (box == hand->mode_box)
-				hand_leave_mode(hand);
+		if (box == hand->input_focus) {
+			focus_changed = true;
+			hand->input_focus = NULL;
+			assert(box->focus_seq == root->focus_seq);
 		}
 
-		increase_focus_seq();
-	} else {
-		for (uint8_t i = 0; i < num_hands; ++i) {
-			struct hand *const hand = &hands[i];
-			assert(box != hand->focus && box != hand->input_focus);
+		if (box == hand->latest_input[0]) {
+			hand->latest_input[0] = hand->latest_input[1];
+			hand->latest_input[1] = NULL;
+			assert(hand->latest_input[0] != box);
+		} else if (box == hand->latest_input[1]) {
+			hand->latest_input[1] = NULL;
 		}
+
+		if (box == hand->mode_box)
+			hand_leave_mode(hand);
 	}
+
+	if (focus_changed)
+		increase_focus_seq();
 
 	take_box(box, true);
 
@@ -2514,6 +2533,37 @@ screen_setup_cursor(xcb_screen_t *const screen, char const *const cursor_name)
 }
 
 static void
+screen_setup_wmname(xcb_screen_t const *const screen, char const *const name)
+{
+	xcb_window_t const child = xcb_generate_id(conn);
+
+	/* create a child window that will hold the name */
+	CHECK(xcb_create_window, conn, XCB_COPY_FROM_PARENT,
+			child,
+			screen->root,
+			0, 0,
+			1, 1,
+			0,
+			XCB_WINDOW_CLASS_INPUT_ONLY,
+			screen->root_visual,
+			0, NULL);
+	CHECK(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
+			child, ATOM(_NET_WM_NAME),
+			ATOM(UTF8_STRING), 8,
+			strlen(name), name);
+	CHECK(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
+			child, ATOM(_NET_SUPPORTING_WM_CHECK),
+			XCB_ATOM_WINDOW, 32,
+			1, &child);
+
+	/* link child window to root */
+	CHECK(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
+			screen->root, ATOM(_NET_SUPPORTING_WM_CHECK),
+			XCB_ATOM_WINDOW, 32,
+			1, &child);
+}
+
+static void
 body_setup_screen(struct body *body)
 {
 	xcb_screen_t *const screen = body->screen;
@@ -2567,6 +2617,7 @@ body_setup_screen(struct body *body)
 	ewmh_delete_client_list(body);
 
 	screen_setup_cursor(screen, "default");
+	screen_setup_wmname(screen, WM_NAME);
 	screen_query_windows(screen);
 }
 
@@ -2642,6 +2693,9 @@ body_update_heads(struct body *const body)
 
 	GET_REPLY(monitors, xcb_randr_get_monitors, conn, body->screen->root, true);
 	if (NULL == monitors) {
+#ifndef HEAWM_NDEBUG
+		assert(0);
+#endif
 		fprintf(stderr,
 				"%s: Failed to query RandR monitors."
 				" Using whole screen.\n",
@@ -2990,29 +3044,44 @@ handle_unmap_notify(xcb_unmap_notify_event_t const *const event)
 static void
 handle_map_request(xcb_map_request_event_t const *const event)
 {
+	printf("new %x\n", event->window);
 	box_window(event->parent, event->window);
 }
 
 static void
-handle_configure_notify(xcb_configure_notify_event_t const *const event)
+handle_configure_request(xcb_configure_request_event_t const *const event)
 {
-#if 0
-	struct body *body = bodies
-	while (body->screen->root != event->event)
-		++body;
 
-	for (uint16_t i = 0; i < num_heads; ++i) {
-		struct box *const head = &heads[i];
-		if ((body - bodies) != head->body)
-			continue;
+	struct box *box;
+	if (NULL != (box = find_box_by_window(root, root, event->window))) {
+		/* GPLv3 Appendix 1: DO NOT FUCKING TOUCH IT. PLEASE. */
+		CHECK(xcb_send_event, conn, false, box->window,
+				XCB_EVENT_MASK_STRUCTURE_NOTIFY,
+				XCB_SEND_EVENT_EVENT(xcb_configure_notify_event_t,
+					.response_type = XCB_CONFIGURE_NOTIFY,
+					.event = box->window,
+					.window = box->window,
+					.above_sibling = XCB_WINDOW_NONE,
 
-		struct box *const box = find_box_by_window(head, head, event->window);
+					.x = box->x,
+					.y = box->y,
+					.width = box->width,
+					.height = box->height,
 
-		box->user_x = event->x;
-		box->user_y = event->y;
-		break;
+					.border_width = 0,
+					/* surely not if request reached us */
+					.override_redirect = false,
+				));
 	}
-#endif
+	/* 	CHECK(xcb_configure_window, conn, event->window,
+				XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
+				XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+				&(const uint32_t[]){
+					40, 0,
+					300, 400
+				});
+		xcb_flush(conn);
+	} */
 }
 
 static void
@@ -3051,7 +3120,7 @@ close_box(struct box *const box)
 				.response_type = XCB_CLIENT_MESSAGE,
 				.format = 32,
 				.window = box->window,
-				.type = ATOM_WM_PROTOCOLS,
+				.type = ATOM(WM_PROTOCOLS),
 				.data = {
 					.data32 = {
 						ATOM(WM_DELETE_WINDOW),
@@ -3134,10 +3203,7 @@ update_hands(void)
 		 * .SS "Hand Resources"
 		 * The following resources can be used to customize
 		 * hands. They are specified by the following patterns
-		 * and checked from this order:
-		 * .
-		 * .IP \(bu
-		 * \fB\(lqheawm.hand.\fIINDEX\fB.*\(rq\fR: Match hand by its 1-based \fIINDEX\fR.
+		 * and checked in order:
 		 * .
 		 * .IP \(bu
 		 * \fB\(lqheawm.hand.\fINAME\fB.*\(rq\fR: Match hand by
@@ -3146,6 +3212,9 @@ update_hands(void)
 		 * .B XInput
 		 * \(lq\fINAME\fR pointer\(rq and
 		 * \(lq\fINAME\fR keyboard\(rq master device pair.
+		 * .
+		 * .IP \(bu
+		 * \fB\(lqheawm.hand.\fIINDEX\fB.*\(rq\fR: Match hand by its 1-based \fIINDEX\fR.
 		 * .
 		 * .IP \(bu
 		 * \fB\(lqheawm.hand.*\(rq\fR: Match all hands. Can be useful for specifying default settings.
@@ -3421,6 +3490,7 @@ hand_handle_input_key_normal(struct hand *const hand, xcb_keysym_t const sym)
 
 	if (NULL != hand->input_focus) {
 		hand->input_focus->close_by_force = false;
+
 		hand->focus = hand->input_focus;
 
 		if (hand->latest_input[0] != hand->input_focus) {
@@ -3685,6 +3755,9 @@ hand_handle_input_key_command(struct hand *const hand, xcb_keysym_t const sym)
 		if (NULL == box)
 			break;
 
+		box_set_focus_lock(box, !box->parent->focus_lock);
+
+#if 0
 		bool const set = !box->parent->focus_lock;
 		if (box == hand->focus)
 			/* focus lock makes sense only if we have more
@@ -3700,6 +3773,7 @@ hand_handle_input_key_command(struct hand *const hand, xcb_keysym_t const sym)
 			do
 				box_set_focus_lock((box = box->parent), set);
 			while (hand->focus != box);
+#endif
 
 		/* we change properties only at a subtree so it is enough if we
 		 * propagate changes upwards from the very bottom */
@@ -3708,7 +3782,7 @@ hand_handle_input_key_command(struct hand *const hand, xcb_keysym_t const sym)
 		break;
 
 	/* ~fullscreen~ fuck, i can't see anything: set concealed for
-	 * all upper windows till monitor level
+	 * all upper windows up to float/fixed sized or focus
 	 *
 	 * if nothing to do: unfullscreen
 	 */
@@ -4168,8 +4242,8 @@ run(void)
 			handle_map_request((void *)event);
 			break;
 
-		case XCB_CONFIGURE_NOTIFY:
-			handle_configure_notify((void *)event);
+		case XCB_CONFIGURE_REQUEST:
+			handle_configure_request((void *)event);
 			break;
 
 		case XCB_UNMAP_NOTIFY:
