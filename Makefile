@@ -13,13 +13,13 @@ INSTALL ?= install
 INSTALL_PROGRAM ?= $(INSTALL)
 INSTALL_DATA ?= $(INSTALL)
 
-CFLAGS += -std=c11 -pedantic -Wall -Wextra -g -D_XOPEN_SOURCE=700 -Wno-unused -fstrict-aliasing
+CFLAGS += -std=c11 -pedantic -Wall -Wextra -Werror=vla -g -D_XOPEN_SOURCE=700 -Wno-unused -fstrict-aliasing
 CFLAGS += $(shell pkg-config --libs --cflags xcb{,-cursor,-keysyms,-shape,-xinput,-randr,-xrm,-xkb} cairo xkbcommon-x11)
 
 # release | debug
 BUILD ?= debug
 
-$(info BUILD = $(BUILD))
+$(info BUILD=$(BUILD))
 ifeq ($(BUILD),release)
 CFLAGS += -DHEAWM_NDEBUG -DNDEBUG -O2
 else ifeq ($(BUILD),debug)
@@ -30,7 +30,7 @@ endif
 
 VERSION := $(shell git describe --always --tags --dirty --match 'v*')
 
-export DISPLAY = :1
+export DISPLAY = :0
 
 all : $(TARGET)
 	@pgrep -s 0 -x $< && \
@@ -45,7 +45,7 @@ run-cycle :
 
 # live-reload running instance(s)
 reload :
-	pkill -x -USR1 $(TARGET)
+	pkill -x -HUP $(TARGET)
 
 docs : docs/$(TARGET).1
 
