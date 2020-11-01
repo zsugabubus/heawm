@@ -13,6 +13,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #include <cairo/cairo.h>
 #include <cairo/cairo-xcb.h>
@@ -97,7 +98,7 @@ https://www.x.org/releases/X11R7.5/doc/randrproto/randrproto.txt
 #ifndef HEAWM_NDEBUG
 # define STRINGIFY_(x) #x
 # define STRINGIFY(x) STRINGIFY_(x)
-# define DEBUG_CHECK(request, ...) CHECK(request, __VA_ARGS__)
+# define DEBUG_CHECK(request, ...) check_cookie(request##_checked(__VA_ARGS__), STRINGIFY(__LINE__) ": " #request)
 #else
 # define DEBUG_CHECK(request, ...) (request(__VA_ARGS__), true)
 #endif
@@ -121,19 +122,54 @@ https://www.x.org/releases/X11R7.5/doc/randrproto/randrproto.txt
 		.pad = { 0 } \
 	}
 
-struct xcb_input_event_mask1 {
-	xcb_input_event_mask_t mask;
-	uint32_t values[1];
-};
+#define EVENT_MASK \
+(	XCB_EVENT_MASK_PROPERTY_CHANGE \
+|	XCB_EVENT_MASK_STRUCTURE_NOTIFY \
+|	XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY \
+|	XCB_EVENT_MASK_FOCUS_CHANGE \
+|	XCB_EVENT_MASK_ENTER_WINDOW \
+)
+
+#define NULL_BODY 128U
+#define MAX_NUM_HANDS 63U
+#define NULL_HAND (MAX_NUM_HANDS + 1U)
+
+#define LABEL_CLASS "heawm"
+#define LABEL_INSTANCE LABEL_CLASS "-label"
+
+#define for_each_template_(elem_type, list, index_type, name, extra) \
+	for (index_type name##_index = 0; (extra) || name##_index < num_##list; ++name##_index) \
+		for (elem_type *const name = &list[name##_index], *loop_ = (void *)true; loop_; loop_ = (void *)false)
+
+#define for_each_body for_each_template_(Body, bodies, uint8_t, body, 0 == body_index)
+#define for_each_hand for_each_template_(Hand, hands, uint8_t, hand, 0)
+
+#define for_each_box(x, root, start, block) \
+	for ((x) = (start);;) { \
+		(x)->iter = 0; \
+		block; \
+		while ((x)->num_children <= (x)->iter) { \
+			if ((x) == (root)) { \
+				(x) = NULL; \
+				goto out_for_each; \
+			} \
+			assert((x)->parent); \
+			(x) = (x)->parent; \
+		} \
+		(x) = (x)->children[x->iter++]; \
+	} \
+out_for_each:;
+
+static struct {
+	char const *terminal;
+	char const *shell;
+	char heawm_home[PATH_MAX];
+} config;
 
 typedef struct {
 	xcb_window_t window; /** base */
 	xcb_input_fp1616_t x, y;
 } BoxPointer;
-
-#define NULL_BODY 128U
-#define MAX_NUM_HANDS 63U
-#define NULL_HAND (MAX_NUM_HANDS + 1U)
 
 /** a box that holds smaller boxes. you surely know such box so i do not have
  * to introduce it better */
@@ -268,6 +304,7 @@ typedef struct {
 typedef struct {
 	xcb_screen_t *screen;
 	xcb_visualtype_t *visual_type;
+	int screen_index;
 
 	uint32_t num_labels_used,
 	/* <= */ num_labels_mapped,
@@ -389,9 +426,6 @@ typedef struct {
 static uint8_t num_devices;
 static Device *devices;
 
-#define LABEL_CLASS "heawm"
-#define LABEL_INSTANCE LABEL_CLASS "-label"
-
 typedef struct {
 	int width;
 	int height;
@@ -454,32 +488,75 @@ static uint8_t xkb_base_event;
 static struct xkb_context *xkb_context;
 static xcb_key_symbols_t *symbols;
 
-/** */
 static int argc;
 static char **argv;
 
-#define for_each_template_(elem_type, list, index_type, name, extra) \
-	for (index_type name##_index = 0; (extra) || name##_index < num_##list; ++name##_index) \
-		for (elem_type *const name = &list[name##_index], *loop_ = (void *)true; loop_; loop_ = (void *)false)
+#define print_strerror(what) \
+	fprintf(stderr, "%s: %s: %s\n", __func__, what, strerror(errno));
 
-#define for_each_body for_each_template_(Body, bodies, uint8_t, body, 0 == body_index)
-#define for_each_hand for_each_template_(Hand, hands, uint8_t, hand, 0)
+#define heawm_file(name) heawm_file_internal((char[PATH_MAX]){ 0 }, PATH_MAX, name)
 
-#define for_each_box(x, root, start, block) \
-	for ((x) = (start);;) { \
-		(x)->iter = 0; \
-		block; \
-		while ((x)->num_children <= (x)->iter) { \
-			if ((x) == (root)) { \
-				(x) = NULL; \
-				goto out_for_each; \
-			} \
-			assert((x)->parent); \
-			(x) = (x)->parent; \
-		} \
-		(x) = (x)->children[x->iter++]; \
-	} \
-out_for_each:;
+static char const *
+heawm_file_internal(char *str, size_t size, char *name)
+{
+	strncpy(str, config.heawm_home, size);
+	strncat(str, "/", size);
+	strncat(str, name, size);
+	return str;
+}
+
+#define SPAWN(...) spawn((char const *[]){ __VA_ARGS__, NULL }, NULL, NULL)
+
+static pid_t
+spawn(char const *argv[], void(*fork_cb)(void *), void *arg)
+{
+	pid_t ret;
+	sigset_t sigmask, origmask;
+
+	/* block all signals in order to avoid executing registered signal
+	 * handlers in child. */
+	sigfillset(&sigmask);
+	pthread_sigmask(SIG_SETMASK, &sigmask, &origmask);
+
+	fprintf(stderr, "spawning");
+	for (char const **arg = argv; *arg; ++arg)
+		fprintf(stderr, " \"%s\"", *arg);
+	fputc('\n', stderr);
+
+	if (0 == (ret = fork())) {
+		/* move process into its own session */
+		setsid();
+
+		/* signal handlers have to be reset to their default action
+		 * before we unblock them for the new process to avoid executing
+		 * them before exec() */
+		struct sigaction const sa = {
+			.sa_handler = SIG_DFL
+		};
+
+		for (int sig = 1; sig < SIGRTMAX; ++sig)
+			sigaction(sig, &sa, NULL);
+
+		sigemptyset(&sigmask);
+		pthread_sigmask(SIG_SETMASK, &sigmask, NULL);
+
+		/* disconnet standard io */
+		dup2(open("/dev/null", O_RDONLY | O_CLOEXEC | O_CREAT, 0666), STDIN_FILENO);
+		/* dup2(open("/dev/null", O_WRONLY | O_CLOEXEC | O_CREAT, 0666), STDOUT_FILENO); */
+		/* dup2(STDOUT_FILENO, STDERR_FILENO); */
+
+		if (fork_cb)
+			fork_cb(arg);
+
+		execvp(argv[0], (char **)argv);
+		print_strerror("execlp");
+		_exit(127);
+	}
+
+	pthread_sigmask(SIG_SETMASK, &origmask, NULL);
+
+	return ret;
+}
 
 static Box *
 find_box_by_leader(Box *const root, Box *start, xcb_window_t const window)
@@ -916,9 +993,6 @@ update_label(Label *const label)
 	}
 }
 
-#define perr(what) \
-	fprintf(stderr, "%s: %s: %s", __func__, what, strerror(errno));
-
 static void
 restart(void)
 {
@@ -933,7 +1007,7 @@ restart(void)
 		argv[0]
 #endif
 		, argv);
-	perr("execvp");
+	print_strerror("execvp");
 }
 
 static void
@@ -963,6 +1037,13 @@ static void
 handle_signal_quit(int signum)
 {
 	(void)signum;
+
+	/*MAN(HOOKS)
+	 * .TP
+	 * .B exit
+	 * Run before exiting.
+	 */
+	SPAWN(heawm_file("exit"));
 
 	exit(EXIT_SUCCESS);
 }
@@ -1347,6 +1428,9 @@ box_update_label(Box *const box)
 
 		switch (hand->mode) {
 		case mode_default:
+			if (box->hide_label)
+				break;
+			/* fall through */
 		case mode_name:
 			label = new_label_for(box);
 			if (mode_name == hand->mode && hand->mode_box == box) {
@@ -1627,6 +1711,7 @@ update_box(Box *const box)
 		} else {
 			if (box->window != XCB_WINDOW_NONE) {
 				printf("%*.s unmap %x\n", depth, "", box->window);
+				box_delete_labels(box);
 				xcb_unmap_window(conn, box->window);
 			}
 
@@ -1790,7 +1875,7 @@ take_box(Box *const box, bool const out_of_parent)
 static void vacuum_box(Box *box);
 
 static void
-focus_box(Hand *hand, Box *box);
+hand_focus_box(Hand *hand, Box *box);
 
 static void
 find_most_recent_box(Hand *hand, Box *root, uint32_t const focus_seq, Box **boxes, uint32_t n)
@@ -1839,7 +1924,7 @@ focus_all_hands(uint32_t focus_seq)
 		find_most_recent_box(hand, root, focus_seq, &optimum, 1);
 
 		if (optimum) {
-			focus_box(hand, optimum);
+			hand_focus_box(hand, optimum);
 			focus_seq = root->focus_seq;
 		} else {
 			hand->focus = NULL;
@@ -1885,6 +1970,21 @@ hand_do_mode_changes(Hand *const hand)
 	case mode_name:
 		box_propagate_change(hand->mode_box)->label_changed = true;
 		break;
+	}
+
+	hand->num_labels = 0;
+
+	uint64_t const hand_anti_mask = ~(1 << (hand - hands));
+	for_each_body {
+		for (uint32_t j = body->num_labels_used; 0 < j;) {
+			Label *const label = &body->labels[--j];
+			if ((label->hands &= hand_anti_mask))
+				continue;
+
+			Label const tmp = *label;
+			*label = body->labels[--body->num_labels_used];
+			body->labels[body->num_labels_used] = tmp;
+		}
 	}
 }
 
@@ -2338,7 +2438,7 @@ swap_boxes(Box *one, Box *other)
 }
 
 static void
-focus_box(Hand *hand, Box *box)
+hand_focus_box(Hand *hand, Box *box)
 {
 	if (hand->input_focus)
 		box_save_pointer(hand->input_focus, hand);
@@ -2413,20 +2513,31 @@ box_update_size_hints(Box *const box, xcb_size_hints_t const *const hints)
 	}
 }
 
+#define XI_EVENT_MASK(deviceid, mask) \
+	(xcb_input_event_mask_t const *)&(struct xcb_input_event_mask1 { \
+		xcb_input_event_mask_t ma##sk; \
+		uint32_t values[1]; \
+	} const){ \
+		{ \
+			.device##id = deviceid, \
+			.mask_len = ARRAY_SIZE(((struct xcb_input_event_mask1 *)0)->values) \
+		}, \
+		{ mask } \
+	}
+
 /* manage window */
 static Box *
 box_window(xcb_window_t const root_window, xcb_window_t const window)
 {
 	if (!CHECK(xcb_change_window_attributes, conn, window,
 				XCB_CW_EVENT_MASK,
-				&(uint32_t const []){
-					XCB_EVENT_MASK_PROPERTY_CHANGE |
-					XCB_EVENT_MASK_STRUCTURE_NOTIFY |
-					XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
-					/* XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT | */
-					XCB_EVENT_MASK_FOCUS_CHANGE
-				}))
+				&(uint32_t const []){ EVENT_MASK }))
 		return NULL;
+
+	DEBUG_CHECK(xcb_input_xi_select_events, conn, window, 1,
+			XI_EVENT_MASK(XCB_INPUT_DEVICE_ALL,
+					XCB_INPUT_XI_EVENT_MASK_FOCUS_IN |
+					XCB_INPUT_XI_EVENT_MASK_ENTER));
 
 	xcb_get_property_cookie_t cookies[] = {
 		xcb_get_property(conn, 0, window, ATOM(_NET_WM_STATE),       XCB_ATOM_ATOM,       0, 1),
@@ -2561,7 +2672,7 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 	if (hand) {
 		hand->want_focus = false;
 		if (focus && mode_default == hand->mode)
-			focus_box(hand, box);
+			hand_focus_box(hand, box);
 	}
 
 	ewmh_append_client_list(box);
@@ -2814,12 +2925,9 @@ body_setup_screen(Body *body)
 	if (!CHECK(xcb_change_window_attributes, conn, screen->root,
 				XCB_CW_EVENT_MASK,
 				&(uint32_t const []){
-					XCB_EVENT_MASK_PROPERTY_CHANGE |
-					XCB_EVENT_MASK_STRUCTURE_NOTIFY |
-					XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
-					XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
-					XCB_EVENT_MASK_FOCUS_CHANGE
-			}))
+					EVENT_MASK |
+					XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT
+				}))
 	{
 		/* to be honest, this message should only be displayed for
 		 * XCB_ACCESS */
@@ -2849,22 +2957,11 @@ body_setup_screen(Body *body)
 	screen_query_windows(screen);
 
 	DEBUG_CHECK(xcb_input_xi_select_events, conn, screen->root, 1,
-			(xcb_input_event_mask_t const *)&(struct xcb_input_event_mask1 const){
-				{
-					.deviceid = XCB_INPUT_DEVICE_ALL,
-					.mask_len = ARRAY_SIZE(((struct xcb_input_event_mask1 *)0)->values)
-				},
-				{
-					XCB_INPUT_XI_EVENT_MASK_HIERARCHY |
-					XCB_INPUT_XI_EVENT_MASK_BUTTON_PRESS |
-					XCB_INPUT_XI_EVENT_MASK_FOCUS_IN |
-					XCB_INPUT_XI_EVENT_MASK_FOCUS_OUT |
-					XCB_INPUT_XI_EVENT_MASK_ENTER |
-					XCB_INPUT_XI_EVENT_MASK_LEAVE
-				}
-			}
-	);
-
+			XI_EVENT_MASK(XCB_INPUT_DEVICE_ALL,
+						XCB_INPUT_XI_EVENT_MASK_HIERARCHY |
+						XCB_INPUT_XI_EVENT_MASK_BUTTON_PRESS |
+						XCB_INPUT_XI_EVENT_MASK_FOCUS_IN |
+						XCB_INPUT_XI_EVENT_MASK_ENTER));
 }
 
 static xcb_visualtype_t *
@@ -2927,8 +3024,42 @@ head_is_alive(Box const *const head)
 }
 
 static void
+body_set_env(void *arg)
+{
+	Body const *const body = arg;
+	char *host;
+	int display;
+	int screen;
+
+	if (!xcb_parse_display(NULL, &host, &display, &screen))
+		return;
+
+	char display_screen[1 + 20 + 1 + 20 + 1];
+	size_t const host_size = strlen(host);
+
+	char *p;
+	if (!(p = realloc(host, host_size + sizeof display_screen)))
+		return;
+	host = p;
+
+	sprintf(p + host_size, ":%d.%d", display, body->screen_index) + 1;
+
+	setenv("DISPLAY", host, true);
+	free(host);
+}
+
+/* FIXME: also run when XRandR unavailable and root size changed */
+static void
 body_update_heads(Body *const body)
 {
+	/*MAN(HOOKS)
+	 * .TP
+	 * .B displaychange
+	 * Run whenever display configuration changes, e.g. monitor
+	 * connected/disconnected, resolution changed. See xrandr(1).
+	 */
+	spawn((char const *[]){ heawm_file("displaychange"), NULL }, body_set_env, body);
+
 	for (uint16_t i = 0; i < root->num_children; ++i) {
 		Box *const head = root->children[i];
 		if ((body - bodies) != head->body)
@@ -3056,6 +3187,7 @@ setup_display(void)
 		xcb_screen_t *const screen = iter.data;
 		Body *body = &bodies[default_screen == i ? 0 : i + 1];
 
+		body->screen_index = i;
 		body->screen = screen;
 		body->visual_type = lookup_visual_type(screen);
 
@@ -3257,11 +3389,11 @@ get_hand_by_master_keyboard(xcb_input_device_id_t const master_keyboard)
 }
 
 static Device *
-get_device_by_id(xcb_input_device_id_t const device_id)
+get_device_by_id(xcb_input_device_id_t const deviceid)
 {
 	for (uint8_t i = 0; i < num_devices; ++i) {
 		Device const *const device = &devices[i];
-		if (device_id == device->id)
+		if (deviceid == device->id)
 			return (Device *)device;
 	}
 
@@ -3385,7 +3517,7 @@ close_box(Box *const box)
 	box->close_by_force = true;
 
 	DEBUG_CHECK(xcb_send_event, conn, false, box->window,
-			0/* client messages cannot be masked */,
+			XCB_EVENT_MASK_NO_EVENT/* client messages cannot be masked */,
 			(char const *)&(xcb_client_message_event_t){
 				.response_type = XCB_CLIENT_MESSAGE,
 				.format = 32,
@@ -3421,7 +3553,7 @@ handle_client_message(xcb_client_message_event_t const *const event)
 			} else {
 				hand = &hands[box->focus_hand];
 			}
-			focus_box(hand, box);
+			hand_focus_box(hand, box);
 		}
 	}
 }
@@ -3437,6 +3569,14 @@ update_hands(void)
 	if (!reply)
 		return;
 
+	/*MAN(HOOKS)
+	 * .TP
+	 * .B inputchange
+	 * Run whenever input devices change, e.g. keyboard plugged/unplugged,
+	 * master device added. See xinput(1).
+	 */
+	SPAWN(heawm_file("inputchange"));
+
 	/* map old hand indexes to new hand indexes for correct stack history */
 	/* according to specification devices above 127 are invisible to clients */
 	uint8_t hand_map[NULL_HAND + 1];
@@ -3448,10 +3588,10 @@ update_hands(void)
 	uint8_t new_num_hands = 0;
 	for (xcb_input_xi_device_info_iterator_t iter = xcb_input_xi_query_device_infos_iterator(reply);
 	     0 < iter.rem;
-	     xcb_input_xi_device_info_next(&iter)) {
-		xcb_input_xi_device_info_t *const device = iter.data;
-		if (XCB_INPUT_DEVICE_TYPE_MASTER_POINTER == device->type)
-			++new_num_hands;
+	     xcb_input_xi_device_info_next(&iter))
+	{
+		xcb_input_xi_device_info_t const *const input_device = iter.data;
+		new_num_hands += XCB_INPUT_DEVICE_TYPE_MASTER_POINTER == input_device->type;
 	}
 
 	Hand *const new_hands = calloc(new_num_hands, sizeof *new_hands);
@@ -3470,7 +3610,7 @@ update_hands(void)
 	     0 < iter.rem;
 	     xcb_input_xi_device_info_next(&iter))
 	{
-		xcb_input_xi_device_info_t *const input_device = iter.data;
+		xcb_input_xi_device_info_t const *const input_device = iter.data;
 
 		/* master devices are cursors on the screen. we only have to deal with them */
 		/* any slave device can control master */
@@ -3547,7 +3687,7 @@ update_hands(void)
 			 * not have to be touched */
 			hand_map[old_hand - hands] = hand - new_hands;
 			/* NOTE: grabbing have been already set up */
-			continue;
+			goto add_device;
 		}
 
 		hand->master_pointer = input_device->deviceid;
@@ -3616,24 +3756,15 @@ update_hands(void)
 
 		for_each_body {
 			DEBUG_CHECK(xcb_input_xi_select_events, conn, body->screen->root, 1,
-					(xcb_input_event_mask_t const *)&(struct xcb_input_event_mask1 const){
-						{
-							.deviceid = device->id,
-							.mask_len = ARRAY_SIZE(((struct xcb_input_event_mask1 *)0)->values)
-						},
-						{
-							XCB_INPUT_XI_EVENT_MASK_KEY_PRESS |
-							XCB_INPUT_XI_EVENT_MASK_FOCUS_IN |
-							XCB_INPUT_XI_EVENT_MASK_FOCUS_OUT |
-							XCB_INPUT_XI_EVENT_MASK_ENTER |
-							XCB_INPUT_XI_EVENT_MASK_LEAVE
-						}
-					}
-			);
+					XI_EVENT_MASK(device->id,
+								XCB_INPUT_XI_EVENT_MASK_KEY_PRESS |
+								XCB_INPUT_XI_EVENT_MASK_FOCUS_IN |
+								XCB_INPUT_XI_EVENT_MASK_ENTER));
 		}
 
 		++device;
 	}
+	assert(device - devices == num_devices);
 
 	free(reply);
 
@@ -3674,7 +3805,11 @@ static void
 handle_input_hierarchy_change(xcb_input_hierarchy_event_t const *const event)
 {
 	if (event->flags & (XCB_INPUT_HIERARCHY_MASK_MASTER_ADDED |
-	                    XCB_INPUT_HIERARCHY_MASK_MASTER_REMOVED))
+	                    XCB_INPUT_HIERARCHY_MASK_MASTER_REMOVED |
+	                    XCB_INPUT_HIERARCHY_MASK_SLAVE_ADDED |
+	                    XCB_INPUT_HIERARCHY_MASK_SLAVE_REMOVED |
+	                    XCB_INPUT_HIERARCHY_MASK_SLAVE_ATTACHED |
+	                    XCB_INPUT_HIERARCHY_MASK_SLAVE_DETACHED))
 		update_hands();
 }
 
@@ -3770,8 +3905,11 @@ out:
 #endif
 
 static void
-hand_handle_input_key_normal(Hand *const hand, xcb_keysym_t const sym)
+hand_handle_input_key_normal(Hand *const hand, xcb_keysym_t const sym, bool const repeating)
 {
+	if (repeating)
+		return;
+
 	hand->want_focus |= XKB_KEY_Return == sym || XKB_KEY_KP_Enter == sym;
 
 	if (hand->input_focus) {
@@ -3798,26 +3936,37 @@ hand_input_reset(Hand *const hand)
 static void
 hand_input_try_jump(Hand *const hand)
 {
-	printf("jump %.*s\n", 4, hand->user_input);
-
 	Box *box;
 	if (!find_box_by_name(&box, hand->user_input))
 		return;
 
 	assert(box != root);
 
-	hand_input_reset(hand);
+	if (!box) {
+		char name[NAME_LEN + 1];
+		strncpy(name, hand->user_input, NAME_LEN);
+		name[NAME_LEN] = '\0';
 
-	if (!box)
-		return;
+		/*MAN(HOOKS)
+		 * .TP
+		 * .B inputchange
+		 * Run whenever user has would like to jump to a non-existing
+		 * label. Can be useful to automagically start programs.
+		 */
+		if (SPAWN(heawm_file("autostart"), name))
+			hand->want_focus = true;
+		goto reset_input;
+	}
 
 	if (box == hand->input_focus)
 		box = hand->latest_input[box == hand->latest_input[0]];
 
 	if (!box)
-		return;
+		goto reset_input;
 
-	focus_box(hand, box);
+	hand_focus_box(hand, box);
+reset_input:
+	hand_input_reset(hand);
 }
 
 static bool
@@ -3839,56 +3988,6 @@ hand_handle_input(Hand *const hand, xcb_keysym_t const sym)
 #undef INPUT_BETWEEN
 }
 
-static struct {
-	char const *terminal;
-	char const *shell;
-} config;
-
-#define SPAWN(...) spawn((char const *[]){ __VA_ARGS__, NULL })
-
-static pid_t
-spawn(char const *argv[])
-{
-	pid_t ret;
-	sigset_t sigmask, origmask;
-
-	/* block all signals in order to avoid executing registered signal
-	 * handlers in child. */
-	sigfillset(&sigmask);
-	pthread_sigmask(SIG_SETMASK, &sigmask, &origmask);
-
-	if (0 == (ret = fork())) {
-		/* move process into its own session */
-		setsid();
-
-		/* signal handlers have to be reset to their default action
-		 * before we unblock them for the new process to avoid executing
-		 * them before exec() */
-		struct sigaction const sa = {
-			.sa_handler = SIG_DFL
-		};
-
-		for (int sig = 1; sig < SIGRTMAX; ++sig)
-			sigaction(sig, &sa, NULL);
-
-		sigemptyset(&sigmask);
-		pthread_sigmask(SIG_SETMASK, &sigmask, NULL);
-
-		/* disconnet standard io */
-		dup2(open("/dev/null", O_RDONLY | O_CLOEXEC | O_CREAT, 0666), STDIN_FILENO);
-		/* dup2(open("/dev/null", O_WRONLY | O_CLOEXEC | O_CREAT, 0666), STDOUT_FILENO); */
-		/* dup2(STDOUT_FILENO, STDERR_FILENO); */
-
-		execvp(argv[0], (char **)argv);
-		perr("execlp");
-		_exit(127);
-	}
-
-	pthread_sigmask(SIG_SETMASK, &origmask, NULL);
-
-	return ret;
-}
-
 static bool
 hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const repeating)
 {
@@ -3904,11 +4003,13 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 		hand_input_try_jump(hand);
 	} else switch (sym) {
 	case XKB_KEY_parenright:
+	{
 		if (repeating)
 			break;
 
 		hand->want_focus = true;
-		SPAWN("alacritty", "-e", config.shell, "-c", "~/.config/heawm/quickstart");
+		SPAWN(config.terminal, "-e", heawm_file("quickstart"));
+	}
 		break;
 
 	case XKB_KEY_bracketright:
@@ -3941,8 +4042,7 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 		/*MAN(Keybindings)
 		 * .TP
 		 * .B Mod+Return
-		 * Open $
-		 * .B TERMINAL .
+		 * Open $\fBTERMINAL\fR.
 		 */
 		hand->want_focus = true;
 		SPAWN(config.terminal);
@@ -4020,7 +4120,7 @@ hand_handle_input_key_mode(Hand *const hand, xcb_keysym_t const sym)
 			box_propagate_change(hand->mode_box)->label_changed = true;
 			break;
 		}
-		box_propagate_change(hand->focus)->content_changed = true;
+		box_propagate_change(hand->mode_box)->label_changed = true;
 	}
 		return;
 
@@ -4248,8 +4348,8 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 		return true;
 	}
 
-	hand->num_labels = 0;
-	hand_do_mode_changes(hand);
+	if (mode_default != hand->mode)
+		hand_do_mode_changes(hand);
 
 	return false;
 }
@@ -4260,6 +4360,7 @@ handle_input_key_press(xcb_input_key_press_event_t const *const event)
 	bool propagate = true;
 
 	Device *const device = get_device_by_id(event->sourceid);
+	assert(device);
 	Hand *hand = device->hand;
 
 	assert(hand == hands);
@@ -4274,13 +4375,19 @@ handle_input_key_press(xcb_input_key_press_event_t const *const event)
 		goto out;
 
 	xkb_keysym_t const sym = syms[0];
-	/* printf("key=0x%x mods=%d,%d deviceid=%d sourceid=%d (root=%x)\n", sym, event->mods.effective,event->mods.base, event->deviceid, event->sourceid, event->root); */
+	/* printf("key=0x%x mods=%d,%d,%d,%d deviceid=%d sourceid=%d (root=%x)\n", sym,
+	       event->mods.effective,
+	       event->mods.base,
+	       event->mods.latched,
+	       event->mods.locked,
+	       event->deviceid, event->sourceid, event->root); */
 
 	LabelMode const old_mode = hand->mode;
 	bool const is_grab = hand->master_keyboard == event->deviceid;
 
 	switch (hand->mode) {
-	case mode_default:;
+	case mode_default:
+	{
 		/* if (XKB_KEY_Super_L == sym || XKB_KEY_Super_R == sym) {
 			propagate = false; */
 			/* hand_set_timeout(hand, 70); */
@@ -4294,33 +4401,33 @@ handle_input_key_press(xcb_input_key_press_event_t const *const event)
 			hand_grab_keyboard(event->root, event->deviceid);
 		}
 #endif
+		bool const repeating = XCB_INPUT_KEY_EVENT_FLAGS_KEY_REPEAT & event->flags;
 
 		if (!is_grab) {
-			if (!(KEY_MOD_MASK & event->mods.effective))
-				hand_handle_input_key_normal(hand, sym);
+			if (!(KEY_MOD_MASK & event->mods.base))
+				hand_handle_input_key_normal(hand, sym, repeating);
 			return;
-		} else switch (KEY_MOD_MASK & event->mods.effective) {
+		} else switch (KEY_MOD_MASK & event->mods.base) {
 		default:
-			propagate = (hand_handle_input_key_normal(hand, sym), true);
+			propagate = (hand_handle_input_key_normal(hand, sym, repeating), true);
 			break;
 
 		case XCB_MOD_MASK_4:
 			if (hand->master_keyboard != event->deviceid)
 				break;
 
-			propagate = hand_handle_input_key_super(hand, sym,
-					XCB_INPUT_KEY_EVENT_FLAGS_KEY_REPEAT & event->flags);
+			propagate = hand_handle_input_key_super(hand, sym, repeating);
 			break;
 
 		case XCB_MOD_MASK_4 | XCB_MOD_MASK_CONTROL:
 		case XCB_MOD_MASK_4 | XCB_MOD_MASK_1:
-			propagate = hand_handle_input_key_command(hand, sym,
-					XCB_INPUT_KEY_EVENT_FLAGS_KEY_REPEAT & event->flags);
+			propagate = hand_handle_input_key_command(hand, sym, repeating);
 			break;
 		}
 
 		if (!hand->input_focus)
 			propagate = false;
+	}
 		break;
 
 	default:
@@ -4330,7 +4437,7 @@ handle_input_key_press(xcb_input_key_press_event_t const *const event)
 			break;
 
 		/* RIP. dumb user get stuck and tries to escape */
-		if (KEY_MOD_MASK & event->mods.effective)
+		if (KEY_MOD_MASK & event->mods.base)
 			/* but we just let this little shit shuffering a bit */
 			break;
 
@@ -4371,7 +4478,6 @@ handle_input_button_press(xcb_input_button_press_event_t const *const event)
 		return;
 #endif
 
-	/* assert(XCB_MOD_MASK_4 == (event->mods.effective & KEY_MOD_MASK)); */
 	printf("button\n");
 
 	bool propagate = true;
@@ -4379,7 +4485,7 @@ handle_input_button_press(xcb_input_button_press_event_t const *const event)
 	Box *box = find_box_in_body_by_window(body, event->child);
 	if (box) {
 		propagate = false;
-		focus_box(hand, box);
+		hand_focus_box(hand, box);
 	}
 
 	xcb_input_xi_allow_events(conn, XCB_CURRENT_TIME, event->deviceid,
@@ -4395,7 +4501,18 @@ handle_input_enter(xcb_input_enter_event_t const *const event)
 	if (XCB_INPUT_NOTIFY_MODE_NORMAL != event->mode)
 		return;
 
-	xcb_input_xi_set_client_pointer(conn, event->child, event->deviceid);
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B Mod4+Mouse Enter...
+	 * Focus window.
+	 */
+	if (XCB_MOD_MASK_4 == event->mods.base) {
+		Hand *const hand = find_hand_by_master_pointer(event->deviceid);
+		Box *const box = find_box_by_window(root, root, event->event);
+		hand_focus_box(hand, box);
+	} else {
+		xcb_input_xi_set_client_pointer(conn, event->child, event->deviceid);
+	}
 }
 
 static void
@@ -4428,7 +4545,6 @@ handle_input_event(xcb_ge_generic_event_t const *const event)
 	case XCB_INPUT_UNGRAB_DEVICE_KEY:
 		break;
 
-	case XCB_INPUT_LEAVE:
 	case XCB_INPUT_ENTER:
 		handle_input_enter((void const *)event);
 		break;
@@ -4665,6 +4781,34 @@ init_config(void)
 
 	(config.terminal = getenv("TERMINAL")) ||
 	(config.terminal = "xterm");
+
+	char *env;
+	/*MAN(ENVIRONMENT)
+	 * .TP
+	 * .B HEAWM_HOME
+	 * Specifies directory where main configuration resides.
+	 */
+	if ((env = getenv("HEAWM_HOME"))) {
+		snprintf(config.heawm_home, sizeof config.heawm_home,
+				"%s", env);
+	} else if ((env = getenv("XDG_CONFIG_HOME"))) {
+		/* FIXME: split on ':' */
+		snprintf(config.heawm_home, sizeof config.heawm_home,
+				"%s/heawm", env);
+	} else if ((env = getenv("HOME"))) {
+		struct stat st;
+
+		snprintf(config.heawm_home, sizeof config.heawm_home,
+				"%s/.heawm", env);
+
+		if (stat(config.heawm_home, &st) || !S_ISDIR(st.st_mode))
+			snprintf(config.heawm_home, sizeof config.heawm_home,
+					"%s/.config/heawm", env);
+	} else {
+		strcpy(config.heawm_home, ".");
+	}
+	/* make sure environment variable set so can be used by scripts */
+	setenv("HEAWM_HOME", config.heawm_home, false);
 }
 
 int
@@ -4697,15 +4841,18 @@ main(int _argc, char *_argv[])
 		}
 	}
 
-	/* BROADCAST(start, &(struct start_args){0}); */
-
 	init_config();
 
 	connect_display();
 	setup_xrm();
 	setup_display();
 
-	SPAWN(config.shell, "-c", "~/.xinit");
+	/*MAN(HOOKS)
+	 * .TP
+	 * .B startup
+	 * Run on program (re)start.
+	 */
+	SPAWN(heawm_file("startup"));
 
 	return run();
 }

@@ -66,6 +66,15 @@ understands the following X resources:
 .
 INCLUDE(RESOURCES)
 .
+.SH HOOKS
+Hooks can be installed under $\fBHEAWM_HOME\fR directory.
+.
+INCLUDE(HOOKS)
+.
+.SH ENVIRONMENT
+.
+INCLUDE(ENVIRONMENT)
+.
 .SH AUTHORS
 Written by zsugabubus.
 .
