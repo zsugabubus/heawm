@@ -14,7 +14,7 @@ INSTALL_PROGRAM ?= $(INSTALL)
 INSTALL_DATA ?= $(INSTALL)
 
 CFLAGS += -std=c11 -pedantic -Wall -Wextra -Werror=vla -g -D_XOPEN_SOURCE=700 -Wno-unused -fstrict-aliasing
-CFLAGS += $(shell pkg-config --libs --cflags xcb{,-cursor,-keysyms,-shape,-xinput,-randr,-xrm,-xkb} cairo xkbcommon-x11)
+CFLAGS += $(shell pkg-config --libs --cflags xcb{,-cursor,-keysyms,-shape,-xinput,-randr,-xkb,-xrm,-xtest} cairo xkbcommon-x11)
 
 # release | debug
 BUILD ?= debug
@@ -29,8 +29,6 @@ $(error unknown BUILD mode)
 endif
 
 VERSION := $(shell git describe --always --tags --dirty --match 'v*')
-
-export DISPLAY = :0
 
 all : $(TARGET)
 	@pgrep -s 0 -x $< && \
