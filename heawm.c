@@ -167,21 +167,20 @@ https://www.x.org/releases/X11R7.5/doc/randrproto/randrproto.txt
 #define for_each_body for_each_template_(Body, bodies, uint8_t, body, 0 == body_index)
 #define for_each_hand for_each_template_(Hand, hands, uint8_t, hand, 0)
 
-#define for_each_box(x, root, start, ...) \
-	for ((x) = (start);;) { \
-		(x)->iter = 0; \
-		__VA_ARGS__; \
+#define for_each_box(x, root, start) \
+	for (bool loop_ = ((x) = (start), true); loop_ && ((x)->iter = 0, true); ({ \
 		while ((x)->num_children <= (x)->iter) { \
 			if ((x) == (root)) { \
 				(x) = NULL; \
-				goto out_for_each; \
+				loop_ = false; \
+				break; \
 			} \
 			assert((x)->parent); \
 			(x) = (x)->parent; \
 		} \
-		(x) = (x)->children[x->iter++]; \
-	} \
-out_for_each:;
+		if (loop_) \
+			(x) = (x)->children[x->iter++]; \
+	}))
 
 static struct {
 	char const *terminal;
@@ -198,21 +197,16 @@ typedef struct {
  * to introduce it better */
 typedef struct box Box;
 struct box {
-	/** box location relative to the root box */
-	int16_t x, y;
-	/** dimensions */
-	uint16_t width, height;
+	int16_t x, y; /** box location relative to root box */
+	uint16_t width, height; /** dimensions */
 
-	/** user requested boundaries; mainly for floating windows */
+	/** user requested rect; mainly for floating windows */
 	int16_t user_x, user_y;
 	uint16_t user_width, user_height;
 
-	/** size granulaty */
-	uint8_t mod_x, mod_y;
+	uint8_t mod_x, mod_y; /** size granulaty */
 
-	/** client window */
-	xcb_window_t window;
-	/* xcb_window_t frame; */
+	xcb_window_t window; /** client window */
 	xcb_window_t leader;
 
 	/** number of |children| */
@@ -234,17 +228,15 @@ struct box {
 	 * - -1: row,
 	 * - other: fixed, user set */
 	         num_columns;
-	/* TODO: maybe a different name; label/id? */
-	/** permanent name */
-	char name[NAME_LEN];
+	char name[NAME_LEN]; /** address of box for user */
 	/** relative size to siblings
 	 *
 	 * used only when box has one variable dimension, i.e. when parent
 	 * layout consits of a single row or column. */
 	uint8_t weight;
-	/** the body */
-	uint8_t body;
+	uint8_t body; /** the body */
 
+	/* (unused) */
 	/* TODO: different name: attributes? */
 	char *title; /* stuff that desribes window (X11 window title or monitor name) */
 
@@ -289,11 +281,8 @@ struct box {
 	 */
 	uint8_t focus_hand;
 
-	/** the bigger box */
-	Box *parent;
-
-	/** contained boxes for containers */
-	Box *children[];
+	Box *parent; /** the bigger box */
+	Box *children[]; /** contained boxes (for containers) */
 };
 
 /** the box that contains everything
@@ -302,27 +291,22 @@ struct box {
  */
 static Box *root;
 
-/** little angels flying around screen */
+/** little angels flying around the screen */
 typedef struct {
 	Box *base;
 	uint64_t hands;
-	xcb_window_t window; /** the X window */
-	xcb_pixmap_t shape; /** shape of bounding box */
-	int16_t x, y; /** position of label */
+	xcb_window_t window;
+	xcb_pixmap_t shape;
+	int16_t x, y;
+	enum {
+		label_normal, /** text only */
+		label_box, /** draw glory if |base| focused */
+		label_hline, /** text with horizontal line */
+		label_vline, /** text with vertical line */
+	} type: 2;
 	bool position_changed: 1,
 	     content_changed: 1;
-	enum {
-		/** text only */
-		label_normal,
-		/** draw glory if |base| focused */
-		label_box,
-		/** text with horizontal line */
-		label_hline,
-		/** text with vertical line */
-		label_vline
-	} type: 2;
-	/** name of label, just like for boxes */
-	char name[NAME_LEN];
+	char name[NAME_LEN]; /** address of label, just like for boxes */
 } Label;
 
 typedef struct {
@@ -334,7 +318,8 @@ typedef struct {
 	/* <= */ num_labels_mapped,
 	/* <= */ num_labels;
 	Label *labels;
-	xcb_window_t blackhole;
+
+	xcb_window_t dummy;
 } Body;
 
 static uint8_t num_bodies;
@@ -589,10 +574,9 @@ static Box *
 find_box_by_leader(Box *const root, Box *start, xcb_window_t const window)
 {
 	Box *box;
-	for_each_box(box, root, start, {
+	for_each_box(box, root, start)
 		if (window == box->leader)
 			break;
-	})
 	return box;
 }
 
@@ -600,10 +584,9 @@ static Box *
 find_box_by_window(Box *const root, Box *start, xcb_window_t const window)
 {
 	Box *box;
-	for_each_box(box, root, start, {
+	for_each_box(box, root, start)
 		if (window == box->window)
 			break;
-	})
 	return box;
 }
 
@@ -1111,13 +1094,12 @@ find_box_by_name(Box **optimum, char name[static NAME_LEN])
 
 	bool complete = true;
 	Box *box;
-	for_each_box(box, root, root, {
-		if (0 == memcmp(name, box->name, n)) {
+	for_each_box(box, root, root)
+		if (!memcmp(name, box->name, n)) {
 			complete &= NAME_LEN <= n || '\0' == box->name[n];
 			if (!*optimum || (*optimum)->focus_seq < box->focus_seq)
 				*optimum = box;
 		}
-	})
 
 	return complete;
 }
@@ -1155,25 +1137,24 @@ box_name(Box *const box, bool const iscontainer)
 	if (to)
 		for (uint16_t i = 0; i < to->num_children; ++i) {
 			Box const *const child = to->children[i];
-			if (0 == memcmp(child->name, box->name, n))
+			if (!memcmp(child->name, box->name, n))
 				letters[(unsigned char)child->name[n]].focus_seq = -1;
 		}
 
 	/* prohibit same name in subtree so we can always move vertically */
 	for (to = box; (to = to->parent);)
-		if (0 == memcmp(to->name, box->name, n))
+		if (!memcmp(to->name, box->name, n))
 			letters[(unsigned char)to->name[n]].focus_seq = -1;
 
 	unsigned char optimum = '\0';
 	letters[optimum].focus_seq = -1;
 
-	for_each_box(to, root, root, {
-		if (0 == memcmp(to->name, box->name, n)) {
+	for_each_box(to, root, root)
+		if (!memcmp(to->name, box->name, n)) {
 			uint32_t *const p = &letters[(unsigned char)to->name[n]].focus_seq;
 			if (*p < to->focus_seq + 1)
 				*p = to->focus_seq + 1;
 		}
-	})
 
 	for (unsigned char start = iscontainer ? 'A' : 'a', end = start + ('Z' - 'A');
 	     start <= end;
@@ -1480,37 +1461,36 @@ box_update_label(Box *const box)
 			if (box_is_monitor(box))
 				break;
 
-			/* FIXME: check if hand really focuses */
-			bool const focused = box_is_focused(box) && !box_is_container(box);
+			bool const is_container = box_is_container(box);
+			bool const leftmost_col = box->parent->x == box->x;
+			bool const top_row = box->parent->y != box->y;
+			bool const bottom_row = box->parent->y + box->height == box->y + box->height;
+			bool const rightmost_col = box->parent->x + box->width == box->x + box->width;
+			uint8_t i = 0;
+			int to[8];
 
-			generate_name(name, focused ? 'h' - 'a' : hand->num_labels++);
+			if (is_container || !(top_row && leftmost_col))
+				to[i++] = left, to[i++] = top;
 
-			label = new_label_for(box);
-			label_assign_hand(label, hand);
-			label_set_name(label, name);
-			label_set_position_to_box(label, left, top, true);
-			label_update(label);
+			if (is_container || (bottom_row && !leftmost_col))
+				to[i++] = left, to[i++] = bottom;
 
-			generate_name(name, focused ? 'j' - 'a' : hand->num_labels++);
-			label = new_label_for(box);
-			label_assign_hand(label, hand);
-			label_set_name(label, name);
-			label_set_position_to_box(label, left, bottom, true);
-			label_update(label);
+			if (is_container || (!top_row && rightmost_col))
+				to[i++] = right, to[i++] = bottom;
 
-			generate_name(name, focused ? 'k' - 'a' : hand->num_labels++);
-			label = new_label_for(box);
-			label_assign_hand(label, hand);
-			label_set_name(label, name);
-			label_set_position_to_box(label, right, bottom, true);
-			label_update(label);
+			if (is_container || !(bottom_row && rightmost_col))
+				to[i++] = right, to[i++] = top;
 
-			generate_name(name, focused ? 'l' - 'a' : hand->num_labels++);
-			label = new_label_for(box);
-			label_assign_hand(label, hand);
-			label_set_name(label, name);
-			label_set_position_to_box(label, right, top, true);
-			label_update(label);
+			while (0 < i) {
+				i -= 2;
+
+				generate_name(name, hand->num_labels++);
+				label = new_label_for(box);
+				label_assign_hand(label, hand);
+				label_set_name(label, name);
+				label_set_position_to_box(label, to[i], to[i + 1], true);
+				label_update(label);
+			}
 		}
 			break;
 
@@ -1602,31 +1582,26 @@ box_update(Box *const box)
 #endif
 
 	if (box != root)
-	printf("%*.sbox %p { N=%d title=\"%s\" %sfocus=#%d/%d/%d name=%.*s %s%s}\n",
-			depth, "",
-			(void *)box,
-			box->num_children,
-			box->title,
-			box->focus_lock ? "focus_lock " : "",
-			box->focus_seq, box->focus_hand, root->focus_seq,
-			NAME_LEN, box->name,
-			box->user_concealed ? "user" : "",
-			box->concealed ? "concealed " : " ",
-			box_is_floating(box) ? "floating " : "");
+		printf("%*.sbox 0x%p (%.*s) win=0x%x %ux%u+%d+%d u%ux%u+%d+%d title=\"%s\" focus=%d/%d hand=%d %c%c%c%c\n",
+				depth, "",
+				(void *)box,
+				NAME_LEN, box->name,
+				box->window,
+				box->width, box->height, box->x, box->y,
+				box->user_width, box->user_height, box->user_x, box->user_y,
+				box->title,
+				box->focus_seq, root->focus_seq,
+				box->focus_hand,
+				box_is_floating(box) ? 'F' : '-',
+				box->focus_lock ? 'L' : '-',
+				box->user_concealed ? 'U' : '-',
+				box->concealed ? 'C' : '-');
 
 	depth += 3;
 
 	uint32_t mask = 0;
 	uint32_t list[7];
 	uint8_t i = 0;
-
-	if (box != root)
-		printf("%*.sw=%x pos=%s(%d,%d) size=%s(%d,%d)\n", depth, "",
-				box->window,
-				box->position_changed ? "*" : "",
-				box->x, box->y,
-				box->layout_changed ? "*" : "",
-				box->width, box->height);
 
 	bool const content_changed = box->content_changed;
 	bool const position_changed = box->position_changed;
@@ -1681,7 +1656,7 @@ box_update(Box *const box)
 			int16_t y = 0, x = 0;
 			uint16_t height = box->height / (!num_rows ? 1 : num_rows);
 
-			printf("%*.sgrid=nchildren=%d; ntiles=%d; cols=%d\n",
+			printf("%*.srearrange: children=%d tiles=%d cols=%d\n",
 					depth, "", box->num_children, tiles, num_columns);
 			uint16_t width = box->width / num_columns;
 			for (uint16_t i = 0; i < box->num_children; ++i) {
@@ -1716,23 +1691,23 @@ box_update(Box *const box)
 					 * - last children in column or row eats up all space,
 					 * - size is rounded to the nearest mod_{x,y}
 					 */
-					uint16_t const wwidth =
+					uint16_t const tile_width =
 						column + 1 == num_columns
 						? box->width - x
 						: width + (1 == num_rows && 1 < tiles && 0 < child->mod_x ? child->mod_x / 2 - (width + child->mod_x / 2) % child->mod_x : 0);
-					uint16_t const wheight =
+					uint16_t const tile_height =
 						1 == tiles
 						? box->height - y
 						: height + (1 == num_columns && 1 < tiles && 0 < child->mod_y ? child->mod_y / 2 - (height + child->mod_y / 2) % child->mod_y : 0);
 					box_set_position(child, box->x + x + gap.left, box->y + y + gap.top);
-					box_set_size(child, wwidth - (gap.left + gap.right), wheight - (gap.top + gap.bottom));
+					box_set_size(child, tile_width - (gap.left + gap.right), tile_height - (gap.top + gap.bottom));
 
 					--tiles;
 					if (++column < num_columns) {
-						x += wwidth;
+						x += tile_width;
 					} else {
 						++row, column = 0;
-						y += wheight, x = 0;
+						y += tile_height, x = 0;
 
 						if (0 < tiles && tiles < num_columns) {
 							num_columns = tiles;
@@ -1749,7 +1724,7 @@ box_update(Box *const box)
 			should_map = true;
 		} else {
 			if (box->window != XCB_WINDOW_NONE) {
-				printf("%*.s unmap %x\n", depth, "", box->window);
+				printf("%*.s unmap\n", depth, "");
 				box_delete_labels(box);
 				xcb_unmap_window(conn, box->window);
 			}
@@ -1788,15 +1763,14 @@ box_update(Box *const box)
 		if (0 < i) {
 			mask |= XCB_CONFIG_WINDOW_STACK_MODE;
 			list[i++] = XCB_STACK_MODE_BELOW;
-			printf("%*.s configure %d\n", depth, "", i);
+			printf("%*.s configure n=%d\n", depth, "", i);
 			DEBUG_CHECK(xcb_configure_window, conn, box->window, mask, list);
 		}
 
-		/* map only after configured */
+		/* map only after configure */
 		if (should_map) {
 			printf("%*.s map\n", depth, "");
-			if (CHECK(xcb_map_window, conn, box->window))
-			{
+			if (CHECK(xcb_map_window, conn, box->window)) {
 				/* if we could not map the window that means
 				 * that something bad happened with the window
 				 * since we received map_request. we will not
@@ -1817,16 +1791,10 @@ box_update(Box *const box)
 				if (box == focus)
 					hand_focus(hand);
 			}
-
-#if 0
-			if (!(should_map || label_changed))
-				box_repaint_labels(box);
-#endif
 		}
 
-		if (should_map || label_changed) {
+		if (should_map || label_changed)
 			box_update_label(box);
-		}
 	}
 
 out:
@@ -1927,7 +1895,7 @@ hand_find_recents(Hand *hand, Box *root, uint32_t const focus_seq, Box **boxes, 
 		boxes[i] = (Box *)&EMPTY_BOX;
 
 	Box *box;
-	for_each_box(box, root, root, {
+	for_each_box(box, root, root)
 		if (/* is it a client window? */
 		    !box_is_container(box) &&
 		    /* if not find a box that... */
@@ -1944,7 +1912,6 @@ hand_find_recents(Hand *hand, Box *root, uint32_t const focus_seq, Box **boxes, 
 				boxes[i] = box;
 			}
 		}
-	})
 
 	for (uint32_t i = n; 0 < i && &EMPTY_BOX == boxes[--i];)
 		boxes[i] = NULL;
@@ -1990,10 +1957,10 @@ hand_do_mode_changes(Hand *const hand)
 	case mode_move_b:
 	{
 		Box *box;
-		for_each_box(box, root, root, {
+		for_each_box(box, root, root) {
 			box->label_changed = true;
 			box->content_changed = true;
-		})
+		}
 	}
 		break;
 
@@ -2059,7 +2026,7 @@ ewmh_update_client_list(Body const *const body)
 	xcb_prop_mode_t mode = XCB_PROP_MODE_REPLACE;
 
 	Box *box;
-	for_each_box(box, root, root, {
+	for_each_box(box, root, root)
 		if (box->body == (body - bodies) && !box_is_container(box)) {
 			windows[num_windows++] = box->window;
 			if (ARRAY_SIZE(windows) == num_windows) {
@@ -2071,7 +2038,6 @@ ewmh_update_client_list(Body const *const body)
 				mode = XCB_PROP_MODE_APPEND;
 			}
 		}
-	})
 
 	if (0 < num_windows)
 		DEBUG_CHECK(xcb_change_property, conn, mode,
@@ -2554,6 +2520,7 @@ hand_assign_latest_input(Hand *const hand)
 		hand->input_focus->close_by_force = false;
 
 		if (hand->focus != hand->input_focus) {
+			printf("focus := input_focus\n");
 			box_propagate_change(hand->focus)->label_changed = true;
 			hand->focus = hand->input_focus;
 		}
@@ -2626,12 +2593,6 @@ hand_focus_box(Hand *hand, Box *box)
 
 	hand->check_input = true;
 	hand_grab_keyboard(hand);
-
-#if 1
-	/* HACK BECAUSE OF SHIT X AND/OR SHIT PROGRAMS UNABLE TO FUCKING COPE
-	 * WITH FOCUS CHANGE DURING GRABBING */
-	hand_assign_latest_input(hand);
-#endif
 }
 
 static Body *
@@ -3080,7 +3041,7 @@ body_setup_cursor(Body const *const body, char const *const cursor_name)
 static void
 body_setup_net_name(Body const *const body, char const *const name)
 {
-	xcb_window_t const child = body->blackhole;
+	xcb_window_t const child = body->dummy;
 
 	DEBUG_CHECK(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
 			child, ATOM(_NET_WM_NAME),
@@ -3107,9 +3068,9 @@ body_setup_ewmh(Body const *const body)
 static void
 body_setup_net(Body *const body)
 {
-	body->blackhole = xcb_generate_id(conn);
+	body->dummy = xcb_generate_id(conn);
 	DEBUG_CHECK(xcb_create_window, conn, XCB_COPY_FROM_PARENT,
-			body->blackhole,
+			body->dummy,
 			body->screen->root,
 			-1, -1, 1, 1, /* rect */
 			0, /* border */
@@ -3908,6 +3869,7 @@ update_hands(void)
 
 		device->keymap = NULL;
 
+#if 0
 		for_each_body {
 			DEBUG_CHECK(xcb_input_xi_select_events, conn, body->screen->root, 1,
 					XI_EVENT_MASK(device->id,
@@ -3915,6 +3877,7 @@ update_hands(void)
 							XCB_INPUT_XI_EVENT_MASK_FOCUS_IN |
 							XCB_INPUT_XI_EVENT_MASK_ENTER));
 		}
+#endif
 
 		++device;
 	}
@@ -3924,7 +3887,7 @@ update_hands(void)
 
 	/* update focus history */
 	Box *box;
-	for_each_box(box, root, root, {
+	for_each_box(box, root, root) {
 		box->focus_hand = hand_map[box->focus_hand];
 
 		if (!box_is_container(box)) {
@@ -3940,7 +3903,7 @@ update_hands(void)
 				if (NULL_HAND != hand_map[i])
 					Box_pointers(box)[hand_map[i]] = old_pointers[i];
 		}
-	});
+	}
 
 	/* forget deattached hands' focus by incrementing focus number of
 	 * hands alive */
@@ -4574,10 +4537,9 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 			break;
 
 		Box *box;
-		for_each_box(box, hand->focus, hand->focus, {
+		for_each_box(box, hand->focus, hand->focus)
 			if (!box_is_container(box))
 				box_close(box);
-		})
 	}
 		break;
 
