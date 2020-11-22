@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <math.h>
 #include <memory.h>
@@ -11,16 +12,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
-#include <sys/stat.h>
 
 #include <cairo/cairo.h>
 #include <cairo/cairo-xcb.h>
 #include <xcb/randr.h>
 #include <xcb/shape.h>
 #include <xcb/xcb_atom.h>
-#include <xcb/xtest.h>
 #include <xcb/xcb_aux.h>
 #include <xcb/xcb_cursor.h>
 #include <xcb/xcb_event.h>
@@ -29,9 +29,11 @@
 #include <xcb/xcb_image.h>
 #include <xcb/xcb_keysyms.h>
 #include <xcb/xcb_xrm.h>
+#include <xcb/xfixes.h>
 #include <xcb/xinput.h>
 #include <xcb/xkb.h>
 #include <xcb/xproto.h>
+#include <xcb/xtest.h>
 #include <xkbcommon/xkbcommon.h>
 #include <xkbcommon/xkbcommon-x11.h>
 
@@ -340,7 +342,15 @@ typedef struct {
 
 	/** focus freshly mapped related windows */
 	bool want_focus: 1,
-	     check_input: 1;
+	     check_input: 1,
+	     barricade: 1;
+
+	/*
+	 *   0
+	 *1 BOX 3
+	 *   2
+	 */
+	xcb_xfixes_barrier_t barriers[4]; /** pointer barrier (four sides) */
 
 	char user_input[membersizeof(Box, name)];
 
@@ -1331,7 +1341,35 @@ box_restore_pointer(Box const *const box, Hand const *const hand)
 }
 
 static void
-hand_refocus(Hand const *const hand)
+hand_unbarricade(Hand *const hand)
+{
+	if (!hand->barriers[0])
+		return;
+
+	for (uint8_t i = 0; i < ARRAY_SIZE(hand->barriers); ++i)
+		DEBUG_CHECK(xcb_xfixes_delete_pointer_barrier, conn, hand->barriers[i]);
+	hand->barriers[0] = XCB_NONE;
+}
+
+static void
+hand_barricade(Hand *const hand, Box const *const box)
+{
+	hand_unbarricade(hand);
+	for (uint8_t i = 0; i < ARRAY_SIZE(hand->barriers); ++i)
+		DEBUG_CHECK(xcb_xfixes_create_pointer_barrier, conn,
+				(hand->barriers[i] = xcb_generate_id(conn)),
+				box->window,
+				box->x + (i < 2 ? 0 : box->width),
+				box->y + (i < 2 ? 0 : box->height),
+				box->x + (i % 2 ? 0 : box->width),
+				box->y + (i % 2 ? box->height : 0),
+				i < 2 ? XCB_XFIXES_BARRIER_DIRECTIONS_POSITIVE_X | XCB_XFIXES_BARRIER_DIRECTIONS_POSITIVE_Y
+				      : XCB_XFIXES_BARRIER_DIRECTIONS_NEGATIVE_X | XCB_XFIXES_BARRIER_DIRECTIONS_NEGATIVE_Y,
+				1, (uint16_t const[]){ hand->master_pointer });
+}
+
+static void
+hand_refocus(Hand *const hand)
 {
 	Box const *const focus = hand->input_focus;
 	assert(!focus || !box_is_container(focus));
@@ -1343,10 +1381,25 @@ hand_refocus(Hand const *const hand)
 	DEBUG_CHECK(xcb_input_xi_set_client_pointer, conn,
 			focus ? focus->window : XCB_WINDOW_NONE,
 			hand->master_pointer);
+
+	if (hand->barricade && focus)
+		hand_barricade(hand, focus);
 }
 
 static void
-hand_focus(Hand const *const hand)
+hand_set_barrier(Hand *const hand, bool const barricade)
+{
+	if (hand->barricade == barricade)
+		return;
+
+	if ((hand->barricade = barricade))
+		hand_refocus(hand);
+	else
+		hand_unbarricade(hand);
+}
+
+static void
+hand_focus(Hand *const hand)
 {
 	hand_refocus(hand);
 
@@ -1813,12 +1866,16 @@ box_update(Box *const box)
 
 		/* xcb_configure_window(conn, box->window, XCB_CONFIG_WINDOW_BORDER_WIDTH, &(uint32_t const){ 4 }); */
 
-		if (box_is_focused(box) && !box_is_container(box) && focus_changed) {
+		if (box_is_focused(box) && !box_is_container(box) && layout_changed) {
 			/* hand focus can only be updated after window is mapped */
 			for_each_hand {
 				Box const *const focus = hand->input_focus;
-				if (box == focus)
-					hand_focus(hand);
+				if (box == focus) {
+					if (focus_changed)
+						hand_focus(hand);
+					else
+						hand_refocus(hand);
+				}
 			}
 		}
 	}
@@ -2897,6 +2954,7 @@ init_extensions(void)
 	xcb_prefetch_extension_data(conn, &xcb_randr_id);
 	xcb_prefetch_extension_data(conn, &xcb_shape_id);
 	xcb_prefetch_extension_data(conn, &xcb_xkb_id);
+	xcb_prefetch_extension_data(conn, &xcb_xfixes_id);
 
 	ext = xcb_get_extension_data(conn, &xcb_input_id);
 	if (!ext->present)
@@ -2938,6 +2996,25 @@ init_extensions(void)
 		free(reply);
 
 		xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+	}
+
+	ext = xcb_get_extension_data(conn, &xcb_xfixes_id);
+	if (!ext->present) {
+		fprintf(stderr, "XFixes extension missing."
+				" Pointer barricading will not work.\n");
+	} else {
+		GET_REPLY(reply, xcb_xfixes_query_version, conn,
+				XCB_XFIXES_MAJOR_VERSION, XCB_XFIXES_MINOR_VERSION);
+		if (!reply || !(XCB_XFIXES_MAJOR_VERSION == reply->major_version &&
+		                XCB_XFIXES_MINOR_VERSION == reply->minor_version))
+		{
+			fprintf(stderr, "Requested XFixes version %" PRIu32 ".%" PRIu32 " not supported by server; got %" PRIu32 ".%" PRIu32 "."
+					" Pointer barricading may not work.\n",
+					XCB_XKB_MAJOR_VERSION, XCB_XKB_MINOR_VERSION,
+					reply ? reply->major_version : 0, reply ? reply->minor_version : 0);
+		}
+
+		free(reply);
 	}
 }
 
@@ -4550,6 +4627,15 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 	case XKB_KEY_r:
 		/* TODO: take account window gravity */
 		hand->mode = mode_size_side;
+		break;
+
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B Mod+Ctrl+b
+	 * Barricade pointer inside focused box.
+	 */
+	case XKB_KEY_b:
+		hand_set_barrier(hand, !hand->barricade);
 		break;
 
 	/*MAN(Keybindings)
