@@ -354,10 +354,6 @@ typedef struct {
 	Box *mode_box;
 	unsigned mode_dir;
 
-	bool move_selection;
-	uint16_t num_selection;
-	Box const **selection;
-
 	/** box that last time received keyboard input (only non-container);
 	 * we also store the box that was focused before last time since if
 	 * we start typing into the currently focused window that is not
@@ -1133,7 +1129,7 @@ box_propagate_change(Box *box)
 }
 
 static bool
-box_name(Box *const box, bool const iscontainer)
+box_name(Box *const box, bool const is_container)
 {
 	/* collect the min distance, max focus_seq */
 	struct {
@@ -1175,7 +1171,7 @@ box_name(Box *const box, bool const iscontainer)
 				*p = to->focus_seq + 1;
 		}
 
-	for (unsigned char start = iscontainer ? 'A' : 'a', end = start + ('Z' - 'A');
+	for (unsigned char start = is_container ? 'A' : 'a', end = start + ('Z' - 'A');
 	     start <= end;
 	     ++start)
 	{
@@ -1183,8 +1179,10 @@ box_name(Box *const box, bool const iscontainer)
 			optimum = start;
 	}
 
-	if (!optimum)
+	if (!optimum) {
+		abort();
 		return false;
+	}
 
 	box->name[n] = optimum;
 
@@ -1463,6 +1461,7 @@ box_update_label(Box *const box)
 				break;
 			/* fall through */
 		case mode_name:
+		case mode_move:
 			label = new_label_for(box);
 			if (mode_name == hand->mode && hand->mode_box == box) {
 				char display_name[sizeof name + 1];
@@ -1532,7 +1531,6 @@ box_update_label(Box *const box)
 			break;
 
 		case mode_size_side:
-		case mode_move:
 		{
 			if (box_is_monitor(box))
 				break;
@@ -1567,7 +1565,6 @@ box_update_label(Box *const box)
 			label_set_name(label, name);
 			label_set_position_to_box(label, right, center, true);
 			label_update(label);
-
 		}
 			break;
 
@@ -1758,7 +1755,7 @@ box_update(Box *const box)
 			}
 
 			for (uint16_t i = 0; i < box->num_children; ++i) {
-				Box *child = box->children[i];
+				Box *const child = box->children[i];
 				box_set_size(child, 0, 0);
 				box_update(child);
 			}
@@ -1885,10 +1882,13 @@ box_update_focus_seq(Box *box)
 		box->content_changed = true;
 }
 
-static void
-box_unparent(Box *const box, bool const out_of_parent)
+static uint16_t
+box_unparent(Box *const box)
 {
 	Box *parent = box->parent;
+	if (!parent)
+		return 0;
+
 	Box **child = &parent->children[0];
 	while (box != *child)
 		++child;
@@ -1902,10 +1902,10 @@ box_unparent(Box *const box, bool const out_of_parent)
 		(--parent->num_children - pos) * sizeof *child
 	);
 
-	if (!out_of_parent)
-		return;
-
 	box_update_focus_seq(parent);
+	box->parent = NULL;
+
+	return pos;
 }
 
 static void box_vacuum(Box *box);
@@ -2039,6 +2039,16 @@ hand_leave_mode(Hand *const hand)
 {
 	hand_do_mode_changes(hand);
 
+	switch (hand->mode) {
+	case mode_move:
+		hand_focus_box(hand, hand->mode_box);
+		break;
+
+	default:
+		/* noop */
+		break;
+	}
+
 	hand->mode = mode_default;
 	hand->mode_box = NULL;
 }
@@ -2127,13 +2137,6 @@ box_delete(Box *box)
 
 		if (box == hand->mode_box)
 			hand_leave_mode(hand);
-
-		for (uint16_t i = 0; i < hand->num_selection; ++i) {
-			if (box == hand->selection[i]) {
-				hand->selection[i] = hand->selection[--hand->num_selection];
-				break;
-			}
-		}
 	}
 
 	box_delete_labels(box);
@@ -2141,7 +2144,8 @@ box_delete(Box *box)
 	if (focus_changed)
 		increase_focus_seq();
 
-	box_unparent(box, true);
+	Box *const box_parent = box->parent;
+	box_unparent(box);
 
 	if (focus_changed)
 		focus_all_hands(real_focus_seq);
@@ -2150,7 +2154,7 @@ box_delete(Box *box)
 		/* TODO: do not update immediately */
 		ewmh_update_client_list(&bodies[box->body]);
 
-	box_vacuum(box->parent);
+	box_vacuum(box_parent);
 	box_free(box);
 }
 
@@ -2231,9 +2235,6 @@ box_realloc(Box **const box, size_t const new_size)
 		UPDATE_REF(hand->focus);
 		/* NOTE: |input_focus| do not need to be updated since |old| is a container */
 		UPDATE_REF(hand->mode_box);
-
-		for (uint16_t i = 0; i < hand->num_selection; ++i)
-			UPDATE_REF(hand->selection[i]);
 	}
 
 	if (new->parent) {
@@ -2263,51 +2264,40 @@ box_realloc(Box **const box, size_t const new_size)
 }
 
 static void
-box_reparent(Box *into, uint16_t const pos, Box *box)
+box_reparent(Box *into, uint16_t pos, Box *box)
 {
 	assert(box_is_container(into));
 	assert(root != box && "root cannot be reparented");
 
-	Box *const box_parent = box->parent;
+	Box *const old_parent = box->parent;
 
-	/* unparent |box| */
-	if (box_parent)
-		box_unparent(box, into != box_parent);
+	uint16_t const box_pos = box_unparent(box);
+	if (old_parent == into)
+		pos -= box_pos <= pos;
 
-	/* already its parent */
-	if (into == box_parent)
-		goto insert;
-
-	/* first check if we can make place for |box| in |into| */
 	box_realloc(&into, offsetof(Box, children[into->num_children + 1]));
-
 	box->parent = into;
-	++into->num_children;
-	/* inherit some values from parent */
+
+	/* inherit some properties from parent */
 	if (into->parent) {
 		box->focus_lock = into->parent->focus_lock;
 		box->body = into->parent->body;
 	}
 
-insert:
-	assert(pos <= into->num_children - 1);
-
 	memmove(
 		into->children + pos + 1,
 		into->children + pos,
-		(into->num_children - 1 - pos) * sizeof *into->children
+		(into->num_children++ - pos) * sizeof *into->children
 	);
 	into->children[pos] = box;
 	into->layout_changed = true;
 
-	if (box_parent)
-		box_vacuum(box_parent);
+	if (old_parent)
+		box_vacuum(old_parent);
 
-	if (into != box_parent) {
-		/* if (into->parent && box_is_monitor(into))
-			box->concealed = true; */
-		box_update_focus_seq(into);
-	}
+	/* if (into->parent && box_is_monitor(into))
+		box->concealed = true; */
+	box_update_focus_seq(into);
 }
 
 static Box *
@@ -2471,7 +2461,7 @@ increase_focus_seq(void)
 }
 
 static void
-swap_boxes(Box *one, Box *other)
+box_swap(Box *one, Box *other)
 {
 	if (!one || !other)
 		return;
@@ -2617,7 +2607,7 @@ hand_focus_box(Hand *const hand, Box *const box)
 	Box *recents[2];
 	hand_find_recents(hand, locked, root->focus_seq, recents, ARRAY_SIZE(recents));
 	if (locked != box && recents[0] != box)
-		swap_boxes(recents[1], recents[0]);
+		box_swap(recents[1], recents[0]);
 
 	hand->focus = box;
 
@@ -2644,7 +2634,7 @@ hand_focus_box(Hand *const hand, Box *const box)
 	increase_focus_seq();
 
 	if (locked != box) {
-		swap_boxes(box, recents[1]);
+		box_swap(box, recents[1]);
 		/* if there was no such box, that's not a problem: |box| will
 		 * be that beginning from now */
 	}
@@ -4308,7 +4298,47 @@ box_change_columns(Box *const box, uint16_t const num_columns)
 }
 
 static void
-hand_handle_input_key_mode(Hand *const hand, xcb_keysym_t const sym)
+box_explode(Box *const box, bool const vertical)
+{
+	for (uint8_t i = 0; i < 3; ++i)
+		box_reparent(box->parent, i, box_new());
+
+	Box *const parent = box->parent;
+
+	size_t const pos_offset = vertical ? offsetof(Box, x)     : offsetof(Box, y);
+	size_t const dim_offset = vertical ? offsetof(Box, width) : offsetof(Box, height);
+#define L(box) (*(int16_t *)((uintptr_t)box + pos_offset))
+#define U(box) (L(box) + *(uint16_t *)((uintptr_t)box + dim_offset))
+
+	int16_t const lower = L(box);
+	int16_t const upper = U(box);
+
+	while (3 < parent->num_children) {
+		Box *const child = parent->children[3];
+		uint8_t const k = (lower <= L(child)) + (upper <= L(child));
+		Box *const split = parent->children[k];
+		box_reparent(split, split->num_children, child);
+	}
+
+#undef L
+#undef U
+
+	parent->children[0]->num_columns = parent->num_columns;
+	parent->children[1]->num_columns = vertical ? 1 : UINT16_MAX;
+	parent->children[2]->num_columns = parent->num_columns;
+	parent->num_columns = vertical ? UINT16_MAX : 1;
+
+	for (uint8_t i = 3; 0 < i;)
+		box_vacuum(parent->children[--i]);
+
+	for (uint8_t i = 0; i < parent->num_children; ++i) {
+		Box *const child = parent->children[i];
+		box_name(child, true);
+	}
+}
+
+static void
+hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand *const hand, xcb_keysym_t const sym)
 {
 	Label *label;
 
@@ -4317,23 +4347,57 @@ hand_handle_input_key_mode(Hand *const hand, xcb_keysym_t const sym)
 		unreachable;
 		return;
 
-# if 0
-	case mode_move_a:
-		if (hand_input_find_label(hand, &label)) {
-			hand->mode = mode_move_b;
-			hand->mode_box = label->base;
-			hand->mode_dir = 0;
-			hand_input_reset(hand);
-			return;
-		}
-		return;
-#endif
-
 	case mode_move:
-		if (hand_input_find_label(hand, &label)) {
+		switch (KEY_MOD_MASK & event->mods.base) {
+		case XCB_MOD_MASK_4:
+			if (hand_handle_input(hand, sym))
+				hand_input_try_jump(hand);
+			return;
+
+		case 0:
+		case XCB_MOD_MASK_SHIFT:
+			switch (sym) {
+			case XKB_KEY_s:
+			case XKB_KEY_S:
+				box_swap(hand->focus, hand->mode_box);
+				break;
+
+			case XKB_KEY_b:
+			case XKB_KEY_i:
+			case XKB_KEY_P:
+			case XKB_KEY_q:
+			insert:
+				box_reparent_user(hand->focus->parent, box_get_pos(hand->focus), hand->mode_box);
+				break;
+
+			case XKB_KEY_a:
+			case XKB_KEY_p:
+			append:
+				box_reparent_user(hand->focus->parent, box_get_pos(hand->focus) + 1, hand->mode_box);
+				break;
+
+			case XKB_KEY_h:
+				box_explode(hand->focus, false);
+				goto insert;
+
+			case XKB_KEY_j:
+				box_explode(hand->focus, true);
+				goto append;
+
+			case XKB_KEY_k:
+				box_explode(hand->focus, true);
+				goto insert;
+
+			case XKB_KEY_l:
+				box_explode(hand->focus, false);
+				goto append;
+
+			default:
+				return;
+			}
 			break;
 		}
-		return;
+		break;
 
 	case mode_size_side:
 		if (hand_input_find_label(hand, &label)) {
@@ -4350,6 +4414,9 @@ hand_handle_input_key_mode(Hand *const hand, xcb_keysym_t const sym)
 		return;
 
 	case mode_name:
+		if (!(KEY_MOD_MASK & event->mods.base))
+			hand_handle_input(hand, sym);
+
 		if (XKB_KEY_Return == sym ||
 		    sizeof hand->user_input == strnlen(hand->user_input, sizeof hand->user_input))
 		{
@@ -4373,6 +4440,9 @@ hand_handle_input_key_mode(Hand *const hand, xcb_keysym_t const sym)
 
 	case mode_setcolumns:
 	{
+		if (!(KEY_MOD_MASK & event->mods.base))
+			hand_handle_input(hand, sym);
+
 		Box *const parent = hand->mode_box->parent;
 		uint16_t num_columns;
 
@@ -4447,29 +4517,6 @@ box_clone(Box const *const box)
 	return new;
 }
 
-static void
-hand_select(Hand *const hand, Box const *const box, bool const move)
-{
-	if (!box)
-		return;
-
-	if (move == hand->move_selection)
-		for (uint16_t i = 0; i < hand->num_selection; ++i)
-			if (box == hand->selection[i])
-				return;
-
-	uint16_t const new_num_bag = (move == hand->move_selection ? hand->num_selection : 0) + 1;
-
-	void *p = realloc(hand->selection, new_num_bag * sizeof *hand->selection);
-	if (!p)
-		return;
-
-	(hand->selection = p)[new_num_bag - 1] = box;
-	hand->num_selection = new_num_bag;
-
-	hand->move_selection = move;
-}
-
 static bool
 hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool const repeating)
 {
@@ -4508,14 +4555,20 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 	/*MAN(Keybindings)
 	 * .TP
 	 * .B [focus] Mod+Ctrl+d
-	 * Move box (delete box then paste).
+	 * Delete focused box for pasting.
 	 */
 	case XKB_KEY_d:
+	{
 		if (!hand->focus)
 			break;
 
 		hand->mode = mode_move;
 		hand->mode_box = hand->focus;
+
+		Box *const box = hand->latest_input[hand->focus == hand->latest_input[0]];
+		if (box)
+			hand_focus_box(hand, box);
+	}
 		break;
 
 	/*MAN(Keybindings)
@@ -4780,19 +4833,12 @@ handle_input_key_press(xcb_input_key_press_event_t const *const event)
 	default:
 		propagate = false;
 
-		/* RIP. dumb user get stuck and tries to escape */
-		if (KEY_MOD_MASK & event->mods.base)
-			/* but we just let this little shit shuffering a bit */
-			break;
-
 		if (XKB_KEY_Escape == sym) {
 			hand_leave_mode(hand);
 			break;
 		}
 
-		hand_handle_input(hand, sym);
-
-		hand_handle_input_key_mode(hand, sym);
+		hand_handle_input_key_mode(event, hand, sym);
 		break;
 	}
 
