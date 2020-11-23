@@ -644,7 +644,7 @@ label_repaint(Label const *const label, bool const shape)
 {
 	/* POSSIBLE FIXME: take into account screen rotation */
 
-	char name[sizeof label->name + 1 + 4];
+	char name[sizeof label->name + 1];
 	memcpy(name, label->name, sizeof label->name);
 	name[sizeof name - 1] = '\0';
 
@@ -1715,7 +1715,7 @@ box_update(Box *const box)
 				box->user_concealed ? 'U' : '-',
 				box->concealed ? 'C' : '-');
 
-	depth += 3;
+	depth += 2;
 
 	uint32_t mask = 0;
 	uint32_t list[7];
@@ -1859,8 +1859,7 @@ box_update(Box *const box)
 				box_update(child);
 			}
 
-			depth -= 3;
-			return;
+			goto out;
 		}
 	} else if (content_changed) {
 		for (uint16_t i = 0; i < box->num_children; ++i) {
@@ -1930,7 +1929,7 @@ box_update(Box *const box)
 		box_update_label(box);
 
 out:
-	depth -= 3;
+	depth -= 2;
 
 #ifndef HEAWM_DEBUG_UPDATE
 #undef printf
@@ -2283,7 +2282,7 @@ box_vacuum(Box *const box)
 
 	if (box == root ||
 	    box_is_monitor(box))
-		goto not_empty;
+		goto out;
 
 	if (1 == box->num_children && box_is_container(box->children[0]) && !box_is_leg(box)) {
 		/* move the only children of box up one, at the place of the box */
@@ -2292,7 +2291,7 @@ box_vacuum(Box *const box)
 	}
 
 	if (0 < box->num_children)
-		goto not_empty;
+		goto out;
 
 	/* body boxes are special because they can be deleted only if their
 	 * twin boxes on heads are empty too */
@@ -2303,7 +2302,7 @@ box_vacuum(Box *const box)
 			Box const *const head = root->children[i];
 			Box const *const leg = head->children[pos];
 			if (0 < leg->num_children)
-				goto not_empty;
+				goto out;
 		}
 
 		for (uint16_t i = 0; i < root->num_children; ++i) {
@@ -2317,7 +2316,7 @@ box_vacuum(Box *const box)
 
 	return;
 
-not_empty:
+out:
 	/* called after box lost a child so it changed */
 	box_propagate_change(box)->layout_changed = true;
 }
