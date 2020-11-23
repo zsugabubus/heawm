@@ -1153,6 +1153,19 @@ box_propagate_change(Box *box)
 	return ret;
 }
 
+static char const *
+box_get_class_instance(Box const *const box)
+{
+	return box->class ? box->class + strlen(box->class) + 1 : NULL;
+}
+
+static bool
+box_match_class(Box const *const box, char const *const class, char const *const instance)
+{
+	return (!class || (box->class && !strcmp(class, box->class))) &&
+	       (!instance || (box_get_class_instance(box) && !strcmp(instance, box_get_class_instance(box))));
+}
+
 static bool
 box_name(Box *const box, bool const is_container)
 {
@@ -1167,9 +1180,8 @@ box_name(Box *const box, bool const is_container)
 	uint8_t const n = strnlen(box->name, sizeof box->name);
 
 	/* TODO: if box has name, leave it and check if there are conflicts in its parent */
-	if (0 < n) {
+	if (0 < n)
 		return true;
-	}
 
 	Box *to = box->parent;
 
@@ -1187,7 +1199,20 @@ box_name(Box *const box, bool const is_container)
 			letters[(unsigned char)to->name[n]].focus_seq = -1;
 
 	unsigned char optimum = '\0';
-	letters[optimum].focus_seq = -1;
+
+	if (!n && !is_container) {
+		if (box_match_class(box, NULL, "Alacritty"))
+			optimum = 'a';
+		else if (box_match_class(box, "gl", "mpv"))
+			optimum = 'v';
+		else if (box_match_class(box, "Navigator", "firefox"))
+			optimum = 'b';
+		else if (box_match_class(box, "telegram-desktop", "TelegramDesktop"))
+			optimum = 't';
+	}
+
+	if (!optimum)
+		letters[optimum].focus_seq = -1;
 
 	for_each_box(to, root, root)
 		if (!memcmp(to->name, box->name, n)) {
@@ -1682,7 +1707,7 @@ box_update(Box *const box)
 				box->leader,
 				box->title,
 				box->class,
-				box->class ? (char *)memchr(box->class, '\0', SIZE_MAX) + 1 : NULL,
+				box_get_class_instance(box),
 				box->focus_seq, root->focus_seq,
 				box->focus_hand,
 				box_is_floating(box) ? 'F' : '-',
@@ -1744,6 +1769,9 @@ box_update(Box *const box)
 			}
 
 			uint16_t num_columns = box_compute_num_columns(box, tiles);
+			if (num_columns < 1)
+				num_columns = 1;
+
 			uint16_t const num_rows = (tiles + num_columns - 1) / num_columns;
 			uint16_t row = 0, column = 0;
 			int16_t y = 0, x = 0;
@@ -2375,8 +2403,8 @@ box_reparent(Box *into, uint16_t pos, Box *box)
 	if (old_parent)
 		box_vacuum(old_parent);
 
-	/* if (into->parent && box_is_monitor(into))
-		box->concealed = true; */
+	if (into->parent && box_is_monitor(into))
+		box->concealed = true;
 	box_update_focus_seq(into);
 }
 
@@ -2922,6 +2950,9 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 			if (parent) {
 				pos = box_get_pos(parent) + 1;
 				parent = parent->parent;
+
+				if (parent && !parent->parent)
+					parent = NULL;
 			}
 		}
 	}
@@ -3629,7 +3660,7 @@ retry:
 			!ignore_leader && box->leader
 				? box->leader == child->leader
 				: box->class && child->class &&
-				  !strcmp(box->class + strlen(box->class) + 1, child->class + strlen(child->class) + 1);
+				  !strcmp(box_get_class_instance(box), box_get_class_instance(child));
 		num_items += child->iter;
 
 		if (box == child)
@@ -4459,14 +4490,20 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 	/*MAN(Keybindings)
 	 * .TP
 	 * .B Mod+{a-zA-Z}...
-	 * Focus window by name. If there is no such window,
-	 * keybinding is treated like
-	 * .B Ctrl
-	 * was pressed.
+	 * Focus box. Run hook
+	 * .B autostart {name}
+	 * if there is no such window.
 	 */
 	if (!repeating && hand_handle_input(hand, sym)) {
 		hand_input_try_jump(hand);
 	} else switch (sym) {
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B Mod+)
+	 * Open hook
+	 * .B quickstart
+	 * inside $\fBTERMINAL\fR.
+	 */
 	case XKB_KEY_parenright:
 	{
 		if (repeating)
@@ -4477,6 +4514,12 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 	}
 		break;
 
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B Mod+]
+	 * Open
+	 * .BR alsamixer(1) .
+	 */
 	case XKB_KEY_bracketright:
 		if (repeating)
 			break;
@@ -4485,6 +4528,11 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 		SPAWN(config.terminal, "-e", "alsamixer");
 		break;
 
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B Mod+*
+	 * Toggle system mute.
+	 */
 	case XKB_KEY_asterisk:
 		if (repeating)
 			break;
@@ -4492,23 +4540,33 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 		SPAWN("amixer", "-q", "set", "Master", "toggle");
 		break;
 
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B Mod+-
+	 * Decrease system volume.
+	 */
 	case XKB_KEY_minus:
 		SPAWN("amixer", "-q", "set", "Master", "3-");
 		break;
 
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B Mod++
+	 * Increase system volume.
+	 */
 	case XKB_KEY_plus:
 		SPAWN("amixer", "-q", "set", "Master", "1+", "unmute");
 		break;
 
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B Mod+Return
+	 * Open $\fBTERMINAL\fR.
+	 */
 	case XKB_KEY_Return:
 		if (repeating)
 			break;
 
-		/*MAN(Keybindings)
-		 * .TP
-		 * .B Mod+Return
-		 * Open $\fBTERMINAL\fR.
-		 */
 		hand->want_focus = true;
 		SPAWN(config.terminal);
 		break;
@@ -4767,13 +4825,30 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 	switch (sym) {
 	/*MAN(Keybindings)
 	 * .TP
-	 * .B [focus] Mod+Ctrl+c {child}
-	 * Set the number of columns of the focused grid.
-	 * .B child
-	 * specifies the first window that should appear at the end of the first row.
-	 * .IP
+	 * .BR Mod+Ctrl+c "olumns " {how}
+	 * Set number of columns.
+	 * .B how
+	 * can be:
+	 * .RS
+	 * .TP
+	 * .B {a-z}
+	 * Set number of columns by selecting box that should appear at the end of the first row.
+	 * .TP
 	 * .B =
-	 * sets auto layout.
+	 * Auto layout.
+	 * .TP
+	 * .B *
+	 * Card (vertical stack) layout.
+	 * .TP
+	 * .B /
+	 * (Horizontal) Stack layout.
+	 * .TP
+	 * .B +
+	 * One more column.
+	 * .TP
+	 * .B -
+	 * One less column.
+	 * .RE
 	 */
 	case XKB_KEY_c:
 		if (!hand->focus)
@@ -4785,7 +4860,7 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .B [focus] Mod+Ctrl+r {what} {to-where}
+	 * .B Mod+Ctrl+r {what} {to-where}
 	 * Resize a split or a side of a floating window.
 	 * .IP
 	 * .B =
@@ -4798,7 +4873,7 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .B Mod+Ctrl+g
+	 * .BR Mod+Ctrl+g roup
 	 * Group related boxes.
 	 */
 	case XKB_KEY_g:
@@ -4810,8 +4885,8 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .B Mod+Ctrl+b
-	 * Barricade pointer inside focused box.
+	 * .BR Mod+Ctrl+b arricade
+	 * Toggle pointer barrier around focused box.
 	 */
 	case XKB_KEY_b:
 		hand_set_barrier(hand, !hand->barricade);
@@ -4819,10 +4894,34 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .B [focus] Mod+Ctrl+d
-	 * Delete focused box for pasting.
+	 * .BR Mod+Ctrl+t ake " [ Mod+{a-zA-Z}... ]... {how}"
+	 * Take box to somewhere else.
+	 * .B how
+	 * can be:
+	 * .RS
+	 * .TP
+	 * .BR a "fter, " a "ppend, " p aste
+	 * Move box after focused one.
+	 * .TP
+	 * .BR b "efore, " i "nsert, " P "aste, " q
+	 * Move box before focused one.
+	 * .TP
+	 * .BR h ", " j ", " k ", " l
+	 * Place box visually at the given direction.
+	 * .TP
+	 * .BR s wap
+	 * Swap box with focused one.
+	 * .TP
+	 * .BR f latten
+	 * Take out every children of box and place them after focused box.
+	 * .TP
+	 * .BR F latten
+	 * Just like
+	 * .B f
+	 * but place before.
+	 * .RE
 	 */
-	case XKB_KEY_d:
+	case XKB_KEY_t:
 	{
 		if (!hand->focus)
 			break;
@@ -4838,8 +4937,8 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .B [focus] Mod+Ctrl+l
-	 * Lock focus position. On a focused window unlock.
+	 * .BR Mod+Ctrl+l ock
+	 * Toggle focus lock inside box.
 	 */
 	case XKB_KEY_l:
 	{
@@ -4873,15 +4972,15 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .B [focus] Mod+Ctrl+s
-	 * Explicitly unconceal focused box.
+	 * .BR Mod+Ctrl+s how
+	 * Explicitly unconceal box.
 	 */
 	case XKB_KEY_s:
 	case XKB_KEY_plus:
 	/*MAN(Keybindings)
 	 * .TP
-	 * .B [focus] Mod+Ctrl+h
-	 * Explicitly conceal focused box.
+	 * .BR Mod+Ctrl+h ide
+	 * Explicitly conceal box.
 	 */
 	case XKB_KEY_h:
 	case XKB_KEY_minus:
@@ -4903,15 +5002,17 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .B [focus] Mod+Ctrl+m
-	 * Implicitly conceal focused box and its siblings. Unconceal when there are no boxes
+	 * .BR Mod+Ctrl+m aximize
+	 * Implicitly conceal box and its siblings. Unconceal when there are nothing
 	 * to conceal.
 	 */
 	case XKB_KEY_m:
 	/*MAN(Keybindings)
 	 * .TP
-	 * .B [focus] Mod+Ctrl+f
-	 * Do Mod+Ctrl+m up to the floating box.
+	 * .BR Mod+Ctrl+f ull
+	 * Do
+	 * .B Mod+Ctrl+m
+	 * for each level inside a floating box.
 	 */
 	case XKB_KEY_f:
 	{
@@ -4958,7 +5059,7 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .B [focus] Mod+Ctrl+n {a-zA-Z}... Return
+	 * .BR Mod+Ctrl+n "ame " "{a-zA-Z}... Return"
 	 * Name focused box.
 	 */
 	case XKB_KEY_n:
@@ -4975,9 +5076,9 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 	/* wlose/xlose */
 	/*MAN(Keybindings)
 	 * .TP
-	 * .B [focus] Mod+Ctrl+w
-	 * Close window(s) in focus just like user would clicked
-	 * \*(lqX\*(rq in the title bar. Second press kills by force.
+	 * .BR Mod+Ctrl+w indow
+	 * Close box just like user would clicked
+	 * \*(lqX\*(rq in the title bar. Second time kill by force.
 	 */
 	case XKB_KEY_w:
 		if (repeating)
@@ -4991,8 +5092,8 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .B [focus] Mod+Ctrl+z
-	 * Center pointer.
+	 * .BR Mod+Ctrl+z enter
+	 * Center pointer inside box.
 	 */
 	case XKB_KEY_z:
 	{
@@ -5144,7 +5245,7 @@ handle_input_enter(xcb_input_enter_event_t const *const event)
 	if (XCB_INPUT_NOTIFY_MODE_NORMAL != event->mode)
 		return;
 
-	/*MAN(Keybindings)
+	/*MAN( Keybindings)
 	 * .TP
 	 * .B Mod4+Mouse Enter...
 	 * Focus window.
@@ -5418,6 +5519,9 @@ init_config(void)
 	}
 	/* make sure environment variable set so can be used by scripts */
 	setenv("HEAWM_HOME", config.heawm_home, false);
+
+	if ((env = getenv("HOME")))
+		chdir(env);
 }
 
 int

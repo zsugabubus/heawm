@@ -1,4 +1,4 @@
-.TH HEAWM "1" "September 2020"
+.TH HEAWM "1" "November 2020"
 .SH NAME
 heawm \- X11 window manager from the angels
 .
@@ -37,7 +37,8 @@ from its neightbors.
 .TP
 .B Floating
 Windows are manually positioned, sized by the user and kept above of
-tiles\(emseems like they are \(lqfloating\(rq.
+tiles\(emseems like they are \(lqfloating\(rq. Currently such stuff is not
+implemented.
 .IP
 When such a window obscures large area of a focused window, it temporarily gets
 repositioned to get out of the way.
@@ -46,8 +47,8 @@ repositioned to get out of the way.
 INCLUDE(OPTIONS)
 .SH USAGE
 .B
-ESCAPE
-always terminates current action.
+Escape
+Whenever you feel stucked.
 .
 .SS Keybindings
 INCLUDE(Keybindings)

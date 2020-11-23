@@ -40,7 +40,7 @@ You will need the following tools and libraries.
 
 * `cc -std=c11`
 * `make`
-* `xcb{,-cursor,-keysyms,-shape,-xinput,-xrm}`
+* `xcb{,-cursor,-keysyms,-shape,-xfixes,-xinput,-xrm}`
 * `xcb-util` (Debug build.)
 * `xcb-icccm` (Headers only.)
 * `cairo`
