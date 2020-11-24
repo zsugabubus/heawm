@@ -446,12 +446,11 @@ static uint8_t num_devices;
 static Device *devices;
 
 typedef struct {
-	int width;
-	int height;
-} Size;
+	int16_t x, y;
+} Point;
 
 static char const *label_font = "monospace";
-static Size label_rect = { .width = 30, .height = 60 }; /** in pts */
+static Point label_rect = { .x = 30, .y = 60 }; /** in pts */
 static int label_stroke = /* 4 */ 2 /* .5 */;
 static int label_size =
 #if 1
@@ -614,17 +613,14 @@ box_get_monitor(Box const *box)
 	return (Box *)box;
 }
 
-static Size
-monitor_convert_pt2px(Box const *const monitor, Size const points)
+static Point
+monitor_convert_pt2px(Box const *const monitor, Point const pt)
 {
 	assert(box_is_monitor(monitor));
 
-#define D(dim) (monitor->dim * points.dim * 254 / 720 / monitor->user_##dim)
-	return (Size){
-		D(width),
-		D(height)
-	};
-#undef D
+#define CONVERT(x, width) .x = ((int)monitor->width * (int)pt.x * 254 / 720 / (int)monitor->user_##width)
+	return (Point){ CONVERT(x, width), CONVERT(y, height) };
+#undef CONVERT
 }
 
 static bool
@@ -649,16 +645,16 @@ label_repaint(Label const *const label, bool const shape)
 	name[sizeof name - 1] = '\0';
 
 	Box const *const monitor = box_get_monitor(label->base);
-	Size const size = monitor_convert_pt2px(monitor, label_rect);
+	Point const size = monitor_convert_pt2px(monitor, label_rect);
 	int const font_size = monitor_convert_pt2px(monitor,
-			(Size){ 0, label_size }).height;
+			(Point){ 0, label_size }).y;
 	int const stroke_width = monitor_convert_pt2px(monitor,
-			(Size){ label_stroke, 0 }).width;
+			(Point){ label_stroke, 0 }).x;
 
 	Body const *const body = &bodies[label->base->body];
 	cairo_surface_t *const surface = shape
-		? cairo_xcb_surface_create_for_bitmap(conn, body->screen, label->shape, size.width, size.height)
-		: cairo_xcb_surface_create(conn, label->window, body->visual_type, size.width, size.height);
+		? cairo_xcb_surface_create_for_bitmap(conn, body->screen, label->shape, size.x, size.y)
+		: cairo_xcb_surface_create(conn, label->window, body->visual_type, size.x, size.y);
 	cairo_t *const cr = cairo_create(surface);
 	cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
 	if (/* no compositor */true)
@@ -677,7 +673,7 @@ label_repaint(Label const *const label, bool const shape)
 
 	if (shape) {
 		cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
-		cairo_rectangle(cr, 0, 0, size.width, size.height);
+		cairo_rectangle(cr, 0, 0, size.x, size.y);
 		cairo_fill(cr);
 	}
 
@@ -688,11 +684,11 @@ label_repaint(Label const *const label, bool const shape)
 
 	cairo_text_extents(cr, name, &te);
 
-	int const radius = font_size / 2/*sqrt(te.height * te.height + te.width * te.width)*/;
+	int const radius = font_size / 2/*sqrt(te.y * te.y + te.x * te.x)*/;
 
 	cairo_translate(cr,
-			.5 - te.x_bearing + size.width / 2,
-			.5 - te.y_bearing + size.height / 2 - te.height
+			.5 - te.x_bearing + size.x / 2,
+			.5 - te.y_bearing + size.y / 2 - te.height
 	);
 
 	switch (label->type) {
@@ -800,8 +796,8 @@ label_repaint(Label const *const label, bool const shape)
 		cairo_text_extents(cr, symbol, &te);
 
 		cairo_translate(cr,
-				(size.width + te.width) / 2,
-				size.height / 2 - te.height
+				(size.x + te.width) / 2,
+				size.y / 2 - te.height
 		);
 
 		if (!shape)
@@ -907,27 +903,36 @@ label_set_position(Label *const label, int16_t const x, int16_t const y)
 	label->y = y;
 }
 
-static void
-label_set_position_to_box(Label *const label, int const relx, int const rely, bool const outside)
+static Point
+box_compute_position(Box const *const box, int const relx, int const rely, bool const outside)
 {
-	Box const *const monitor = box_get_monitor(label->base);
-	Size const size = monitor_convert_pt2px(monitor, label_rect);
+	Box const *const monitor = box_get_monitor(box);
+	Point const size = monitor_convert_pt2px(monitor, label_rect);
 
-	int16_t x = label->base->x + (relx + 1) * (label->base->width  -size.width ) / 2 + (outside ? relx : 0) * (size.width  / 2),
-	        y = label->base->y + (rely + 1) * (label->base->height -size.height) / 2 + (outside ? rely : 0) * (size.height / 2);
+	Point ret = {
+		.x = box->x + (relx + 1) * (box->width  -size.x) / 2 + (outside ? relx : 0) * (size.x / 2),
+		.y = box->y + (rely + 1) * (box->height -size.y) / 2 + (outside ? rely : 0) * (size.y / 2)
+	};
 
-#define CLAMP(pos, max) \
-	if (pos < monitor->pos) \
-		pos = monitor->pos; \
-	else if (monitor->pos + monitor->max < pos + size.max) \
-		pos = monitor->pos + monitor->max - size.max;
+#define CLAMP(x, width) \
+	if (ret.x < monitor->x) \
+		ret.x = monitor->x; \
+	else if (monitor->x + monitor->width < ret.x + size.x) \
+		ret.x = monitor->x + monitor->width - size.x;
 
 	CLAMP(x, width)
 	CLAMP(y, height)
 
 #undef CLAMP
 
-	label_set_position(label, x, y);
+	return ret;
+}
+
+static void
+label_set_position_to_box(Label *const label, int const relx, int const rely, bool const outside)
+{
+	Point const pt = box_compute_position(label->base, relx, rely, outside);
+	label_set_position(label, pt.x, pt.y);
 }
 
 static void
@@ -940,13 +945,13 @@ label_create_window(Label *const label)
 	label->window = xcb_generate_id(conn);
 
 	Box const *const monitor = box_get_monitor(label->base);
-	Size const size = monitor_convert_pt2px(monitor, label_rect);
+	Point const size = monitor_convert_pt2px(monitor, label_rect);
 
 	DEBUG_CHECK(xcb_create_window, conn, XCB_COPY_FROM_PARENT,
 			label->window,
 			screen->root,
 			label->x, label->y,
-			size.width, size.height,
+			size.x, size.y,
 			2,
 			XCB_WINDOW_CLASS_INPUT_OUTPUT,
 			screen->root_visual,
@@ -973,7 +978,7 @@ label_create_window(Label *const label)
 		/* mask is on or off */ 1,
 		label->shape,
 		label->window,
-		size.width, size.height);
+		size.x, size.y);
 
 	/* we need a valid pixmap so we use the bounding mask but we
 	 * use offsets to move it outside of the area making effective
@@ -981,7 +986,7 @@ label_create_window(Label *const label)
 	DEBUG_CHECK(xcb_shape_mask, conn,
 			XCB_SHAPE_SO_SET, XCB_SHAPE_SK_INPUT,
 			label->window,
-			size.width, size.height,
+			size.x, size.y,
 			label->shape);
 }
 
@@ -1564,7 +1569,18 @@ box_update_label(Box *const box)
 			} else {
 				label_set_name(label, box->name);
 			}
-			label_set_position_to_box(label, box_is_container(box) ? center : right, top, false);
+			Point pt = box_compute_position(label->base, box_is_container(box) ? center : right, top, false);
+			if (box_is_container(box) && !box_is_floating(box)) {
+				Box const *const monitor = box_get_monitor(box);
+				int const font_size = monitor_convert_pt2px(monitor,
+						(Point){ 0, label_size }).y;
+
+				Box *b = box;
+				do
+					pt.y += font_size;
+				while (!box_is_floating((b = b->parent)));
+			}
+			label_set_position(label, pt.x, pt.y);
 			label->type = label_box;
 			label_assign_hand(label, hand);
 			label_update(label);
@@ -1667,14 +1683,14 @@ box_update_label(Box *const box)
 				break;
 
 			Box const *const monitor = box_get_monitor(box);
-			Size const size = monitor_convert_pt2px(monitor, label_rect);
+			Point const size = monitor_convert_pt2px(monitor, label_rect);
 
 			for (char ch = 'a'; ch <= 'z'; ++ch) {
 				label = new_label_for(box);
 				name[0] = ch;
 				name[1] = '\0';
 				label_set_name(label, name);
-				label_set_position(label, box->x + (ch - 'a') * size.width, box->y + box->height / 2);
+				label_set_position(label, box->x + (ch - 'a') * size.x, box->y + box->height / 2);
 				label_update(label);
 			}
 		}
@@ -2137,9 +2153,16 @@ hand_do_mode_changes(Hand *const hand)
 }
 
 static void
+hand_input_reset(Hand *const hand)
+{
+	memset(hand->user_input, '\0', sizeof hand->user_input);
+}
+
+static void
 hand_leave_mode(Hand *const hand)
 {
 	hand_do_mode_changes(hand);
+	hand_input_reset(hand);
 
 	switch (hand->mode) {
 	case mode_move:
@@ -2417,45 +2440,6 @@ box_new(void)
 	box->position_changed = true;
 	return box;
 }
-
-static uint32_t
-box_get_depth(Box const *box)
-{
-	uint32_t i = 0;
-	for (; box->parent; ++i)
-		box = box->parent;
-	return i;
-}
-
-#if 0
-static void
-user_place_box(
-		Box *const basea, int const relbasea,
-		Box *const baseb, int const relbaseb,
-		Box *box
-) {
-	uint32_t const deptha = box_get_depth(basea);
-	uint32_t const depthb = box_get_depth(baseb);
-	uint32_t depthdiff;
-
-#define SWAP(x, y) (x ^= y, y ^= x, x ^= y)
-
-	if (depthb < deptha) {
-		depthdiff = deptha - depthb;
-		SWAP(basea, baseb);
-		SWAP(relbasea, relbaseb);
-	} else {
-		depthdiff = deptha - depthb;
-	}
-
-	do {
-
-	} while (0 < depthdiff--);
-
-#undef SWAP
-
-}
-#endif
 
 static bool
 box_is_descendant(Box const *const base, Box const *box)
@@ -4415,12 +4399,6 @@ hand_handle_input_key_normal(xcb_input_key_press_event_t const *const event, Han
 	hand->want_focus |= XKB_KEY_Return == sym;
 	hand->check_input = false;
 	hand_assign_latest_input(hand);
-}
-
-static void
-hand_input_reset(Hand *const hand)
-{
-	memset(hand->user_input, '\0', sizeof hand->user_input);
 }
 
 static void
