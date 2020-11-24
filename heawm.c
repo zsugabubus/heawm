@@ -449,6 +449,9 @@ typedef struct {
 	int16_t x, y;
 } Point;
 
+#define label_stroke_rgb 0, 0, 0
+#define label_color_rgb 1, 1, 0
+
 static char const *label_font = "monospace";
 static Point label_rect = { .x = 30, .y = 60 }; /** in pts */
 static int label_stroke = /* 4 */ 2 /* .5 */;
@@ -663,6 +666,7 @@ label_repaint(Label const *const label, bool const shape)
 	cairo_select_font_face(cr, label_font,
 			CAIRO_FONT_SLANT_NORMAL,
 			CAIRO_FONT_WEIGHT_BOLD);
+	cairo_set_font_size(cr, font_size);
 
 	/* https://www.designworkplan.com/read/signage-and-color-contrast */
 	/* http://www.writer2001.com/colwebcontrast.htm */
@@ -677,19 +681,12 @@ label_repaint(Label const *const label, bool const shape)
 		cairo_fill(cr);
 	}
 
-	cairo_set_font_size(cr, font_size);
+	cairo_translate(cr, size.x / 2, size.y / 2);
 
-	cairo_save(cr);
 	cairo_text_extents_t te;
-
 	cairo_text_extents(cr, name, &te);
 
 	int const radius = font_size / 2/*sqrt(te.y * te.y + te.x * te.x)*/;
-
-	cairo_translate(cr,
-			.5 - te.x_bearing + size.x / 2,
-			.5 - te.y_bearing + size.y / 2 - te.height
-	);
 
 	switch (label->type) {
 	case label_normal:
@@ -764,56 +761,52 @@ label_repaint(Label const *const label, bool const shape)
 		break;
 	}
 
+	double te_left = -(te.width + te.x_bearing) / 2;
+	double te_top = -te.y_bearing - te.height / 2;
+
 	if (!shape)
-		/* label stroke */
-		cairo_set_source_rgb(cr, 0, 0, 0);
+		cairo_set_source_rgb(cr, label_stroke_rgb);
 	else
 		cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
-	cairo_move_to(cr, -te.width / 2, +te.height / 2);
+	cairo_move_to(cr, te_left, te_top);
 	cairo_text_path(cr, name);
 	cairo_set_line_width(cr, stroke_width + .5);
 	cairo_stroke(cr);
 
 	if (!shape)
-		/* label color */
-		cairo_set_source_rgb(cr, 1, 1, 0);
-	cairo_move_to(cr, -te.width / 2, +te.height / 2);
+		cairo_set_source_rgb(cr, label_color_rgb);
+	cairo_move_to(cr, te_left, te_top);
 	cairo_show_text(cr, name);
 
-	char symbol[2];
-	char *p = symbol;
+	char const *symbol = NULL;
 
-	if (label_box == label->type)
+	if (label_box == label->type) {
 		if (label->base->user_concealed)
-			*p++ = label->base->concealed ? '-' : '+';
+			symbol = label->base->concealed ? "-" : "+";
+		else if (label->base->focus_lock && box_is_container(label->base))
+			symbol = "\xe2\x80\xa2" /* U+2022 BULLET */;
+	}
 
-	if (p != symbol) {
-		cairo_restore(cr);
-
-		*p = '\0';
+	if (symbol) {
 		cairo_set_font_size(cr, font_size);
 
 		cairo_text_extents(cr, symbol, &te);
 
-		cairo_translate(cr,
-				(size.x + te.width) / 2,
-				size.y / 2 - te.height
-		);
+		te_left -= te.width + te.x_bearing + stroke_width / 2;
+		te_top = -te.y_bearing - te.height / 2;
 
 		if (!shape)
-			/* label stroke */
-			cairo_set_source_rgb(cr, 0, 0, 0);
+			cairo_set_source_rgb(cr, label_stroke_rgb);
 		else
 			cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
-		cairo_move_to(cr, -te.width / 2, +te.height / 2);
+		cairo_move_to(cr, te_left, te_top);
 		cairo_text_path(cr, symbol);
-		cairo_set_line_width(cr, stroke_width);
+		cairo_set_line_width(cr, stroke_width + .5);
 		cairo_stroke(cr);
 
 		if (!shape)
-			/* label color */
-			cairo_set_source_rgb(cr, 1, 1, 0);
-		cairo_move_to(cr, -te.width / 2, +te.height / 2);
+			cairo_set_source_rgb(cr, label_color_rgb);
+		cairo_move_to(cr, te_left, te_top);
 		cairo_show_text(cr, symbol);
 	}
 
@@ -1570,15 +1563,14 @@ box_update_label(Box *const box)
 				label_set_name(label, box->name);
 			}
 			Point pt = box_compute_position(label->base, box_is_container(box) ? center : right, top, false);
-			if (box_is_container(box) && !box_is_floating(box)) {
+			if (box_is_container(box)) {
 				Box const *const monitor = box_get_monitor(box);
 				int const font_size = monitor_convert_pt2px(monitor,
 						(Point){ 0, label_size }).y;
 
-				Box *b = box;
-				do
+				pt.y -= font_size;
+				for (Box const *b = box; !box_is_floating(b); b = b->parent)
 					pt.y += font_size;
-				while (!box_is_floating((b = b->parent)));
 			}
 			label_set_position(label, pt.x, pt.y);
 			label->type = label_box;
