@@ -10,7 +10,7 @@ multi-pointer and friends. Not for introverts. You have been warned.],
 multi-leg‌footnote:[This program is so much crap you will surely use both
 of your legs.] support, aiming to provide O(1) navigation.
 
-- Configure in C with some X resources.
+- Configure in C with some basic X resources.
 - Minimal ICCCM and NetWM support--mainly because they are useless and/or against the concept.
 - Script by sending messages to root.
 
@@ -19,18 +19,15 @@ of your legs.] support, aiming to provide O(1) navigation.
 * Enjoy the *weightlessness*.
 +
 Here there is no up or down, left or right. You travel from one window to
-another through wormholes.
+another through higher dimensions.
 
 * _“That’s one small step for other window managers, *one giant leap* for `{wmname}`.”_
 +
-Nothing takes more than 2 keystrokes.
+Nothing takes more than a few keystrokes.
 
-* Solid black *wallpapers are nice* for one instant. Every pixel wants to be a useful pixel, so do not make them sad.
-
-* What you see is what you get. There is only one layout–grid– (but you do not
-  even have to know about it) that can be easily managed.
-  Internally, they are called “boxes.” Every box can contain infinite, nicely
-  arranged boxes. Your window will be in the last box.
+* Solid black *wallpapers are nice*.
++
+Every pixel wants to be a useful pixel.
 
 == Installation
 
