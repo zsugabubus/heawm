@@ -303,6 +303,13 @@ struct box {
  */
 static Box *root;
 
+typedef enum {
+	LABEL_NORMAL, /** text only */
+	LABEL_BOX, /** draw glory if |base| focused */
+	LABEL_HLINE, /** text with a horizontal line */
+	LABEL_VLINE, /** text with a vertical line */
+} LabelType;
+
 /** little angels flying around the screen */
 typedef struct {
 	Box *base;
@@ -310,12 +317,7 @@ typedef struct {
 	xcb_window_t window;
 	xcb_pixmap_t shape;
 	int16_t x, y;
-	enum {
-		label_normal, /** text only */
-		label_box, /** draw glory if |base| focused */
-		label_hline, /** text with a horizontal line */
-		label_vline, /** text with a vertical line */
-	} type: 2;
+	LabelType type: 2;
 	bool position_changed: 1,
 	     content_changed: 1;
 	char name[membersizeof(Box, name)];
@@ -342,13 +344,13 @@ static int default_screen;
 static int next_timeout_ms = -1;
 
 typedef enum {
-	mode_default,
-	mode_setcolumns,
-	mode_move,
-	mode_size_side,
-	mode_size_to,
-	mode_name,
-} LabelMode;
+	HAND_MODE_DEFAULT,
+	HAND_MODE_SETCOLUMNS,
+	HAND_MODE_MOVE,
+	HAND_MODE_SIZE_SIDE,
+	HAND_MODE_SIZE_TO,
+	HAND_MODE_NAME,
+} HandMode;
 
 typedef struct {
 	/* keyboard and pointer are always in pair */
@@ -374,7 +376,8 @@ typedef struct {
 	/** time until |hand_timed_out()| is called; -1 if disarmed */
 	int timeout_ms;
 
-	LabelMode mode;
+	HandMode mode;
+
 	/* some |mode| related state */
 	Box *mode_box;
 	unsigned mode_dir;
@@ -689,12 +692,12 @@ label_repaint(Label const *const label, bool const shape)
 	int const radius = font_size / 2/*sqrt(te.y * te.y + te.x * te.x)*/;
 
 	switch (label->type) {
-	case label_normal:
+	case LABEL_NORMAL:
 	normal:
 		/* no extra stuff */
 		break;
 
-	case label_box:
+	case LABEL_BOX:
 	{
 #define glory_radius (radius * sqrt(M_PHI))
 
@@ -742,13 +745,13 @@ label_repaint(Label const *const label, bool const shape)
 	}
 		break;
 
-	case label_hline:
-	case label_vline:
+	case LABEL_HLINE:
+	case LABEL_VLINE:
 		cairo_set_line_width(cr, 1);
 		if (shape)
 			cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
 
-		if (label_hline == label->type) {
+		if (LABEL_HLINE == label->type) {
 			cairo_move_to(cr, 0, -radius * M_PHI);
 			cairo_line_to(cr, 0, +radius * M_PHI);
 		} else {
@@ -780,7 +783,7 @@ label_repaint(Label const *const label, bool const shape)
 
 	char const *symbol = NULL;
 
-	if (label_box == label->type) {
+	if (LABEL_BOX == label->type) {
 		if (label->base->user_concealed)
 			symbol = label->base->concealed ? "-" : "+";
 		else if (label->base->focus_lock && box_is_container(label->base))
@@ -837,7 +840,7 @@ new_label_for(Box *const box)
 	label->position_changed |= box != label->base;
 	label->base = box;
 	label->hands = 0;
-	label->type = label_normal;
+	label->type = LABEL_NORMAL;
 	return label;
 }
 
@@ -896,15 +899,23 @@ label_set_position(Label *const label, int16_t const x, int16_t const y)
 	label->y = y;
 }
 
+typedef enum {
+	LEFT = -1,
+	TOP = -1,
+	CENTER = 0,
+	RIGHT = 1,
+	BOTTOM = 1,
+} Orientation;
+
 static Point
-box_compute_position(Box const *const box, int const relx, int const rely, bool const outside)
+box_compute_position(Box const *const box, Orientation const ox, Orientation const oy, bool const outside)
 {
 	Box const *const monitor = box_get_monitor(box);
 	Point const size = monitor_convert_pt2px(monitor, label_rect);
 
 	Point ret = {
-		.x = box->x + (relx + 1) * (box->width  -size.x) / 2 + (outside ? relx : 0) * (size.x / 2),
-		.y = box->y + (rely + 1) * (box->height -size.y) / 2 + (outside ? rely : 0) * (size.y / 2)
+		.x = box->x + (ox + 1) * (box->width  -size.x) / 2 + (outside ? ox : 0) * (size.x / 2),
+		.y = box->y + (oy + 1) * (box->height -size.y) / 2 + (outside ? oy : 0) * (size.y / 2)
 	};
 
 #define CLAMP(x, width) \
@@ -922,9 +933,9 @@ box_compute_position(Box const *const box, int const relx, int const rely, bool 
 }
 
 static void
-label_set_position_to_box(Label *const label, int const relx, int const rely, bool const outside)
+label_set_position_to_box(Label *const label, Orientation const ox, Orientation const oy, bool const outside)
 {
-	Point const pt = box_compute_position(label->base, relx, rely, outside);
+	Point const pt = box_compute_position(label->base, ox, oy, outside);
 	label_set_position(label, pt.x, pt.y);
 }
 
@@ -1445,14 +1456,6 @@ hand_focus(Hand *const hand)
 		box_restore_pointer(hand->input_focus, hand);
 }
 
-enum {
-	left = -1,
-	top = -1,
-	center = 0,
-	right = 1,
-	bottom = 1,
-};
-
 static bool
 box_is_visible(Box const *const box)
 {
@@ -1547,14 +1550,14 @@ box_update_label(Box *const box)
 		Label *label;
 
 		switch (hand->mode) {
-		case mode_default:
+		case HAND_MODE_DEFAULT:
 			if (box->hide_label)
 				break;
 			/* fall through */
-		case mode_name:
-		case mode_move:
+		case HAND_MODE_NAME:
+		case HAND_MODE_MOVE:
 			label = new_label_for(box);
-			if (mode_name == hand->mode && hand->mode_box == box) {
+			if (HAND_MODE_NAME == hand->mode && hand->mode_box == box) {
 				char display_name[sizeof name + 1];
 				memcpy(display_name, hand->user_input, sizeof display_name);
 				display_name[strnlen(display_name, sizeof display_name)] = '?';
@@ -1562,7 +1565,7 @@ box_update_label(Box *const box)
 			} else {
 				label_set_name(label, box->name);
 			}
-			Point pt = box_compute_position(label->base, box_is_container(box) ? center : right, top, false);
+			Point pt = box_compute_position(label->base, box_is_container(box) ? CENTER : RIGHT, TOP, false);
 			if (box_is_container(box)) {
 				Box const *const monitor = box_get_monitor(box);
 				int const font_size = monitor_convert_pt2px(monitor,
@@ -1573,7 +1576,7 @@ box_update_label(Box *const box)
 					pt.y += font_size;
 			}
 			label_set_position(label, pt.x, pt.y);
-			label->type = label_box;
+			label->type = LABEL_BOX;
 			label_assign_hand(label, hand);
 			label_update(label);
 			break;
@@ -1618,7 +1621,7 @@ box_update_label(Box *const box)
 			break;
 #endif
 
-		case mode_setcolumns:
+		case HAND_MODE_SETCOLUMNS:
 		{
 			if (box->parent != hand->mode_box->parent)
 				break;
@@ -1626,12 +1629,12 @@ box_update_label(Box *const box)
 			label = new_label_for(box);
 			generate_name(name, hand->num_labels++);
 			label_set_name(label, name);
-			label_set_position_to_box(label, center, center, false);
+			label_set_position_to_box(label, CENTER, CENTER, false);
 			label_update(label);
 		}
 			break;
 
-		case mode_size_side:
+		case HAND_MODE_SIZE_SIDE:
 		{
 			if (box_is_monitor(box))
 				break;
@@ -1646,30 +1649,30 @@ box_update_label(Box *const box)
 			label = new_label_for(box);
 			strncpy(name, "h", sizeof name);
 			label_set_name(label, name);
-			label_set_position_to_box(label, left, center, true);
+			label_set_position_to_box(label, LEFT, CENTER, true);
 			label_update(label);
 
 			label = new_label_for(box);
 			strncpy(name, "j", sizeof name);
 			label_set_name(label, name);
-			label_set_position_to_box(label, center, bottom, true);
+			label_set_position_to_box(label, CENTER, BOTTOM, true);
 			label_update(label);
 
 			label = new_label_for(box);
 			strncpy(name, "k", sizeof name);
 			label_set_name(label, name);
-			label_set_position_to_box(label, center, top, true);
+			label_set_position_to_box(label, CENTER, TOP, true);
 			label_update(label);
 
 			label = new_label_for(box);
 			strncpy(name, "l", sizeof name);
 			label_set_name(label, name);
-			label_set_position_to_box(label, right, center, true);
+			label_set_position_to_box(label, RIGHT, CENTER, true);
 			label_update(label);
 		}
 			break;
 
-		case mode_size_to:
+		case HAND_MODE_SIZE_TO:
 		{
 			if (box != hand->mode_box)
 				break;
@@ -2157,7 +2160,7 @@ hand_leave_mode(Hand *const hand)
 	hand_input_reset(hand);
 
 	switch (hand->mode) {
-	case mode_move:
+	case HAND_MODE_MOVE:
 		hand_focus_box(hand, hand->mode_box);
 		break;
 
@@ -2166,7 +2169,7 @@ hand_leave_mode(Hand *const hand)
 		break;
 	}
 
-	hand->mode = mode_default;
+	hand->mode = HAND_MODE_DEFAULT;
 	hand->mode_box = NULL;
 }
 
@@ -2603,7 +2606,7 @@ hand_grab_keyboard(Hand const *const hand)
 	for_each_body {
 		xcb_window_t const root_window = body->screen->root;
 
-		if (mode_default == hand->mode) {
+		if (HAND_MODE_DEFAULT == hand->mode) {
 			XCB_INPUT_XI_PASSIVE_UNGRAB_DEVICE_WRAPPER(root_window,
 					hand->master_keyboard,
 					XCB_INPUT_GRAB_TYPE_KEYCODE, XCB_GRAB_ANY,
@@ -2956,7 +2959,7 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 	box_name(box, false);
 	if (box_hand) {
 		box_hand->want_focus = false;
-		if (focus && mode_default == box_hand->mode)
+		if (focus && HAND_MODE_DEFAULT == box_hand->mode)
 			hand_focus_box(box_hand, box);
 	}
 
@@ -4461,9 +4464,9 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 {
 	/*MAN(Keybindings)
 	 * .TP
-	 * .B Mod+{a-zA-Z}...
+	 * .BR Mod- { a-zA-Z }...
 	 * Focus box. Run hook
-	 * .B autostart {name}
+	 * .BR autostart " \fIname\fR"
 	 * if there is no such window.
 	 */
 	if (!repeating && hand_handle_input(hand, sym)) {
@@ -4471,7 +4474,7 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 	} else switch (sym) {
 	/*MAN(Keybindings)
 	 * .TP
-	 * .B Mod+)
+	 * .B Mod-)
 	 * Open hook
 	 * .B quickstart
 	 * inside $\fBTERMINAL\fR.
@@ -4488,7 +4491,7 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .B Mod+]
+	 * .B Mod-]
 	 * Open
 	 * .BR alsamixer(1) .
 	 */
@@ -4502,7 +4505,7 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .B Mod+*
+	 * .B Mod-*
 	 * Toggle system mute.
 	 */
 	case XKB_KEY_asterisk:
@@ -4514,7 +4517,7 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .B Mod+-
+	 * .B Mod--
 	 * Decrease system volume.
 	 */
 	case XKB_KEY_minus:
@@ -4523,7 +4526,7 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .B Mod++
+	 * .B Mod-+
 	 * Increase system volume.
 	 */
 	case XKB_KEY_plus:
@@ -4532,7 +4535,7 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .B Mod+Return
+	 * .B Mod-Return
 	 * Open $\fBTERMINAL\fR.
 	 */
 	case XKB_KEY_Return:
@@ -4599,17 +4602,45 @@ box_explode(Box *const box, bool const vertical)
 	}
 }
 
+static Box *
+box_clone(Box const *const box)
+{
+	bool const is_container = box_is_container(box);
+	size_t const new_size = sizeof *box + (is_container
+			? box->num_children * sizeof *box->children
+			: num_hands * sizeof(BoxPointer));
+	Box *const new = malloc(new_size);
+	if (!new)
+		return NULL;
+
+	memcpy(new, box, is_container ? sizeof *box : new_size);
+	new->parent = NULL;
+
+	for (uint16_t i = 0; i < box->num_children; ++i) {
+		Box **const child = &new->children[i];
+		if (!(*child = box_clone(box->children[i]))) {
+			while (0 < i)
+				box_free(new->children[--i]);
+			box_free(new);
+			return NULL;
+		}
+		(*child)->parent = (Box *)box;
+	}
+
+	return new;
+}
+
 static void
 hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand *const hand, xcb_keysym_t const sym)
 {
 	Label *label;
 
 	switch (hand->mode) {
-	case mode_default:
+	case HAND_MODE_DEFAULT:
 		unreachable;
 		return;
 
-	case mode_move:
+	case HAND_MODE_MOVE:
 		switch (KEY_MOD_MASK & event->mods.base) {
 		case XCB_MOD_MASK_4:
 			if (hand_handle_input(hand, sym))
@@ -4666,6 +4697,11 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 				box_explode(hand->focus, false);
 				goto append;
 
+			case XKB_KEY_d:
+				if (!(hand->mode_box = box_clone(hand->mode_box)))
+					break;
+				goto append;
+
 			default:
 				return;
 			}
@@ -4673,21 +4709,21 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 		}
 		break;
 
-	case mode_size_side:
+	case HAND_MODE_SIZE_SIDE:
 		if (hand_input_find_label(hand, &label)) {
-			hand->mode = mode_size_to;
+			hand->mode = HAND_MODE_SIZE_TO;
 			hand->mode_box = label->base;
 			break;
 		}
 		return;
 
-	case mode_size_to:
+	case HAND_MODE_SIZE_TO:
 		if (hand_input_find_label(hand, &label)) {
 			break;
 		}
 		return;
 
-	case mode_name:
+	case HAND_MODE_NAME:
 		if (!(KEY_MOD_MASK & event->mods.base))
 			hand_handle_input(hand, sym);
 
@@ -4712,7 +4748,7 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 		box_propagate_change(hand->mode_box)->label_changed = true;
 		return;
 
-	case mode_setcolumns:
+	case HAND_MODE_SETCOLUMNS:
 	{
 		if (!(KEY_MOD_MASK & event->mods.base))
 			hand_handle_input(hand, sym);
@@ -4766,44 +4802,19 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 	hand_leave_mode(hand);
 }
 
-static Box *
-box_clone(Box const *const box)
-{
-	bool const is_container = box_is_container(box);
-	size_t const size = sizeof *box + (is_container
-			? box->num_children * sizeof *box->children
-			: num_hands * sizeof(BoxPointer));
-	Box *new = malloc(size);
-
-	if (new) {
-		memcpy(new, box, is_container ? sizeof *box : size);
-
-		for (uint16_t i = 0; i < box->num_children; ++i) {
-			if (!(new->children[i] = box_clone(box->children[i]))) {
-				while (0 < i)
-					box_free(new->children[--i]);
-				box_free(new), new = NULL;
-				break;
-			}
-		}
-	}
-
-	return new;
-}
-
 static bool
 hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool const repeating)
 {
 	switch (sym) {
 	/*MAN(Keybindings)
 	 * .TP
-	 * .BR Mod+Ctrl+c "olumns " {how}
+	 * .BR Mod-Ctrl-c "olumns \fIhow\fR"
 	 * Set number of columns.
-	 * .B how
+	 * .I how
 	 * can be:
 	 * .RS
 	 * .TP
-	 * .B {a-z}
+	 * .RB { a-z }
 	 * Set number of columns by selecting box that should appear at the end of the first row.
 	 * .TP
 	 * .B =
@@ -4826,13 +4837,13 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 		if (!hand->focus)
 			break;
 
-		hand->mode = mode_setcolumns;
+		hand->mode = HAND_MODE_SETCOLUMNS;
 		hand->mode_box = hand->focus;
 		break;
 
-	/*MAN(Keybindings)
+	/*MAN( Keybindings)
 	 * .TP
-	 * .B Mod+Ctrl+r {what} {to-where}
+	 * .BR Mod-Ctrl-r \fIwhat\fR \fIto-where\fR
 	 * Resize a split or a side of a floating window.
 	 * .IP
 	 * .B =
@@ -4840,13 +4851,17 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 	 */
 	case XKB_KEY_r:
 		/* TODO: take account window gravity */
-		hand->mode = mode_size_side;
+		hand->mode = HAND_MODE_SIZE_SIDE;
 		break;
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .BR Mod+Ctrl+g roup
+	 * .BR Mod-Ctrl-g roup
 	 * Group related boxes.
+	 * .IP
+	 * Related boxes are determined by
+	 * .BR WM_CLIENT_LEADER " and " WM_CLASS
+	 * window properties in this order.
 	 */
 	case XKB_KEY_g:
 		if (!hand->input_focus)
@@ -4857,7 +4872,7 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .BR Mod+Ctrl+b arricade
+	 * .BR Mod-Ctrl-b arricade
 	 * Toggle pointer barrier around focused box.
 	 */
 	case XKB_KEY_b:
@@ -4866,9 +4881,9 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .BR Mod+Ctrl+t ake " [ Mod+{a-zA-Z}... ]... {how}"
+	 * .BR Mod-Ctrl-t "ake [ " Mod- { a-zA-Z "}... ]... \fIhow\fR"
 	 * Take box to somewhere else.
-	 * .B how
+	 * .I how
 	 * can be:
 	 * .RS
 	 * .TP
@@ -4898,7 +4913,7 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 		if (!hand->focus)
 			break;
 
-		hand->mode = mode_move;
+		hand->mode = HAND_MODE_MOVE;
 		hand->mode_box = hand->focus;
 
 		Box *const box = hand->latest_input[hand->focus == hand->latest_input[0]];
@@ -4909,7 +4924,7 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .BR Mod+Ctrl+l ock
+	 * .BR Mod-Ctrl-l ock
 	 * Toggle focus lock inside box.
 	 */
 	case XKB_KEY_l:
@@ -4944,14 +4959,14 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .BR Mod+Ctrl+s how
+	 * .BR Mod-Ctrl-s how
 	 * Explicitly unconceal box.
 	 */
 	case XKB_KEY_s:
 	case XKB_KEY_plus:
 	/*MAN(Keybindings)
 	 * .TP
-	 * .BR Mod+Ctrl+h ide
+	 * .BR Mod-Ctrl-h ide
 	 * Explicitly conceal box.
 	 */
 	case XKB_KEY_h:
@@ -4974,16 +4989,16 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .BR Mod+Ctrl+m aximize
+	 * .BR Mod-Ctrl-m aximize
 	 * Implicitly conceal box and its siblings. Unconceal when there are nothing
 	 * to conceal.
 	 */
 	case XKB_KEY_m:
 	/*MAN(Keybindings)
 	 * .TP
-	 * .BR Mod+Ctrl+f ull
+	 * .BR Mod-Ctrl-f ull
 	 * Do
-	 * .B Mod+Ctrl+m
+	 * .B Mod-Ctrl-m
 	 * for each level inside a floating box.
 	 */
 	case XKB_KEY_f:
@@ -5031,7 +5046,18 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .BR Mod+Ctrl+n "ame " "{a-zA-Z}... Return"
+	 * .BR Mod-Ctrl-p "arent, " Mod-Ctrl-u "p"
+	 * Focus parent.
+	 */
+	case XKB_KEY_u:
+	case XKB_KEY_p:
+		if (hand->focus && hand->focus->parent)
+			hand_focus_box(hand, hand->focus->parent);
+		break;
+
+	/*MAN(Keybindings)
+	 * .TP
+	 * .BR Mod-Ctrl-n "ame {" a-zA-Z "}... Return"
 	 * Name focused box.
 	 */
 	case XKB_KEY_n:
@@ -5041,14 +5067,14 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 		if (!hand->focus)
 			break;
 
-		hand->mode = mode_name;
+		hand->mode = HAND_MODE_NAME;
 		hand->mode_box = hand->focus;
 		break;
 
 	/* wlose/xlose */
 	/*MAN(Keybindings)
 	 * .TP
-	 * .BR Mod+Ctrl+w indow
+	 * .BR Mod-Ctrl-w indow
 	 * Close box just like user would clicked
 	 * \*(lqX\*(rq in the title bar. Second time kill by force.
 	 */
@@ -5064,7 +5090,7 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .BR Mod+Ctrl+z enter
+	 * .BR Mod-Ctrl-z enter
 	 * Center pointer inside box.
 	 */
 	case XKB_KEY_z:
@@ -5087,7 +5113,7 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 		return true;
 	}
 
-	if (mode_default != hand->mode) {
+	if (HAND_MODE_DEFAULT != hand->mode) {
 		hand_input_reset(hand);
 		hand_do_mode_changes(hand);
 	}
@@ -5125,10 +5151,10 @@ handle_input_key_press(xcb_input_key_press_event_t const *const event)
 	       event->mods.locked,
 	       event->deviceid, event->sourceid, event->root);
 
-	LabelMode const old_mode = hand->mode;
+	HandMode const old_mode = hand->mode;
 
 	switch (hand->mode) {
-	case mode_default:
+	case HAND_MODE_DEFAULT:
 	{
 		/* if (XKB_KEY_Super_L == sym || XKB_KEY_Super_R == sym) {
 			propagate = false; */
@@ -5219,7 +5245,7 @@ handle_input_enter(xcb_input_enter_event_t const *const event)
 
 	/*MAN( Keybindings)
 	 * .TP
-	 * .B Mod4+Mouse Enter...
+	 * .B Mod4-Mouse Enter...
 	 * Focus window.
 	 */
 	if (0 && XCB_MOD_MASK_4 == event->mods.base) {
@@ -5360,9 +5386,9 @@ handle_generic_event(xcb_ge_generic_event_t const *const event)
 static void
 hand_timed_out(Hand *const hand)
 {
-	assert(mode_default == hand->mode);
+	assert(HAND_MODE_DEFAULT == hand->mode);
 	printf("hand_timed_out(()\n");
-	hand->mode = mode_default;
+	hand->mode = HAND_MODE_DEFAULT;
 }
 
 static void
