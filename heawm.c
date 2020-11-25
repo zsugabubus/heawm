@@ -2667,7 +2667,7 @@ hand_grab_keyboard(Hand const *const hand)
 static void
 hand_assign_latest_input(Hand *const hand)
 {
-	if (hand->input_focus) {
+	if (hand->input_focus && hand->focus) {
 		hand->input_focus->close_by_force = false;
 
 		if (hand->focus != hand->input_focus) {
