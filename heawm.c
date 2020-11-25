@@ -2299,9 +2299,12 @@ box_vacuum(Box *const box)
 	    box_is_monitor(box))
 		goto out;
 
-	if (1 == box->num_children && box_is_container(box->children[0]) && !box_is_leg(box)) {
-		/* move the only children of box up one, at the place of the box */
+	/* substitute box with its only children */
+	if (1 == box->num_children && box_is_container(box->children[0]) && !box_is_monitor(box)) {
+		/* keep name only */
+		memcpy(box->children[0]->name, box->name, sizeof box->name);
 		box_reparent(box->parent, box_get_pos(box), box->children[0]);
+		box_delete(box);
 		return;
 	}
 
