@@ -7,7 +7,7 @@ is really.], semidynamic tiling window manager for the X Window System with
 multihead‌footnote:[Here be dragons.],
 multihand‌footnote:[Stuff that requires at least three limbs:
 multi-pointer and friends. Not for introverts. You have been warned.],
-multi-leg‌footnote:[This program is so much crap you will surely use both
+multileg‌footnote:[This program is so much crap you will surely use both
 of your legs.] support, aiming to provide O(1) navigation.
 
 - Configure in C with some basic X resources.

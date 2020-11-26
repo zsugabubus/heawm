@@ -39,15 +39,8 @@
 
 /* TEST: https://superuser.com/questions/801611/how-to-make-all-applications-respect-my-modified-xkb-layout/844673#844673 */
 
-/* https://github.com/LemonBoy/bar */
-
 /* motif: https://gitlab.gnome.org/GNOME/gtk/-/blob/master/gdk/x11/MwmUtil.h */
 /* https://people.gnome.org/~tthurman/docs/metacity/xprops_8h-source.html */
-
-/*
-https://www.x.org/releases/X11R7.7/doc/inputproto/XI2proto.txt
-https://www.x.org/releases/X11R7.5/doc/randrproto/randrproto.txt
-*/
 
 #ifdef HEAWM_NDEBUG
 /** suppress debug output */
@@ -73,10 +66,14 @@ https://www.x.org/releases/X11R7.5/doc/randrproto/randrproto.txt
 # define maybe_unused
 #endif
 
-#if defined(__GNUC__) || defined(clang)
-# define unreachable __builtin_unreachable()
+#ifndef HEAWM_NDEBUG
+# if defined(__GNUC__) || defined(clang)
+#  define unreachable __builtin_unreachable()
+# else
+#  define unreachable
+# endif
 #else
-# define unreachable
+# define unreachable abort()
 #endif
 
 /** clock we use for measuring elapsed time for hands */
@@ -142,7 +139,12 @@ https://www.x.org/releases/X11R7.5/doc/randrproto/randrproto.txt
 		{ mask } \
 	}
 
-#define EVENT_MASK \
+#define FRAME_WINDOW_EVENT_MASK \
+(	XCB_EVENT_MASK_STRUCTURE_NOTIFY \
+| 	XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT \
+)
+
+#define CLIENT_WINDOW_EVENT_MASK \
 (	XCB_EVENT_MASK_PROPERTY_CHANGE \
 |	XCB_EVENT_MASK_STRUCTURE_NOTIFY \
 |	XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY \
@@ -206,6 +208,8 @@ typedef struct {
 	xcb_input_fp1616_t x, y;
 } BoxPointer;
 
+#define Box_pointers(box) ((BoxPointer *)&box->children)
+
 /** a box that holds smaller boxes. you surely know such box so i do not have
  * to introduce it better */
 typedef struct box Box;
@@ -218,6 +222,15 @@ struct box {
 	uint16_t user_width, user_height;
 
 	xcb_window_t window;
+	/* parent of window
+	 *
+	 * why?
+	 * (1) because retard GIMP unmaps its dialog boxes when its main
+	 *     window. who the fuck asked for it? really... so much shit... its the
+	 *     task of wm bitches.
+	 * (2) programs may keep around unused windows unmapped and if such
+	 *     windows had been concealed they will not be deleted. */
+	xcb_window_t frame;
 	xcb_window_t leader;
 
 	uint16_t num_children,
@@ -303,6 +316,8 @@ struct box {
  */
 static Box *root;
 
+static bool ewmh_client_list_changed;
+
 typedef enum {
 	LABEL_NORMAL, /** text only */
 	LABEL_BOX, /** draw glory if |base| focused */
@@ -333,7 +348,7 @@ typedef struct {
 	/* <= */ num_labels;
 	Label *labels;
 
-	xcb_window_t dummy;
+	xcb_window_t dummy_child;
 } Body;
 
 static uint8_t num_bodies;
@@ -501,7 +516,11 @@ static xcb_atom_t atoms[ARRAY_SIZE(ATOM_NAMES)]; /** resolved ATOM_NAMES */
 static xcb_connection_t *conn;
 static xcb_xrm_database_t *xrm;
 static int preferred_screen;
+/* https://www.x.org/releases/X11R7.7/doc/inputproto/XI2proto.txt */
 static uint8_t xi_opcode; /** major opcode of XInput extension */
+/* https://www.x.org/releases/X11R7.7/doc/xextproto/shape.html */
+static uint8_t shape_base_event; /** major opcode of Shape extension */
+/* https://www.x.org/releases/X11R7.5/doc/randrproto/randrproto.txt */
 static uint8_t randr_base_event; /** beginning of XRandR event range */
 static uint8_t xkb_base_event; /** beginning of XKB event range */
 static struct xkb_context *xkb_context;
@@ -580,21 +599,11 @@ spawn(char const *argv[], void(*fork_cb)(void *), void *arg)
 }
 
 static Box *
-find_box_by_leader(Box *const root, Box *start, xcb_window_t const window)
+find_box_by_window(Box *const root, Box *start, size_t const offset, xcb_window_t const window)
 {
 	Box *box;
 	for_each_box(box, root, start)
-		if (window == box->leader)
-			break;
-	return box;
-}
-
-static Box *
-find_box_by_window(Box *const root, Box *start, xcb_window_t const window)
-{
-	Box *box;
-	for_each_box(box, root, start)
-		if (window == box->window)
+		if (window == *(xcb_window_t *)((uintptr_t)box + offset))
 			break;
 	return box;
 }
@@ -822,7 +831,7 @@ label_repaint(Label const *const label, bool const shape)
 }
 
 static Label *
-new_label_for(Box *const box)
+label_new_for(Box *const box)
 {
 	Label *label;
 	Body *const body = &bodies[box->body];
@@ -1340,8 +1349,6 @@ hand_get_wanted_focus(Hand const *const hand)
 		: bodies[0].screen->root;
 }
 
-#define Box_pointers(box) ((BoxPointer *)&box->children)
-
 static void
 box_save_pointer(Box *const box, Hand const *const hand)
 {
@@ -1355,12 +1362,12 @@ box_save_pointer(Box *const box, Hand const *const hand)
 
 	/* only care about cases when pointer is above a window that we manage
 	 * (potentially a non-temporal window) */
-	Box const *const base = find_box_by_window(root, root, reply->child);
+	Box const *const base = find_box_by_window(root, root, offsetof(Box, frame), reply->child);
 	if (!base)
 		goto out;
 
 	Box_pointers(box)[hand - hands] = (BoxPointer){
-		.window = base->window,
+		.window = reply->child,
 		.x = reply->root_x - (base->x << 16),
 		.y = reply->root_y - (base->y << 16),
 	};
@@ -1556,7 +1563,7 @@ box_update_label(Box *const box)
 			/* fall through */
 		case HAND_MODE_NAME:
 		case HAND_MODE_MOVE:
-			label = new_label_for(box);
+			label = label_new_for(box);
 			if (HAND_MODE_NAME == hand->mode && hand->mode_box == box) {
 				char display_name[sizeof name + 1];
 				memcpy(display_name, hand->user_input, sizeof display_name);
@@ -1611,7 +1618,7 @@ box_update_label(Box *const box)
 				i -= 2;
 
 				generate_name(name, hand->num_labels++);
-				label = new_label_for(box);
+				label = label_new_for(box);
 				label_assign_hand(label, hand);
 				label_set_name(label, name);
 				label_set_position_to_box(label, to[i], to[i + 1], true);
@@ -1626,7 +1633,7 @@ box_update_label(Box *const box)
 			if (box->parent != hand->mode_box->parent)
 				break;
 
-			label = new_label_for(box);
+			label = label_new_for(box);
 			generate_name(name, hand->num_labels++);
 			label_set_name(label, name);
 			label_set_position_to_box(label, CENTER, CENTER, false);
@@ -1646,25 +1653,25 @@ box_update_label(Box *const box)
 				break;
 
 		all_four:
-			label = new_label_for(box);
+			label = label_new_for(box);
 			strncpy(name, "h", sizeof name);
 			label_set_name(label, name);
 			label_set_position_to_box(label, LEFT, CENTER, true);
 			label_update(label);
 
-			label = new_label_for(box);
+			label = label_new_for(box);
 			strncpy(name, "j", sizeof name);
 			label_set_name(label, name);
 			label_set_position_to_box(label, CENTER, BOTTOM, true);
 			label_update(label);
 
-			label = new_label_for(box);
+			label = label_new_for(box);
 			strncpy(name, "k", sizeof name);
 			label_set_name(label, name);
 			label_set_position_to_box(label, CENTER, TOP, true);
 			label_update(label);
 
-			label = new_label_for(box);
+			label = label_new_for(box);
 			strncpy(name, "l", sizeof name);
 			label_set_name(label, name);
 			label_set_position_to_box(label, RIGHT, CENTER, true);
@@ -1681,7 +1688,7 @@ box_update_label(Box *const box)
 			Point const size = monitor_convert_pt2px(monitor, label_rect);
 
 			for (char ch = 'a'; ch <= 'z'; ++ch) {
-				label = new_label_for(box);
+				label = label_new_for(box);
 				name[0] = ch;
 				name[1] = '\0';
 				label_set_name(label, name);
@@ -1861,7 +1868,7 @@ box_update(Box *const box)
 			box_delete_labels(box);
 			if (box->window != XCB_WINDOW_NONE) {
 				printf("%*.s unmap\n", depth, "");
-				xcb_unmap_window(conn, box->window);
+				xcb_unmap_window(conn, box->frame);
 			}
 
 			for (uint16_t i = 0; i < box->num_children; ++i) {
@@ -1897,27 +1904,25 @@ box_update(Box *const box)
 	if (!box->width)
 		goto out;
 
-	if (box->window != XCB_WINDOW_NONE) {
+	if (box->window != XCB_WINDOW_NONE && !box_is_container(box)) {
 		if (0 < i) {
 			mask |= XCB_CONFIG_WINDOW_STACK_MODE;
 			list[i++] = XCB_STACK_MODE_BELOW;
 			printf("%*.s configure n=%d\n", depth, "", i);
-			DEBUG_CHECK(xcb_configure_window, conn, box->window, mask, list);
+			DEBUG_CHECK(xcb_configure_window, conn, box->frame, mask, list);
+
+			if ((XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT) & mask) {
+				mask = XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT;
+				list[0] = box->width;
+				list[1] = box->height;
+				DEBUG_CHECK(xcb_configure_window, conn, box->window, mask, list);
+			}
 		}
 
 		/* map only after configure */
 		if (should_map) {
 			printf("%*.s map\n", depth, "");
-			if (CHECK(xcb_map_window, conn, box->window)) {
-				/* if we could not map the window that means
-				 * that something bad happened with the window
-				 * since we received map_request. we will not
-				 * receive unmap_notify to delete the box
-				 * because we have not yet mapped it, so we
-				 * must act now. */
-				box_delete(box);
-				goto out;
-			}
+			CHECK(xcb_map_window, conn, box->frame);
 		}
 
 		/* xcb_configure_window(conn, box->window, XCB_CONFIG_WINDOW_BORDER_WIDTH, &(uint32_t const){ 4 }); */
@@ -1948,6 +1953,59 @@ out:
 }
 
 static void
+ewmh_append_client_list(Box const *const box)
+{
+	DEBUG_CHECK(xcb_change_property, conn, XCB_PROP_MODE_APPEND,
+			bodies[box->body].screen->root, ATOM(_NET_CLIENT_LIST),
+			XCB_ATOM_WINDOW, 32,
+			1, &box->window);
+}
+
+static void
+ewmh_delete_client_list(Body const *const body)
+{
+	DEBUG_CHECK(xcb_delete_property, conn, body->screen->root, ATOM(_NET_CLIENT_LIST));
+}
+
+static void
+ewmh_update_client_list(Body const *const body)
+{
+	/* FIXME: maybe we hit max message len? */
+	xcb_window_t windows[1000];
+	uint32_t num_windows = 0;
+	xcb_prop_mode_t mode = XCB_PROP_MODE_REPLACE;
+
+	Box *box;
+	for_each_box(box, root, root)
+		if (box->body == (body - bodies) && !box_is_container(box)) {
+			windows[num_windows++] = box->window;
+			if (ARRAY_SIZE(windows) == num_windows) {
+				DEBUG_CHECK(xcb_change_property, conn, mode,
+						body->screen->root, ATOM(_NET_CLIENT_LIST),
+						XCB_ATOM_WINDOW, 32,
+						num_windows, windows);
+				num_windows = 0;
+				mode = XCB_PROP_MODE_APPEND;
+			}
+		}
+
+	if (0 < num_windows)
+		DEBUG_CHECK(xcb_change_property, conn, mode,
+				body->screen->root, ATOM(_NET_CLIENT_LIST),
+				XCB_ATOM_WINDOW, 32,
+				num_windows, windows);
+
+	ewmh_client_list_changed = false;
+}
+
+static void
+ewmh_update(Body const *const body)
+{
+	if (ewmh_client_list_changed)
+		ewmh_update_client_list(body);
+}
+
+static void
 do_update(void)
 {
 	do
@@ -1960,6 +2018,8 @@ do_update(void)
 			Label *label = &body->labels[--body->num_labels_mapped];
 			hide_label(label);
 		}
+
+		ewmh_update(body);
 	}
 }
 
@@ -2174,50 +2234,6 @@ hand_leave_mode(Hand *const hand)
 }
 
 static void
-ewmh_append_client_list(Box const *const box)
-{
-	DEBUG_CHECK(xcb_change_property, conn, XCB_PROP_MODE_APPEND,
-			bodies[box->body].screen->root, ATOM(_NET_CLIENT_LIST),
-			XCB_ATOM_WINDOW, 32,
-			1, &box->window);
-}
-
-static void
-ewmh_delete_client_list(Body const *const body)
-{
-	DEBUG_CHECK(xcb_delete_property, conn, body->screen->root, ATOM(_NET_CLIENT_LIST));
-}
-
-static void
-ewmh_update_client_list(Body const *const body)
-{
-	/* FIXME: maybe we hit max message len? */
-	xcb_window_t windows[1000];
-	uint32_t num_windows = 0;
-	xcb_prop_mode_t mode = XCB_PROP_MODE_REPLACE;
-
-	Box *box;
-	for_each_box(box, root, root)
-		if (box->body == (body - bodies) && !box_is_container(box)) {
-			windows[num_windows++] = box->window;
-			if (ARRAY_SIZE(windows) == num_windows) {
-				DEBUG_CHECK(xcb_change_property, conn, mode,
-						body->screen->root, ATOM(_NET_CLIENT_LIST),
-						XCB_ATOM_WINDOW, 32,
-						num_windows, windows);
-				num_windows = 0;
-				mode = XCB_PROP_MODE_APPEND;
-			}
-		}
-
-	if (0 < num_windows)
-		DEBUG_CHECK(xcb_change_property, conn, mode,
-				body->screen->root, ATOM(_NET_CLIENT_LIST),
-				XCB_ATOM_WINDOW, 32,
-				num_windows, windows);
-}
-
-static void
 box_free(Box *const box)
 {
 	/* if (XCB_WINDOW_NONE != box->frame)
@@ -2273,9 +2289,17 @@ box_delete(Box *box)
 	if (focus_changed)
 		focus_all_hands(real_focus_seq);
 
-	if (!box_is_container(box))
-		/* TODO: do not update immediately */
-		ewmh_update_client_list(&bodies[box->body]);
+	if (!box_is_container(box)) {
+		DEBUG_CHECK(xcb_change_save_set, conn, XCB_SET_MODE_DELETE, box->window);
+		DEBUG_CHECK(xcb_shape_select_input, conn, box->window, false);
+		DEBUG_CHECK(xcb_change_window_attributes, conn, box->window,
+				XCB_CW_EVENT_MASK,
+				(uint32_t const []){
+					XCB_NONE
+				});
+		DEBUG_CHECK(xcb_destroy_window, conn, box->frame);
+		ewmh_client_list_changed = true;
+	}
 
 	box_vacuum(box_parent);
 	box_free(box);
@@ -2306,8 +2330,10 @@ box_vacuum(Box *const box)
 	if (1 == box->num_children && box_is_container(box->children[0]) && !box_is_monitor(box)) {
 		/* keep name only */
 		memcpy(box->children[0]->name, box->name, sizeof box->name);
+		box->children[0]->user_concealed = box->user_concealed;
+		box->children[0]->concealed = box->concealed;
+		box->children[0]->hide_label |= box->hide_label;
 		box_reparent(box->parent, box_get_pos(box), box->children[0]);
-		box_delete(box);
 		return;
 	}
 
@@ -2511,34 +2537,6 @@ box_set_focus_lock(Box *const box, bool const enable)
 		box->layout_changed = true;
 	}
 }
-
-#if 0
-box->window = xcb_generate_id(conn);
-
-xcb_void_cookie_t const cookie =
-	xcb_create_window_checked(conn,
-		XCB_COPY_FROM_PARENT, /* depth */
-		box->window, /* window id */
-		screen->root, /* parent */
-		0, /* x */
-		0, /* y */
-		1000, /* width */
-		700, /* height */
-		0, /* border width */
-		XCB_WINDOW_CLASS_INPUT_OUTPUT, /* class */
-		screen->root_visual, /* visual */
-		0,
-		NULL);
-if (!check_cookie(cookie)) {
-	return NULL;
-}
-
-xcb_change_window_attributes(conn, box->window, XCB_CW_EVENT_MASK, &(uint32_t const[]){
-	XCB_EVENT_MASK_STRUCTURE_NOTIFY |
-	XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
-	XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT
-	});
-#endif
 
 static void
 increase_focus_seq(void)
@@ -2801,19 +2799,12 @@ box_set_class(Box *const box, xcb_get_property_reply_t const *const reply)
 static Box *
 box_window(xcb_window_t const root_window, xcb_window_t const window)
 {
-	if (CHECK(xcb_change_window_attributes, conn, window,
-				XCB_CW_EVENT_MASK,
-				(uint32_t const []){
-					EVENT_MASK
-				}))
-		return NULL;
+	Box *box = box_new();
+
+	box->window = window;
+	box->frame = xcb_generate_id(conn);
 
 	/* DEBUG_CHECK(xcb_configure_window, conn, window, XCB_CONFIG_WINDOW_BORDER_WIDTH, &(uint32_t const){ 0 }); */
-
-	DEBUG_CHECK(xcb_input_xi_select_events, conn, window, 1,
-			XI_EVENT_MASK(XCB_INPUT_DEVICE_ALL,
-					XCB_INPUT_XI_EVENT_MASK_FOCUS_IN |
-					XCB_INPUT_XI_EVENT_MASK_ENTER));
 
 	xcb_get_property_cookie_t const cookies[] = {
 		xcb_get_property(conn, 0, window, ATOM(_NET_WM_STATE),       XCB_ATOM_ATOM,       0, 1),
@@ -2823,9 +2814,6 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 		xcb_get_property(conn, 0, window, ATOM(_HEAWM_NAME),         XCB_ATOM_STRING,     0, membersizeof(Box, name)),
 		xcb_get_property(conn, 0, window, XCB_ATOM_WM_CLASS,         XCB_ATOM_STRING,     0, XCB_STRING_MAX / sizeof(uint32_t)),
 	};
-
-	Box *box = box_new();
-	box->window = window;
 
 	xcb_atom_t state = XCB_ATOM_NONE;
 	xcb_window_t transient_for = XCB_WINDOW_NONE;
@@ -2881,9 +2869,9 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 	if (0 < num_hands) {
 		Box *origin = NULL;
 		if (!origin && XCB_WINDOW_NONE != transient_for)
-			origin = find_box_by_window(root, root, transient_for);
+			origin = find_box_by_window(root, root, offsetof(Box, window), transient_for);
 		if (!origin && XCB_WINDOW_NONE != box->leader)
-			origin = find_box_by_leader(root, root, box->leader);
+			origin = find_box_by_window(root, root, offsetof(Box, leader), box->leader);
 
 		/* find the hand that could possibly create this window */
 		if (origin) {
@@ -2965,7 +2953,52 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 
 	ewmh_append_client_list(box);
 
+	Body *const body = &bodies[parent->body];
+	DEBUG_CHECK(xcb_create_window, conn, XCB_COPY_FROM_PARENT,
+			box->frame,
+			body->screen->root,
+			0, 0,
+			1, 1,
+			0,
+			XCB_WINDOW_CLASS_INPUT_OUTPUT,
+			body->screen->root_visual,
+			0,
+			NULL);
+
+	DEBUG_CHECK(xcb_change_save_set, conn, XCB_SET_MODE_INSERT, window);
+
+	if (CHECK(xcb_reparent_window, conn, window, box->frame, 0, 0))
+		goto fail;
+
+	if (CHECK(xcb_map_window, conn, window))
+		goto fail;
+
+	if (CHECK(xcb_change_window_attributes, conn, box->frame,
+				XCB_CW_EVENT_MASK,
+				(uint32_t const []){
+					FRAME_WINDOW_EVENT_MASK
+				}))
+		goto fail;
+
+	if (CHECK(xcb_change_window_attributes, conn, window,
+				XCB_CW_EVENT_MASK,
+				(uint32_t const []){
+					CLIENT_WINDOW_EVENT_MASK
+				}))
+		goto fail;
+
+	DEBUG_CHECK(xcb_input_xi_select_events, conn, window, 1,
+			XI_EVENT_MASK(XCB_INPUT_DEVICE_ALL,
+					XCB_INPUT_XI_EVENT_MASK_FOCUS_IN |
+					XCB_INPUT_XI_EVENT_MASK_ENTER));
+
+	DEBUG_CHECK(xcb_shape_select_input, conn, window, true);
+
 	return box;
+
+fail:
+	box_delete(box);
+	return NULL;
 }
 
 static void
@@ -3056,6 +3089,8 @@ init_extensions(void)
 	if (!ext->present)
 		fprintf(stderr, "Shape extension missing. "
 				" Labels will look crappy.\n");
+	else
+		shape_base_event = ext->first_event;
 
 	ext = xcb_get_extension_data(conn, &xcb_xkb_id);
 	if (!ext->present) {
@@ -3240,7 +3275,7 @@ body_setup_cursor(Body const *const body, char const *const cursor_name)
 static void
 body_setup_net_name(Body const *const body, char const *const name)
 {
-	xcb_window_t const child = body->dummy;
+	xcb_window_t const child = body->dummy_child;
 
 	DEBUG_CHECK(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
 			child, ATOM(_NET_WM_NAME),
@@ -3267,9 +3302,9 @@ body_setup_ewmh(Body const *const body)
 static void
 body_setup_net(Body *const body)
 {
-	body->dummy = xcb_generate_id(conn);
+	body->dummy_child = xcb_generate_id(conn);
 	DEBUG_CHECK(xcb_create_window, conn, XCB_COPY_FROM_PARENT,
-			body->dummy,
+			body->dummy_child,
 			body->screen->root,
 			-1, -1, 1, 1, /* rect */
 			0, /* border */
@@ -3305,7 +3340,7 @@ body_setup(Body *const body)
 		CHECK(xcb_change_window_attributes, conn, body->screen->root,
 				XCB_CW_EVENT_MASK,
 				(uint32_t const []){
-					EVENT_MASK |
+					CLIENT_WINDOW_EVENT_MASK |
 					XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT
 				}));)
 	{
@@ -3374,6 +3409,7 @@ static void
 kill_head(Box *const head)
 {
 	head->user_width = 0;
+	head->user_height = 123;
 }
 
 static bool
@@ -3436,7 +3472,6 @@ body_update_heads(Body *const body)
 	}
 
 	int const num_monitors = xcb_randr_get_monitors_monitors_length(monitors);
-	assert(0 < num_monitors);
 
 	xcb_get_atom_name_cookie_t *cookies = malloc(num_monitors * sizeof *cookies);
 
@@ -3505,15 +3540,12 @@ vacuum:
 		if (head_is_alive(head))
 			continue;
 
-		printf("kill head\n");
-		box_delete(head);
-		continue;
-		/* make it floating */
-		/* TODO */
 		head->x = 0;
 		head->y = 0;
 		head->width = 300;
 		head->height = 400;
+		head->user_width = 300;
+		head->user_height = 400;
 	}
 
 	root->content_changed = true;
@@ -3693,7 +3725,7 @@ handle_property_notify(xcb_property_notify_event_t const *const event)
 } while (0)
 
 #define FIND_BOX \
-	Box *const box = find_box_by_window(root, root, event->window); \
+	Box *const box = find_box_by_window(root, root, offsetof(Box, window), event->window); \
 	if (!box) \
 		goto out;
 
@@ -3813,7 +3845,7 @@ find_box_in_body_by_window(Body *const body, xcb_window_t const window)
 		if (body_pos != head->body)
 			continue;
 
-		Box *box = find_box_by_window(head, head, window);
+		Box *box = find_box_by_window(head, head, offsetof(Box, window), window);
 		if (box)
 			return box;
 	}
@@ -3822,24 +3854,24 @@ find_box_in_body_by_window(Body *const body, xcb_window_t const window)
 }
 
 static void
-handle_destroy_notify(xcb_destroy_notify_event_t const *const event)
+handle_unmap_notify(xcb_unmap_notify_event_t const *const event)
 {
-	Box *box = find_box_by_window(root, root, event->window);
-	/* printf("destroy notify %x event=%x\n", event->window, event->event); */
+	if (event->event != event->window)
+		return;
+
+	/* printf("unmap notify %x event=%x, from_configure=%d\n", event->window, event->event, event->from_configure); */
+	Box *const box = find_box_by_window(root, root, offsetof(Box, window), event->window);
 	if (box)
 		box_delete(box);
 }
 
 static void
-handle_unmap_notify(xcb_unmap_notify_event_t const *const event)
-{
-	/* printf("unmap notify %x event=%x, from_configure=%d\n", event->window, event->event, event->from_configure); */
-}
-
-static void
 handle_map_request(xcb_map_request_event_t const *const event)
 {
-	box_window(event->parent, event->window);
+	/* printf("map request %x\n", event->window); */
+	Box *const box = find_box_by_window(root, root, offsetof(Box, window), event->window);
+	if (!box)
+		box_window(event->parent, event->window);
 }
 
 static void
@@ -3864,7 +3896,7 @@ static void
 handle_configure_request(xcb_configure_request_event_t const *const event)
 {
 	Box *box;
-	if ((box = find_box_by_window(root, root, event->window))) {
+	if ((box = find_box_by_window(root, root, offsetof(Box, window), event->window))) {
 		/* GPLv3 Annex 1: DO NOT FUCKING TOUCH IT. PLEASE. */
 		DEBUG_CHECK(xcb_send_event, conn, false, box->window,
 				XCB_EVENT_MASK_STRUCTURE_NOTIFY,
@@ -3954,14 +3986,14 @@ static void
 handle_client_message(xcb_client_message_event_t const *const event)
 {
 	if (ATOM(_NET_CLOSE_WINDOW) == event->type) {
-		Box *const box = find_box_by_window(root, root, event->window);
+		Box *const box = find_box_by_window(root, root, offsetof(Box, window), event->window);
 		if (box)
 			box_close(box);
 	} else if (ATOM(_NET_ACTIVE_WINDOW) == event->type) {
 		if (2 != event->data.data32[0])
 			return;
 
-		Box *const box = find_box_by_window(root, root, event->window);
+		Box *const box = find_box_by_window(root, root, offsetof(Box, window), event->window);
 		if (box) {
 			Hand *hand;
 			if (NULL_HAND == box->focus_hand) {
@@ -4697,10 +4729,12 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 				box_explode(hand->focus, false);
 				goto append;
 
+#if 0
 			case XKB_KEY_d:
 				if (!(hand->mode_box = box_clone(hand->mode_box)))
 					break;
 				goto append;
+#endif
 
 			default:
 				return;
@@ -5046,13 +5080,26 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .BR Mod-Ctrl-p "arent, " Mod-Ctrl-u "p"
+	 * .BR Mod-Ctrl-k
 	 * Focus parent.
 	 */
-	case XKB_KEY_u:
-	case XKB_KEY_p:
+	case XKB_KEY_k:
 		if (hand->focus && hand->focus->parent)
 			hand_focus_box(hand, hand->focus->parent);
+		break;
+
+	/*MAN(Keybindings)
+	 * .TP
+	 * .BR Mod-Ctrl-j
+	 * Focus child.
+	 */
+	case XKB_KEY_j:
+		if (hand->focus && hand->input_focus && hand->focus != hand->input_focus) {
+			Box *box = hand->input_focus;
+			while (box->parent != hand->focus)
+				box = box->parent;
+			hand_focus_box(hand, box);
+		}
 		break;
 
 	/*MAN(Keybindings)
@@ -5250,12 +5297,49 @@ handle_input_enter(xcb_input_enter_event_t const *const event)
 	 */
 	if (0 && XCB_MOD_MASK_4 == event->mods.base) {
 		Hand *const hand = find_hand_by_master_pointer(event->deviceid);
-		Box *const box = find_box_by_window(root, root, event->event);
+		Box *const box = find_box_by_window(root, root, offsetof(Box, window), event->event);
 		printf("mod enter\n");
 		hand_focus_box(hand, box);
 	} else {
 		xcb_input_xi_set_client_pointer(conn, event->child, event->deviceid);
 	}
+}
+
+static void
+handle_shape_notify(xcb_shape_notify_event_t const *const event)
+{
+	Box *const box = find_box_by_window(root, root, offsetof(Box, window), event->affected_window);
+
+	if (event->shaped)
+		DEBUG_CHECK(xcb_shape_combine, conn, XCB_SHAPE_SO_SET,
+				event->shape_kind, event->shape_kind,
+				box->frame,
+				0, 0, /* offset */
+				box->window);
+	else
+		DEBUG_CHECK(xcb_shape_mask, conn,
+				event->shape_kind, event->shape_kind,
+				box->frame,
+				0, 0, /* offset */
+				XCB_PIXMAP_NONE);
+}
+
+static bool
+handle_shape_event(xcb_generic_event_t const *const event)
+{
+	if (!shape_base_event)
+		return false;
+
+	switch (XCB_EVENT_RESPONSE_TYPE(event) - shape_base_event) {
+	case XCB_SHAPE_NOTIFY:
+		handle_shape_notify((void const *)event);
+		break;
+
+	default:
+		return false;
+	}
+
+	return true;
 }
 
 static void
@@ -5298,7 +5382,7 @@ handle_randr_screen_change_notify(xcb_randr_screen_change_notify_event_t const *
 static bool
 handle_randr_event(xcb_generic_event_t const *const event)
 {
-	if (0 == randr_base_event)
+	if (!randr_base_event)
 		return false;
 
 	switch (XCB_EVENT_RESPONSE_TYPE(event) - randr_base_event) {
@@ -5347,7 +5431,7 @@ handle_xkb_map_notify(xcb_xkb_map_notify_event_t *const event)
 static bool
 handle_xkb_event(xcb_generic_event_t const *const event)
 {
-	if (0 == xkb_base_event)
+	if (!xkb_base_event)
 		return false;
 
 	switch (XCB_EVENT_RESPONSE_TYPE(event) - xkb_base_event) {
@@ -5371,7 +5455,8 @@ handle_extension_event(xcb_generic_event_t const *const event)
 {
 	return
 		handle_randr_event(event) ||
-		handle_xkb_event(event);
+		handle_xkb_event(event) ||
+		handle_shape_event(event);
 }
 
 static void
@@ -5468,7 +5553,6 @@ run(void)
 		EVENT(XCB_CONFIGURE_NOTIFY,  handle_configure_notify);
 		EVENT(XCB_CONFIGURE_REQUEST, handle_configure_request);
 		EVENT(XCB_UNMAP_NOTIFY,      handle_unmap_notify);
-		EVENT(XCB_DESTROY_NOTIFY,    handle_destroy_notify);
 		EVENT(XCB_EXPOSE,            handle_expose);
 		EVENT(XCB_PROPERTY_NOTIFY,   handle_property_notify);
 		EVENT(XCB_CLIENT_MESSAGE,    handle_client_message);
