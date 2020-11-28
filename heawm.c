@@ -494,8 +494,8 @@ static char const *const ATOM_NAMES[] =
 	"_NET_WM_NAME",
 	"_NET_WM_STATE",
 	"_NET_WM_STATE_DEMANDS_ATTENTION",
-	"_NET_WM_STATE_FULLSCREEN",
-	"_NET_WM_STATE_MODAL",
+	"_NET_WM_STATE_HIDDEN",
+	"_NET_WM_STATE_FOCUSED",
 	"_NET_WM_TRANSIENT_FOR",
 	"UTF8_STRING",
 	"WM_CLIENT_LEADER",
@@ -503,6 +503,7 @@ static char const *const ATOM_NAMES[] =
 	"WM_NORMAL_HINTS",
 	"WM_PROTOCOLS",
 	"WM_SIZE_HINTS",
+	"WM_STATE",
 #if 0
 	/* https://specifications.freedesktop.org/wm-spec/1.3/ar01s05.html */
 	/* https://specifications.freedesktop.org/wm-spec/1.3/ar01s07.html */
@@ -1032,7 +1033,7 @@ label_update(Label *const label)
 				XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
 				/* (!box_is_container(label->base) ? XCB_CONFIG_WINDOW_SIBLING : 0) | */
 				XCB_CONFIG_WINDOW_STACK_MODE,
-				(uint32_t const []){
+				(uint32_t const[]){
 					label->x, label->y,
 					/* (!box_is_container(label->base) ? label->base->window : XCB_STACK_MODE_ABOVE), */
 					XCB_STACK_MODE_ABOVE
@@ -1703,6 +1704,26 @@ static void
 box_delete(Box *box);
 
 static void
+xcb_icccm_set_wm_state(xcb_window_t const window, xcb_icccm_wm_state_t const state)
+{
+	typedef struct {
+		uint32_t state;
+		xcb_window_t icon;
+	} xcb_icccm_wm_state_data_t;
+
+	if (XCB_ICCCM_WM_STATE_WITHDRAWN == state)
+		DEBUG_CHECK(xcb_delete_property, conn, window, ATOM(WM_STATE));
+	else
+		DEBUG_CHECK(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
+				window, ATOM(WM_STATE),
+				ATOM(WM_STATE), 32, sizeof(xcb_icccm_wm_state_data_t) / sizeof(uint32_t),
+				&(xcb_icccm_wm_state_data_t){
+					.state = state,
+					.icon = XCB_WINDOW_NONE,
+				});
+}
+
+static void
 box_update(Box *const box)
 {
 	static int depth = 0;
@@ -1749,7 +1770,7 @@ box_update(Box *const box)
 	/* because of relative position values, layout change must be
 	 * propagated so children will be repositioned correctly */
 	bool const focus_changed = box->focus_changed;
-	bool const layout_changed = box->layout_changed || position_changed || focus_changed;
+	bool const layout_changed = box->layout_changed;
 	bool const label_changed = box->label_changed || position_changed;
 	bool should_map = false;
 
@@ -1770,7 +1791,7 @@ box_update(Box *const box)
 		list[i++] = box->y;
 	}
 
-	if (layout_changed && box->parent) {
+	if ((layout_changed || position_changed || focus_changed) && box->parent) {
 		if (0 < box->width) {
 			mask |=
 				XCB_CONFIG_WINDOW_WIDTH |
@@ -1870,11 +1891,12 @@ box_update(Box *const box)
 				box_update(child);
 			}
 		not_a_container:;
-			should_map = true;
+			should_map = layout_changed;
 		} else {
 			box_delete_labels(box);
 			if (box->window != XCB_WINDOW_NONE) {
 				printf("%*.s unmap\n", depth, "");
+				xcb_icccm_set_wm_state(box->window, XCB_ICCCM_WM_STATE_ICONIC);
 				DEBUG_CHECK(xcb_unmap_window, conn, box->frame);
 			}
 
@@ -1929,12 +1951,13 @@ box_update(Box *const box)
 		/* map only after configure */
 		if (should_map) {
 			printf("%*.s map\n", depth, "");
+			xcb_icccm_set_wm_state(box->window, XCB_ICCCM_WM_STATE_NORMAL);
 			CHECK(xcb_map_window, conn, box->frame);
 		}
 
 		/* xcb_configure_window(conn, box->window, XCB_CONFIG_WINDOW_BORDER_WIDTH, &(uint32_t const){ 4 }); */
 
-		if (box_is_focused(box) && !box_is_container(box) && layout_changed) {
+		if (box_is_focused(box) && !box_is_container(box) && focus_changed) {
 			/* hand focus can only be updated after window is mapped */
 			for_each_hand {
 				Box const *const focus = hand->input_focus;
@@ -1948,7 +1971,7 @@ box_update(Box *const box)
 		}
 	}
 
-	if ((box->window != XCB_WINDOW_NONE ? should_map : layout_changed) || label_changed)
+	if ((box->window != XCB_WINDOW_NONE ? should_map : layout_changed || position_changed || focus_changed) || label_changed)
 		box_update_label(box);
 
 out:
@@ -2253,9 +2276,6 @@ hand_leave_mode(Hand *const hand)
 static void
 box_free(Box *const box)
 {
-	/* if (XCB_WINDOW_NONE != box->frame)
-		xcb_destroy_window(conn, box->frame); */
-
 #if 0
 	free(box->title);
 #endif
@@ -2314,14 +2334,15 @@ box_delete(Box *box)
 		focus_all_hands(real_focus_seq);
 
 	if (!box_is_container(box)) {
-		DEBUG_CHECK(xcb_change_save_set, conn, XCB_SET_MODE_DELETE, box->window);
 		DEBUG_CHECK(xcb_shape_select_input, conn, box->window, false);
 		DEBUG_CHECK(xcb_change_window_attributes, conn, box->window,
 				XCB_CW_EVENT_MASK,
-				(uint32_t const []){
+				(uint32_t const[]){
 					XCB_NONE
 				});
+		xcb_icccm_set_wm_state(box->window, XCB_ICCCM_WM_STATE_WITHDRAWN);
 		DEBUG_CHECK(xcb_destroy_window, conn, box->frame);
+		DEBUG_CHECK(xcb_change_save_set, conn, XCB_SET_MODE_DELETE, box->window);
 		ewmh_client_list_changed = true;
 	}
 
@@ -2667,14 +2688,16 @@ hand_focus_box_internal(Hand *const hand, Box *const box)
 	if (hand->input_focus)
 		box_save_pointer(hand->input_focus, hand);
 
-	if (hand->input_focus) {
+	if (hand->input_focus)
 		box_propagate_change(hand->input_focus)->label_changed = true;
-	} else if (hand->focus) {
+	else if (hand->focus)
 		box_propagate_change(hand->focus)->label_changed = true;
-	}
-	if (hand->focus)
-		hand->focus->layout_changed = true;
 	box_propagate_change(box)->label_changed = true;
+
+	if (hand->focus)
+		hand->focus->focus_changed = true;
+	if (hand->input_focus)
+		hand->input_focus->focus_changed = true;
 
 	/* find most upper locked box */
 	Box *locked = box;
@@ -2713,7 +2736,6 @@ hand_focus_box_internal(Hand *const hand, Box *const box)
 
 	uint32_t const old_focus_seq = root->focus_seq;
 
-	hand->focus->layout_changed = true;
 	increase_focus_seq();
 
 	if (locked != box) {
@@ -2966,7 +2988,12 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 			0, /* border */
 			XCB_WINDOW_CLASS_INPUT_OUTPUT,
 			XCB_COPY_FROM_PARENT,
-			0, NULL);
+			XCB_CW_OVERRIDE_REDIRECT |
+			XCB_CW_EVENT_MASK,
+			(uint32_t const[]){
+				true,
+				FRAME_WINDOW_EVENT_MASK
+			});
 
 	DEBUG_CHECK(xcb_change_save_set, conn, XCB_SET_MODE_INSERT, window);
 
@@ -2976,16 +3003,9 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 	if (CHECK(xcb_map_window, conn, window))
 		goto fail;
 
-	if (CHECK(xcb_change_window_attributes, conn, box->frame,
-				XCB_CW_EVENT_MASK,
-				(uint32_t const []){
-					FRAME_WINDOW_EVENT_MASK
-				}))
-		goto fail;
-
 	if (CHECK(xcb_change_window_attributes, conn, window,
 				XCB_CW_EVENT_MASK,
-				(uint32_t const []){
+				(uint32_t const[]){
 					CLIENT_WINDOW_EVENT_MASK
 				}))
 		goto fail;
@@ -3347,7 +3367,7 @@ body_setup(Body *const body)
 	for (int error; (error =
 		CHECK(xcb_change_window_attributes, conn, body->screen->root,
 				XCB_CW_EVENT_MASK,
-				(uint32_t const []){
+				(uint32_t const[]){
 					CLIENT_WINDOW_EVENT_MASK |
 					XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT
 				}));)
