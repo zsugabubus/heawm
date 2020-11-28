@@ -2341,6 +2341,7 @@ box_delete(Box *box)
 					XCB_NONE
 				});
 		xcb_icccm_set_wm_state(box->window, XCB_ICCCM_WM_STATE_WITHDRAWN);
+		DEBUG_CHECK(xcb_reparent_window, conn, box->window, bodies[box->body].screen->root, 0, 0);
 		DEBUG_CHECK(xcb_destroy_window, conn, box->frame);
 		DEBUG_CHECK(xcb_change_save_set, conn, XCB_SET_MODE_DELETE, box->window);
 		ewmh_client_list_changed = true;
