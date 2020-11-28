@@ -145,7 +145,7 @@
 
 #define FRAME_WINDOW_EVENT_MASK \
 (	XCB_EVENT_MASK_STRUCTURE_NOTIFY \
-| 	XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT \
+|	XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT \
 )
 
 #define CLIENT_WINDOW_EVENT_MASK \
@@ -652,8 +652,6 @@ box_is_focused(Box const *const box)
 static void
 label_repaint(Label const *const label, bool const shape)
 {
-	/* POSSIBLE FIXME: take into account screen rotation */
-
 	char name[sizeof label->name + 1];
 	memcpy(name, label->name, sizeof label->name);
 	name[sizeof name - 1] = '\0';
@@ -670,7 +668,7 @@ label_repaint(Label const *const label, bool const shape)
 		? cairo_xcb_surface_create_for_bitmap(conn, body->screen, label->shape, size.x, size.y)
 		: cairo_xcb_surface_create(conn, label->window, body->visual_type, size.x, size.y);
 	cairo_t *const cr = cairo_create(surface);
-	cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
+
 	if (/* no compositor */true)
 		cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
 
@@ -964,9 +962,9 @@ label_create_window(Label *const label)
 			screen->root,
 			label->x, label->y,
 			size.x, size.y,
-			2,
+			0,
 			XCB_WINDOW_CLASS_INPUT_OUTPUT,
-			screen->root_visual,
+			XCB_COPY_FROM_PARENT,
 			XCB_CW_SAVE_UNDER |
 			XCB_CW_OVERRIDE_REDIRECT |
 			XCB_CW_EVENT_MASK,
@@ -1280,7 +1278,7 @@ box_compute_num_columns(Box const *const box, uint16_t num_tiles)
 {
 	if (0 == box->num_columns) {
 		/* compare whether adding a new row or a new column will result
-		 * in more squary tiles. the process repats until we can place
+		 * in more squary tiles. the process repeats until we can place
 		 * all tiles. */
 		uint_fast16_t cols = 1, rows = 1;
 		while (cols * rows < num_tiles) {
@@ -2967,7 +2965,7 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 			-1, -1, 1, 1, /* rect */
 			0, /* border */
 			XCB_WINDOW_CLASS_INPUT_OUTPUT,
-			body->screen->root_visual,
+			XCB_COPY_FROM_PARENT,
 			0, NULL);
 
 	DEBUG_CHECK(xcb_change_save_set, conn, XCB_SET_MODE_INSERT, window);
@@ -3319,7 +3317,7 @@ body_setup_net(Body *const body)
 			-1, -1, 1, 1, /* rect */
 			0, /* border */
 			XCB_WINDOW_CLASS_INPUT_ONLY,
-			body->screen->root_visual,
+			XCB_COPY_FROM_PARENT,
 			XCB_CW_OVERRIDE_REDIRECT,
 			(uint32_t const[]){
 				true
@@ -3536,6 +3534,7 @@ body_update_heads(Body *const body)
 				box_reparent(root, monitor->primary ? 0 : root->num_children, head);
 			}
 
+			/* FIXME: swap values if rotated */
 			head->user_width = monitor->width_in_millimeters;
 			head->user_height = monitor->height_in_millimeters;
 			box_set_size(head, monitor->width, monitor->height);
@@ -3611,7 +3610,7 @@ setup_display(void)
 	     ++i, xcb_screen_next(&iter))
 	{
 		xcb_screen_t *const screen = iter.data;
-		Body *body = &bodies[default_screen == i ? 0 : i + 1];
+		Body *const body = &bodies[default_screen == i ? 0 : i + 1];
 
 		body->screen_index = i;
 		body->screen = screen;
