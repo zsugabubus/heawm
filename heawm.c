@@ -5193,8 +5193,8 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 	/*MAN(Keybindings)
 	 * .TP
 	 * .BR Mod-Ctrl-w indow
-	 * Close box just like user would clicked
-	 * \*(lqX\*(rq in the title bar. Second time kill by force.
+	 * Close box just like user would click
+	 * \*(lqX\*(rq in the title bar. Kill by force second time.
 	 */
 	case XKB_KEY_w:
 		if (repeating)
