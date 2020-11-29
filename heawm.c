@@ -3503,7 +3503,7 @@ body_update_heads(Body *const body)
 	if (!monitors) {
 		fprintf(stderr, "Failed to query RandR monitors.\n");
 
-	add_screen_head:;
+	screen_as_monitor:;
 		Box *const head = parent = box_new();
 		head->body = body - bodies;
 		head->class = NULL;
@@ -3515,8 +3515,8 @@ body_update_heads(Body *const body)
 		box_set_position(head, 0, 0);
 	} else {
 		int const num_monitors = xcb_randr_get_monitors_monitors_length(monitors);
-		if (!num_monitors)
-			goto add_screen_head;
+		if (!num_monitors && !root->num_children)
+			goto screen_as_monitor;
 
 		xcb_get_atom_name_cookie_t *const cookies = malloc(num_monitors * sizeof *cookies);
 
@@ -3586,13 +3586,17 @@ body_update_heads(Body *const body)
 		if (EXTREMAL_NAME_CHAR != *head->name)
 			continue;
 
-		free(head->class), head->class = NULL;
-		head->user_width = 0;
-		head->user_height = 0;
-
 		*head->name = '\0';
-		box_reparent(parent, 0, head), parent = head->parent;
-		box_vacuum(head);
+		if (parent) {
+			free(head->class), head->class = NULL;
+			head->user_width = 0;
+			head->user_height = 0;
+
+			box_reparent(parent, 0, head), parent = head->parent;
+			box_vacuum(head);
+		} else {
+			box_name(head);
+		}
 	}
 
 	/*MAN(HOOKS)
