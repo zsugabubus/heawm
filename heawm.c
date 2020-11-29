@@ -613,6 +613,24 @@ find_box_by_window(Box *const root, Box *start, size_t const offset, xcb_window_
 	return box;
 }
 
+static Box *
+find_box_in_body_by_window(Body *const body, size_t const offset, xcb_window_t const window)
+{
+	uint8_t const body_pos = body - bodies;
+
+	for (uint16_t i = 0; i < root->num_children; ++i) {
+		Box *const head = root->children[i];
+		if (body_pos != head->body)
+			continue;
+
+		Box *const box = find_box_by_window(head, head, offset, window);
+		if (box)
+			return box;
+	}
+
+	return NULL;
+}
+
 static bool
 box_is_monitor(Box const *const box)
 {
@@ -1434,7 +1452,7 @@ hand_refocus(Hand *const hand)
 			hand_get_wanted_focus(hand),
 			XCB_CURRENT_TIME, hand->master_keyboard);
 	DEBUG_CHECK(xcb_input_xi_set_client_pointer, conn,
-			focus ? focus->window : XCB_WINDOW_NONE,
+			focus ? focus->frame : XCB_WINDOW_NONE,
 			hand->master_pointer);
 
 	if (hand->barricade && focus)
@@ -1735,7 +1753,7 @@ box_update(Box *const box)
 
 	if (box != root)
 		printf(
-				"%*.sbox 0x%p (%.*s) win=0x%x %ux%u+%d+%d u%ux%u+%d+%d leader=%x"
+				"%*.sbox 0x%p (%.*s) win=0x%x frame=0x%x %ux%u+%d+%d u%ux%u+%d+%d leader=%x"
 #if 0
 				" title=\"%s\""
 #endif
@@ -1743,7 +1761,7 @@ box_update(Box *const box)
 				depth, "",
 				(void *)box,
 				(int)sizeof box->name, box->name,
-				box->window,
+				box->window, box->frame,
 				box->width, box->height, box->x, box->y,
 				box->user_width, box->user_height, box->user_x, box->user_y,
 				box->leader,
@@ -1957,7 +1975,7 @@ box_update(Box *const box)
 
 		/* xcb_configure_window(conn, box->window, XCB_CONFIG_WINDOW_BORDER_WIDTH, &(uint32_t const){ 4 }); */
 
-		if (box_is_focused(box) && !box_is_container(box) && focus_changed) {
+		if (focus_changed && box_is_focused(box) && !box_is_container(box)) {
 			/* hand focus can only be updated after window is mapped */
 			for_each_hand {
 				Box const *const focus = hand->input_focus;
@@ -2726,7 +2744,7 @@ hand_focus_box_internal(Hand *const hand, Box *const box)
 	if (hand->input_focus &&
 	    new_input_focus &&
 	    (/* window under pointer would be focused */
-	     new_input_focus->window == Box_pointers(hand->input_focus)[hand - hands].window ||
+	     new_input_focus->frame == Box_pointers(hand->input_focus)[hand - hands].window ||
 	     /* mouse would be warped in the same window */
 	     Box_pointers(new_input_focus)[hand - hands].window == Box_pointers(hand->input_focus)[hand - hands].window))
 		memcpy(&Box_pointers(new_input_focus)[hand - hands],
@@ -3890,26 +3908,8 @@ handle_input_focus_in(xcb_input_focus_in_event_t const *const event)
 		return;
 
 	Hand *const hand = get_hand_by_master_keyboard(event->deviceid);
-	if (event->child != hand_get_wanted_focus(hand))
+	if (event->event != hand_get_wanted_focus(hand))
 		hand_refocus(hand);
-}
-
-static Box *
-find_box_in_body_by_window(Body *const body, xcb_window_t const window)
-{
-	uint8_t const body_pos = body - bodies;
-
-	for (uint16_t i = 0; i < root->num_children; ++i) {
-		Box *const head = root->children[i];
-		if (body_pos != head->body)
-			continue;
-
-		Box *box = find_box_by_window(head, head, offsetof(Box, window), window);
-		if (box)
-			return box;
-	}
-
-	return NULL;
 }
 
 static void
@@ -5365,15 +5365,20 @@ out:
 static void
 handle_input_button_press(xcb_input_button_press_event_t const *const event)
 {
-	Device *const device = get_device_by_id(event->sourceid);
-	assert(device);
-	Hand *hand = device->hand;
-
-	printf("press\n");
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B Mod4-MousePress
+	 * Focus window.
+	 */
 	Body *const body = body_get_by_root(event->root);
-	Box *const box = find_box_in_body_by_window(body, event->child);
-	if (box)
+	Box *const box = find_box_in_body_by_window(body, offsetof(Box, frame), event->child);
+	if (box) {
+		Device *const device = get_device_by_id(event->sourceid);
+		assert(device);
+		Hand *const hand = device->hand;
+
 		hand_focus_box(hand, box);
+	}
 
 	/* DEBUG_CHECK(xcb_input_xi_allow_events, conn, XCB_CURRENT_TIME, event->deviceid,
 			XCB_INPUT_EVENT_MODE_REPLAY_DEVICE, 0, 0); */
@@ -5385,18 +5390,13 @@ handle_input_enter(xcb_input_enter_event_t const *const event)
 	if (XCB_INPUT_NOTIFY_MODE_NORMAL != event->mode)
 		return;
 
-	/*MAN( Keybindings)
-	 * .TP
-	 * .B Mod4-Mouse Enter...
-	 * Focus window.
-	 */
 	if (0 && XCB_MOD_MASK_4 == event->mods.base) {
 		Hand *const hand = find_hand_by_master_pointer(event->deviceid);
 		Box *const box = find_box_by_window(root, root, offsetof(Box, window), event->event);
 		printf("mod enter\n");
 		hand_focus_box(hand, box);
 	} else {
-		xcb_input_xi_set_client_pointer(conn, event->child, event->deviceid);
+		DEBUG_CHECK(xcb_input_xi_set_client_pointer, conn, event->child, event->deviceid);
 	}
 }
 
