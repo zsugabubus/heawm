@@ -217,8 +217,7 @@ typedef struct {
 
 typedef struct box Box;
 struct box {
-	int16_t x, y; /** box location relative to root box */
-	uint16_t width, height;
+	xcb_rectangle_t rect;
 
 	/** user requested rect; mainly for floating windows */
 	int16_t user_x, user_y;
@@ -293,6 +292,7 @@ struct box {
 	     label_changed: 1, /** label should be redrawn */
 	     close_by_force: 1,
 
+	     flagged: 1,
 	     hide_label: 1,
 	     /** show only when has focus; hide otherwise */
 	     concealed: 1,
@@ -472,6 +472,9 @@ typedef struct {
 #define label_stroke_rgb 0, 0, 0
 #define label_color_rgb 1, 1, 0
 
+static uint16_t const WINDOW_GAP = 1;
+static uint16_t const CONTAINER_GAP = 4;
+
 static char const *label_font = "monospace";
 static Point label_rect = { .x = 30, .y = 60 }; /** in pts */
 static int label_stroke = /* 4 */ 2 /* .5 */;
@@ -531,9 +534,6 @@ static xcb_key_symbols_t *symbols;
 
 static int argc;
 static char **argv;
-
-static uint16_t const WINDOW_GAP = 1;
-static uint16_t const CONTAINER_GAP = 4;
 
 #define print_strerror(what) \
 	fprintf(stderr, "%s: %s: %s\n", __func__, what, strerror(errno));
@@ -651,7 +651,7 @@ monitor_convert_pt2px(Box const *const monitor, Point const pt)
 {
 	assert(box_is_monitor(monitor));
 
-#define CONVERT(x, width) .x = ((int)monitor->width * (int)pt.x * 254 / 720 / (int)monitor->user_##width)
+#define CONVERT(x, width) .x = ((int)monitor->rect.width * (int)pt.x * 254 / 720 / (int)monitor->user_##width)
 	return (Point){ CONVERT(x, width), CONVERT(y, height) };
 #undef CONVERT
 }
@@ -940,15 +940,15 @@ box_compute_position(Box const *const box, Orientation const ox, Orientation con
 	Point const size = monitor_convert_pt2px(monitor, label_rect);
 
 	Point ret = {
-		.x = box->x + (ox + 1) * (box->width  -size.x) / 2 + (outside ? ox : 0) * (size.x / 2),
-		.y = box->y + (oy + 1) * (box->height -size.y) / 2 + (outside ? oy : 0) * (size.y / 2)
+		.x = box->rect.x + (ox + 1) * (box->rect.width  -size.x) / 2 + (outside ? ox : 0) * (size.x / 2),
+		.y = box->rect.y + (oy + 1) * (box->rect.height -size.y) / 2 + (outside ? oy : 0) * (size.y / 2)
 	};
 
 #define CLAMP(x, width) \
-	if (ret.x < monitor->x) \
-		ret.x = monitor->x; \
-	else if (monitor->x + monitor->width < ret.x + size.x) \
-		ret.x = monitor->x + monitor->width - size.x;
+	if (ret.x < monitor->rect.x) \
+		ret.x = monitor->rect.x; \
+	else if (monitor->rect.x + monitor->rect.width < ret.x + size.x) \
+		ret.x = monitor->rect.x + monitor->rect.width - size.x;
 
 	CLAMP(x, width)
 	CLAMP(y, height)
@@ -1324,8 +1324,8 @@ box_compute_num_columns(Box const *const box, uint16_t num_tiles)
 		while (cols * rows < num_tiles) {
 #define R(a, b) ((a) < (b) ? (uint32_t)(b) << 16 / (a) : (uint32_t)(a) << 16 / (b))
 
-			if (R(box->width / (cols + 1), box->height / rows) <
-			    R(box->width / cols,       box->height / (rows + 1)))
+			if (R(box->rect.width / (cols + 1), box->rect.height / rows) <
+			    R(box->rect.width / cols,       box->rect.height / (rows + 1)))
 				++cols;
 			else
 				++rows;
@@ -1352,20 +1352,20 @@ static void
 box_set_position(Box *const box, int16_t const x, int16_t const y)
 {
 	box->position_changed |=
-		x != box->x ||
-		y != box->y;
-	box->x = x;
-	box->y = y;
+		x != box->rect.x ||
+		y != box->rect.y;
+	box->rect.x = x;
+	box->rect.y = y;
 }
 
 static void
 box_set_size(Box *const box, uint16_t const width, uint16_t const height)
 {
 	box->layout_changed |=
-		width != box->width ||
-		height != box->height;
-	box->width = width;
-	box->height = height;
+		width != box->rect.width ||
+		height != box->rect.height;
+	box->rect.width = width;
+	box->rect.height = height;
 }
 
 static bool
@@ -1402,8 +1402,8 @@ box_save_pointer(Box *const box, Hand const *const hand)
 	Box_pointers(box)[hand - hands] = base
 		? (BoxPointer){
 			.window = reply->child,
-			.x = reply->root_x - (base->x << 16),
-			.y = reply->root_y - (base->y << 16),
+			.x = reply->root_x - (base->rect.x << 16),
+			.y = reply->root_y - (base->rect.y << 16),
 		}
 		: (BoxPointer){
 			.window = reply->root,
@@ -1422,8 +1422,8 @@ box_restore_pointer(Box const *const box, Hand const *const hand)
 	/* center pointer for new boxes */
 	if (XCB_WINDOW_NONE == pointer.window) {
 		pointer.window = bodies[box->body].screen->root;
-		pointer.x = (xcb_input_fp1616_t)(box->x + box->width / 2) << 16;
-		pointer.y = (xcb_input_fp1616_t)(box->y + box->height / M_PHI) << 16;
+		pointer.x = (xcb_input_fp1616_t)(box->rect.x + box->rect.width / 2) << 16;
+		pointer.y = (xcb_input_fp1616_t)(box->rect.y + box->rect.height / M_PHI) << 16;
 	}
 
 	DEBUG_CHECK(xcb_input_xi_warp_pointer, conn,
@@ -1453,10 +1453,10 @@ hand_barricade(Hand *const hand, Box const *const box)
 		DEBUG_CHECK(xcb_xfixes_create_pointer_barrier, conn,
 				(hand->barriers[i] = xcb_generate_id(conn)),
 				box->window,
-				box->x + (i < 2 ? 0 : box->width),
-				box->y + (i < 2 ? 0 : box->height),
-				box->x + (i % 2 ? 0 : box->width),
-				box->y + (i % 2 ? box->height : 0),
+				box->rect.x + (i < 2 ? 0 : box->rect.width),
+				box->rect.y + (i < 2 ? 0 : box->rect.height),
+				box->rect.x + (i % 2 ? 0 : box->rect.width),
+				box->rect.y + (i % 2 ? box->rect.height : 0),
 				i < 2 ? XCB_XFIXES_BARRIER_DIRECTIONS_POSITIVE_X | XCB_XFIXES_BARRIER_DIRECTIONS_POSITIVE_Y
 				      : XCB_XFIXES_BARRIER_DIRECTIONS_NEGATIVE_X | XCB_XFIXES_BARRIER_DIRECTIONS_NEGATIVE_Y,
 				1, (uint16_t const[]){ hand->master_pointer });
@@ -1730,7 +1730,7 @@ box_update_label(Box *const box)
 				name[0] = ch;
 				name[1] = '\0';
 				label_set_name(label, name);
-				label_set_position(label, box->x + (ch - 'a') * size.x, box->y + box->height / 2);
+				label_set_position(label, box->rect.x + (ch - 'a') * size.x, box->rect.y + box->rect.height / 2);
 				label_update(label);
 			}
 		}
@@ -1783,7 +1783,7 @@ box_update(Box *const box)
 				(void *)box,
 				(int)sizeof box->name, box->name,
 				box->window, box->frame,
-				box->width, box->height, box->x, box->y,
+				box->rect.width, box->rect.height, box->rect.x, box->rect.y,
 				box->user_width, box->user_height, box->user_x, box->user_y,
 				box->leader,
 #if 0
@@ -1826,17 +1826,17 @@ box_update(Box *const box)
 		mask |=
 			XCB_CONFIG_WINDOW_X |
 			XCB_CONFIG_WINDOW_Y;
-		list[i++] = box->x;
-		list[i++] = box->y;
+		list[i++] = box->rect.x;
+		list[i++] = box->rect.y;
 	}
 
 	if ((layout_changed || position_changed || focus_changed) && box->parent) {
-		if (0 < box->width) {
+		if (0 < box->rect.width) {
 			mask |=
 				XCB_CONFIG_WINDOW_WIDTH |
 				XCB_CONFIG_WINDOW_HEIGHT;
-			list[i++] = box->width;
-			list[i++] = box->height;
+			list[i++] = box->rect.width;
+			list[i++] = box->rect.height;
 
 			if (0 == box->num_children && box->parent && box->parent->parent)
 				goto not_a_container;
@@ -1860,11 +1860,11 @@ box_update(Box *const box)
 			uint16_t const num_rows = (tiles + num_columns - 1) / num_columns;
 			uint16_t row = 0, column = 0;
 			int16_t y = 0, x = 0;
-			uint16_t height = box->height / (!num_rows ? 1 : num_rows);
+			uint16_t height = box->rect.height / (!num_rows ? 1 : num_rows);
 
 			printf("%*.srearrange: children=%d tiles=%d cols=%d\n",
 					depth, "", box->num_children, tiles, num_columns);
-			uint16_t width = box->width / num_columns;
+			uint16_t width = box->rect.width / num_columns;
 			for (uint16_t i = 0; i < box->num_children; ++i) {
 				Box *const child = box->children[i];
 
@@ -1902,13 +1902,13 @@ box_update(Box *const box)
 					 */
 					uint16_t const tile_width =
 						column + 1 == num_columns
-						? box->width - x
+						? box->rect.width - x
 						: width + (1 == num_rows && 1 < tiles && 0 < child->mod_x ? child->mod_x / 2 - (width + child->mod_x / 2) % child->mod_x : 0);
 					uint16_t const tile_height =
 						1 == tiles
-						? box->height - y
+						? box->rect.height - y
 						: height + (1 == num_columns && 1 < tiles && 0 < child->mod_y ? child->mod_y / 2 - (height + child->mod_y / 2) % child->mod_y : 0);
-					box_set_position(child, box->x + x + gap.left, box->y + y + gap.top);
+					box_set_position(child, box->rect.x + x + gap.left, box->rect.y + y + gap.top);
 					box_set_size(child, tile_width - (gap.left + gap.right), tile_height - (gap.top + gap.bottom));
 
 					--tiles;
@@ -1920,7 +1920,7 @@ box_update(Box *const box)
 
 						if (0 < tiles && tiles < num_columns) {
 							num_columns = tiles;
-							width = box->width / num_columns;
+							width = box->rect.width / num_columns;
 						}
 					}
 				} else if (!box_is_visible(child)) {
@@ -1969,7 +1969,7 @@ box_update(Box *const box)
 
 #endif
 
-	if (!box->width)
+	if (!box->rect.width)
 		goto out;
 
 	if (box->window != XCB_WINDOW_NONE && !box_is_container(box)) {
@@ -1981,8 +1981,8 @@ box_update(Box *const box)
 
 			if ((XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT) & mask) {
 				mask = XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT;
-				list[0] = box->width;
-				list[1] = box->height;
+				list[0] = box->rect.width;
+				list[1] = box->rect.height;
 				DEBUG_CHECK(xcb_configure_window, conn, box->window, mask, list);
 			}
 		}
@@ -2412,9 +2412,12 @@ box_vacuum(Box *const box)
 		goto out;
 
 	/* substitute box with its only children */
-	if (1 == box->num_children && box_is_container(box->children[0])) {
+	if (1 == box->num_children &&
+	    (box_is_container(box->children[0]) || !box_is_monitor(box->parent)))
+	{
 		/* keep name only */
-		memcpy(box->children[0]->name, box->name, sizeof box->name);
+		if (box_is_container(box->children[0]))
+			memcpy(box->children[0]->name, box->name, sizeof box->name);
 		box->children[0]->user_concealed = box->user_concealed;
 		box->children[0]->concealed = box->concealed;
 		box->children[0]->hide_label |= box->hide_label;
@@ -3269,7 +3272,7 @@ load_resource(char **const out, char const *const format, ...)
 }
 
 static void
-setup_xrm(void)
+xrm_setup(void)
 {
 	char *value;
 
@@ -3449,26 +3452,6 @@ lookup_visual_type(xcb_screen_t const *const screen)
 	return NULL;
 }
 
-static void
-body_sort_heads(Body const *const body)
-{
-	uint8_t const body_index = body - bodies;
-
-	for (uint16_t i = 1; i < root->num_children; ++i) {
-		Box *const this_head = root->children[i];
-
-		uint16_t j = i;
-		for (; 0 < j; --j) {
-			Box *const head = root->children[j - 1];
-			if (this_head->y < head->y &&
-			    this_head->x < head->x)
-				break;
-		}
-		memmove(&root->children[j + 1], &root->children[j], (i - j) * sizeof *root->children);
-		root->children[j] = this_head;
-	}
-}
-
 static Box *
 body_find_head_by_name(Body *const body, char const *const name)
 {
@@ -3524,7 +3507,7 @@ body_head_cmp(void const *const p, void const *const q)
 		return (int)x->body - (int)y->body;
 
 	/* x is less then y if x is placed in the left-top quadrant relative to y */
-	return x->x <= y->x && x->y <= y->y ? -1 : 1;
+	return x->rect.x <= y->rect.x && x->rect.y <= y->rect.y ? -1 : 1;
 }
 
 static void
@@ -3747,21 +3730,21 @@ box_flatten(Box *into, uint16_t pos, Box const *const box)
 static bool
 box_group(Box const *const box)
 {
+	assert(!box_is_container(box));
+
 	uint16_t num_items = 0;
 	uint16_t pos;
 	bool ignore_leader = false;
 
-	assert(!box_is_container(box));
-
 retry:
 	for (uint16_t i = 0; i < box->parent->num_children; ++i) {
 		Box *const child = box->parent->children[i];
-		child->iter = !child->user_concealed &&
-			!ignore_leader && box->leader
+		num_items += child->flagged =
+			!child->user_concealed &&
+			(!ignore_leader && box->leader
 				? box->leader == child->leader
 				: box->class && child->class &&
-				  !strcmp(box_get_class_instance(box), box_get_class_instance(child));
-		num_items += child->iter;
+				  !strcmp(box_get_class_instance(box), box_get_class_instance(child)));
 
 		if (box == child)
 			pos = i;
@@ -3787,13 +3770,13 @@ retry:
 	for (uint16_t i = 0; i < parent->num_children;) {
 		Box *const child = parent->children[i];
 
-		if (!child->iter) {
+		if (!child->flagged) {
 			++i;
 			continue;
 		}
 
-		Box *const new = parent->children[pos];
-		box_reparent(new, new->num_children, child);
+		Box *const container = parent->children[pos];
+		box_reparent(container, container->num_children, child);
 		if (i < pos)
 			--pos;
 
@@ -3987,10 +3970,10 @@ handle_configure_request(xcb_configure_request_event_t const *const event)
 					.window = box->window,
 					.above_sibling = XCB_WINDOW_NONE,
 
-					.x = box->x,
-					.y = box->y,
-					.width = box->width,
-					.height = box->height,
+					.x = box->rect.x,
+					.y = box->rect.y,
+					.width = box->rect.width,
+					.height = box->rect.height,
 
 					.border_width = 0,
 					/* surely not if request reached us */
@@ -4707,8 +4690,8 @@ box_explode(Box *const box, bool const vertical)
 
 	Box *const parent = box->parent;
 
-	size_t const pos_offset = vertical ? offsetof(Box, x)     : offsetof(Box, y);
-	size_t const dim_offset = vertical ? offsetof(Box, width) : offsetof(Box, height);
+	size_t const pos_offset = vertical ? offsetof(Box, rect.x)     : offsetof(Box, rect.y);
+	size_t const dim_offset = vertical ? offsetof(Box, rect.width) : offsetof(Box, rect.height);
 #define L(box) (*(int16_t *)((uintptr_t)box + pos_offset))
 #define U(box) (L(box) + *(uint16_t *)((uintptr_t)box + dim_offset))
 
@@ -5264,8 +5247,8 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 				XCB_WINDOW_NONE,
 				bodies[box->body].screen->root,
 				0, 0, 0, 0,
-				(box->x + box->width  / 2) << 16,
-				(box->y + box->height / 2) << 16,
+				(box->rect.x + box->rect.width  / 2) << 16,
+				(box->rect.y + box->rect.height / 2) << 16,
 				hand->master_pointer);
 	}
 		break;
@@ -5757,7 +5740,7 @@ main(int _argc, char *_argv[])
 	init_config();
 
 	connect_display();
-	setup_xrm();
+	xrm_setup();
 	setup_display();
 
 	/*MAN(HOOKS)
