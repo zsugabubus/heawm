@@ -16,6 +16,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include <ctype.h>
 
 #include <cairo/cairo.h>
 #include <cairo/cairo-xcb.h>
@@ -1158,24 +1159,29 @@ init_atoms(void)
 
 /* return whether search finished */
 static bool
-find_box_by_name(Box **optimum, char name[static membersizeof(Box, name)])
+find_box_by_name(Box **const optimum, char name[static membersizeof(Box, name)])
 {
-	*optimum = NULL;
-
 	uint8_t const n = strnlen(name, membersizeof(Box, name));
-	if (0 == n)
+	if (!n)
 		return false;
 
-	bool complete = true;
-	Box *box;
-	for_each_box(box, root, root)
-		if (!memcmp(name, box->name, n)) {
-			complete &= membersizeof(Box, name) <= n || '\0' == box->name[n];
-			if (!*optimum || (*optimum)->focus_seq < box->focus_seq)
-				*optimum = box;
+	for (Box *top = *optimum;; top = root) {
+		bool complete = true;
+
+		*optimum = NULL;
+
+		Box *box;
+		for_each_box(box, top, top) {
+			if (!memcmp(name, box->name, n)) {
+				complete &= membersizeof(Box, name) <= n || !box->name[n];
+				if (!*optimum || (*optimum)->focus_seq < box->focus_seq)
+					*optimum = box;
+			}
 		}
 
-	return complete;
+		if (*optimum || top == root)
+			return complete;
+	}
 }
 
 static Box *
@@ -1217,9 +1223,9 @@ box_name(Box *const box)
 	if (n)
 		--n;
 
-	char optimum = '\0';
+	char optimum = box->name[n];
 
-	if (!n && !is_container) {
+	if (!n && !optimum && !is_container) {
 		if (box_match_class(box, "gl", "mpv"))
 			optimum = 'v';
 		else if (box_match_class(box, "Navigator", "firefox"))
@@ -1241,24 +1247,23 @@ box_name(Box *const box)
 			letters[(unsigned char)child->name[n]].focus_seq = UINT32_MAX;
 	}
 
-	if (!box_is_monitor(box) && box_is_monitor(box->parent)) {
+	if (!box_is_monitor(box) && box_is_monitor(box->parent))
 		/* exclude names of neck (treat all necks from all heads as children) */
 		for (uint16_t i = 0; i < root->num_children; ++i) {
 			Box const *const head = root->children[i];
 			for (uint16_t j = 0; j < head->num_children; ++j) {
 				Box const *const neck = head->children[j];
-				if (NAME_MATCHES(neck))
+				if (neck != box && NAME_MATCHES(neck))
 					letters[(unsigned char)neck->name[n]].focus_seq = UINT32_MAX;
 			}
 		}
-	} else {
+	else
 		/* exclude names of siblings so we can always move horizontally */
 		for (uint16_t i = 0; i < box->parent->num_children; ++i) {
 			Box const *const child = box->parent->children[i];
-			if (NAME_MATCHES(child))
+			if (child != box && NAME_MATCHES(child))
 				letters[(unsigned char)child->name[n]].focus_seq = UINT32_MAX;
 		}
-	}
 
 	/* exclude parent names so we can always move upwards */
 	for (Box const *parent = box; (parent = parent->parent);)
@@ -1267,7 +1272,7 @@ box_name(Box *const box)
 
 	Box *test;
 	for_each_box(test, root, root)
-		if (NAME_MATCHES(test)) {
+		if (test != box && NAME_MATCHES(test)) {
 			uint32_t *const p = &letters[(unsigned char)test->name[n]].focus_seq;
 			/* use a non-zero focus_seq to avoid treating never
 			 * focused boxes as free letters */
@@ -1277,11 +1282,12 @@ box_name(Box *const box)
 
 #undef NAME_MATCHES
 
-	for (unsigned char start = is_container ? 'A' : 'a', end = start + ('Z' - 'A');
-	     start <= end;
-	     ++start)
-		if (letters[start].focus_seq < letters[(unsigned char)optimum].focus_seq)
-			optimum = start;
+	if (UINT32_MAX == letters[(unsigned char)optimum].focus_seq)
+		for (unsigned char start = is_container ? 'A' : 'a', end = start + ('Z' - 'A');
+		     start <= end;
+		     ++start)
+			if (letters[start].focus_seq < letters[(unsigned char)optimum].focus_seq)
+				optimum = start;
 
 	if (UINT32_MAX == letters[(unsigned char)optimum].focus_seq) {
 		abort();
@@ -4515,10 +4521,10 @@ hand_get_latest_input(Hand const *const hand)
 static void
 hand_input_try_jump(Hand *const hand)
 {
-	Box *box;
-	/* search is incomplete, waiting for further input */
-	if (!find_box_by_name(&box, hand->user_input))
-		return;
+	Box *box = hand->focus
+		? (box_is_container(hand->focus) ? hand->focus : hand->focus->parent)
+		: NULL;
+	bool const complete = find_box_by_name(&box, hand->user_input);
 
 	assert(box != root);
 
@@ -4550,7 +4556,8 @@ hand_input_try_jump(Hand *const hand)
 	hand_focus_box(hand, box);
 
 reset_input:
-	hand_input_reset(hand);
+	if (complete)
+		hand_input_reset(hand);
 }
 
 static bool
@@ -4873,10 +4880,7 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 		{
 			memcpy(hand->mode_box->name, hand->user_input, sizeof hand->user_input);
 			char *const c = &hand->mode_box->name[0];
-			if (box_is_container(hand->mode_box))
-				*c &= ~0x20;
-			else
-				*c |= 0x20;
+			*c = box_is_container(hand->mode_box) ? toupper(*c) : tolower(*c);
 			box_name(hand->mode_box);
 			break;
 		} else if (XKB_KEY_space == sym && !*hand->user_input) {
