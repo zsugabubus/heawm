@@ -13,7 +13,7 @@ INSTALL ?= install
 INSTALL_PROGRAM ?= $(INSTALL)
 INSTALL_DATA ?= $(INSTALL)
 
-CFLAGS += -std=c11 -Wall -Wextra -Werror=vla -g -D_XOPEN_SOURCE=700 -Wno-unused -fstrict-aliasing
+CFLAGS += -std=c11 -Wall -Wextra -Werror=vla -g -D_XOPEN_SOURCE=700 -fstrict-aliasing
 CFLAGS += $(shell pkg-config --libs --cflags xcb{,-cursor,-keysyms,-randr,-shape,-xinput,-xfixes,-xkb,-xrm,-xtest} cairo xkbcommon-x11)
 
 # release | debug

@@ -279,17 +279,20 @@ struct box {
 	char *class;
 
 	/* we always update the whole scene. these variables help to track changes */
-	bool position_changed: 1, /** box repositioned */
-	     layout_changed: 1, /** any of the children's boundary box changed */
-	     focus_changed: 1, /** focused child changed */
+	bool position_changed: 1, /** rect->{x,y} changed */
+	     layout_changed: 1, /** anything changed that may affect layout of its children */
+	     should_map: 1, /** together with position_changed means that
+	                            window has been freshly mapped (size was
+	                            previously zero) */
+	     should_focus: 1, /** window freshly focused */
 	     content_changed: 1, /** set by children to indicate parent should
 	                            descend with update (means that this flag
 	                            must be propagated upwards until root);
 	                            for client windows indicates that name or title changed */
+	     label_changed: 1, /** label should be repainted */
 #if 0
 	     title_changed: 1, /** for containers, set by children */
 #endif
-	     label_changed: 1, /** label should be redrawn */
 	     close_by_force: 1,
 
 	     flagged: 1,
@@ -355,7 +358,6 @@ typedef struct {
 
 static uint8_t num_bodies;
 static Body *bodies;
-static int default_screen;
 
 /* not a too exact time */
 static int next_timeout_ms = -1;
@@ -1303,8 +1305,7 @@ box_name(Box *const box)
 				XCB_ATOM_STRING, 8,
 				n, box->name);
 
-	/* name changed, labels need to be updated */
-	box_propagate_change(box)->content_changed = true;
+	box_propagate_change(box)->label_changed = true;
 }
 
 static bool
@@ -1364,22 +1365,9 @@ box_set_size(Box *const box, uint16_t const width, uint16_t const height)
 	box->layout_changed |=
 		width != box->rect.width ||
 		height != box->rect.height;
+	box->should_map |= !box->rect.width;
 	box->rect.width = width;
 	box->rect.height = height;
-}
-
-static bool
-box_get_focus(Box *const box, Box **const focus)
-{
-	if (0 == box->num_children)
-		return false;
-
-	Box *const *child = box->children;
-	while (box->focus_seq != (*child)->focus_seq)
-		++child;
-
-	*focus = *child;
-	return true;
 }
 
 static xcb_window_t
@@ -1463,6 +1451,14 @@ hand_barricade(Hand *const hand, Box const *const box)
 }
 
 static void
+hand_update_barrier(Hand *const hand)
+{
+	Box const *const focus = hand->input_focus;
+	if (hand->barricade && focus)
+		hand_barricade(hand, focus);
+}
+
+static void
 hand_refocus(Hand *const hand)
 {
 	Box const *const focus = hand->input_focus;
@@ -1476,8 +1472,7 @@ hand_refocus(Hand *const hand)
 			focus ? focus->frame : XCB_WINDOW_NONE,
 			hand->master_pointer);
 
-	if (hand->barricade && focus)
-		hand_barricade(hand, focus);
+	hand_update_barrier(hand);
 }
 
 static void
@@ -1808,15 +1803,16 @@ box_update(Box *const box)
 	bool const position_changed = box->position_changed;
 	/* because of relative position values, layout change must be
 	 * propagated so children will be repositioned correctly */
-	bool const focus_changed = box->focus_changed;
+	bool const should_focus = box->should_focus;
 	bool const layout_changed = box->layout_changed;
-	bool const label_changed = box->label_changed || position_changed;
-	bool should_map = false;
+	bool const should_map = box->should_map;
+	bool const label_changed = box->label_changed;
 
-	box->layout_changed = false;
-	box->content_changed = false;
 	box->position_changed = false;
-	box->focus_changed = false;
+	box->layout_changed = false;
+	box->should_map = false;
+	box->content_changed = false;
+	box->should_focus = false;
 #if 0
 	box->title_changed = false;
 #endif
@@ -1830,7 +1826,7 @@ box_update(Box *const box)
 		list[i++] = box->rect.y;
 	}
 
-	if ((layout_changed || position_changed || focus_changed) && box->parent) {
+	if ((position_changed || layout_changed) && box->parent) {
 		if (0 < box->rect.width) {
 			mask |=
 				XCB_CONFIG_WINDOW_WIDTH |
@@ -1838,8 +1834,8 @@ box_update(Box *const box)
 			list[i++] = box->rect.width;
 			list[i++] = box->rect.height;
 
-			if (0 == box->num_children && box->parent && box->parent->parent)
-				goto not_a_container;
+			if (!box->num_children)
+				goto no_children;
 
 			uint32_t total_weight = 0;
 			uint16_t tiles = 0;
@@ -1853,9 +1849,10 @@ box_update(Box *const box)
 				++tiles;
 			}
 
+			if (!tiles)
+				goto no_tiles;
+
 			uint16_t num_columns = box_compute_num_columns(box, tiles);
-			if (num_columns < 1)
-				num_columns = 1;
 
 			uint16_t const num_rows = (tiles + num_columns - 1) / num_columns;
 			uint16_t row = 0, column = 0;
@@ -1929,8 +1926,8 @@ box_update(Box *const box)
 
 				box_update(child);
 			}
-		not_a_container:;
-			should_map = layout_changed;
+		no_tiles:;
+		no_children:;
 		} else {
 			box_delete_labels(box);
 			if (box->window != XCB_WINDOW_NONE) {
@@ -1996,21 +1993,21 @@ box_update(Box *const box)
 
 		/* xcb_configure_window(conn, box->window, XCB_CONFIG_WINDOW_BORDER_WIDTH, &(uint32_t const){ 4 }); */
 
-		if (focus_changed && box_is_focused(box) && !box_is_container(box)) {
+		if ((layout_changed || position_changed || should_focus) && box_is_focused(box) && !box_is_container(box)) {
 			/* hand focus can only be updated after window is mapped */
 			for_each_hand {
 				Box const *const focus = hand->input_focus;
 				if (box == focus) {
-					if (focus_changed)
+					if (should_focus)
 						hand_focus(hand);
 					else
-						hand_refocus(hand);
+						hand_update_barrier(hand);
 				}
 			}
 		}
 	}
 
-	if ((box->window != XCB_WINDOW_NONE ? should_map : layout_changed || position_changed || focus_changed) || label_changed)
+	if (layout_changed || position_changed || label_changed)
 		box_update_label(box);
 
 out:
@@ -2101,12 +2098,14 @@ do_update(void)
 	}
 }
 
-/* ensure that parent maximum */
+/* called after box children have been changed */
 static void
 box_update_focus_seq(Box *box)
 {
 	assert(box_is_container(box));
-	uint32_t old_focus_idx = box->focus_seq;
+	uint32_t child_focus_seq = box->focus_seq;
+
+	box->layout_changed = true;
 
 	do {
 		uint32_t max_focus_seq = 0;
@@ -2120,12 +2119,11 @@ box_update_focus_seq(Box *box)
 			break;
 
 		box->content_changed = true;
-		/* maximum may changed but not the focused children */
-		box->focus_changed = box->focus_seq != old_focus_idx;
-		/* if (box->parent)
-			box->parent->layout_changed = true; */
+		/* if we going up along the focused path, child_focus_seq ==
+		 * box's currently focused child so we can avoid layout update */
+		box->layout_changed |= box->focus_seq != child_focus_seq;
 
-		old_focus_idx = box->focus_seq;
+		child_focus_seq = box->focus_seq;
 		box->focus_seq = max_focus_seq;
 	} while ((box = box->parent));
 
@@ -2154,7 +2152,6 @@ box_unparent(Box *const box)
 	);
 
 	box_update_focus_seq(parent);
-	box_propagate_change(parent)->layout_changed = true;
 	box->parent = NULL;
 
 	return pos;
@@ -2223,8 +2220,32 @@ focus_all_hands(uint32_t focus_seq)
 	}
 }
 
+/* after any of the hands focus changed */
 static void
-increase_focus_seq(void);
+increase_focus_seq(void)
+{
+	uint32_t const old_focus_seq = root->focus_seq++;
+
+	for_each_hand {
+		Box *box;
+
+		if (!(box = hand->input_focus) &&
+		    !(box = hand->focus))
+			continue;
+
+		box->focus_hand = hand_index;
+
+		bool child_changed = false;
+		bool changed = false;
+		do {
+			box->content_changed |= changed;
+			box->layout_changed |= child_changed;
+			changed |= (child_changed = box->focus_seq != old_focus_seq);
+			box->focus_seq = root->focus_seq;
+		} while ((box = box->parent));
+	}
+}
+
 
 static void
 hand_do_mode_changes(Hand *const hand)
@@ -2519,8 +2540,6 @@ box_reparent(Box *into, uint16_t pos, Box *box)
 		box_vacuum(old_parent);
 
 	box_update_focus_seq(into);
-	box_propagate_change(into)->layout_changed = true;
-
 	box_name(box);
 
 	/* auto properties: conceal neck */
@@ -2569,38 +2588,6 @@ box_reparent_checked(Box *const into, uint32_t const pos, Box *box)
 }
 
 static void
-box_set_focus_lock(Box *const box, bool const enable)
-{
-	if (enable != box->focus_lock) {
-		box->focus_lock = enable;
-		box->layout_changed = true;
-	}
-}
-
-static void
-increase_focus_seq(void)
-{
-	uint32_t const old_focus_seq = root->focus_seq;
-	++root->focus_seq;
-
-	for_each_hand {
-		Box *box;
-
-		if (!(box = hand->input_focus) &&
-		    !(box = hand->focus))
-			continue;
-
-		box->focus_hand = hand_index;
-
-		do {
-			box->content_changed = true;
-			box->focus_seq = root->focus_seq;
-			box->focus_changed |= box->focus_seq != old_focus_seq;
-		} while ((box = box->parent));
-	}
-}
-
-static void
 box_swap(Box *const x, Box *const y)
 {
 	if (!x || !y || x == y)
@@ -2614,9 +2601,6 @@ box_swap(Box *const x, Box *const y)
 	Box *const y__parent = y->parent;
 	(*px = y)->parent = x->parent;
 	(*py = x)->parent = y__parent;
-
-	box_propagate_change(x->parent)->layout_changed = true;
-	box_propagate_change(y->parent)->layout_changed = true;
 
 	box_update_focus_seq(x->parent);
 	box_update_focus_seq(y->parent);
@@ -2710,11 +2694,9 @@ static void
 hand_assign_latest_input(Hand *const hand)
 {
 	if (hand->input_focus && hand->focus) {
-		hand->input_focus->close_by_force = false;
-
 		if (hand->focus != hand->input_focus) {
-			printf("focus := input_focus\n");
 			box_propagate_change(hand->focus)->label_changed = true;
+			hand->focus->layout_changed = true;
 			hand->focus = hand->input_focus;
 		}
 
@@ -2735,12 +2717,6 @@ hand_focus_box_internal(Hand *const hand, Box *const box)
 		box_propagate_change(hand->input_focus)->label_changed = true;
 	else if (hand->focus)
 		box_propagate_change(hand->focus)->label_changed = true;
-	box_propagate_change(box)->label_changed = true;
-
-	if (hand->focus)
-		hand->focus->focus_changed = true;
-	if (hand->input_focus)
-		hand->input_focus->focus_changed = true;
 
 	/* find most upper locked box */
 	Box *locked = box;
@@ -2775,10 +2751,11 @@ hand_focus_box_internal(Hand *const hand, Box *const box)
 		       &Box_pointers(hand->input_focus)[hand - hands],
 		       sizeof(BoxPointer));
 
-	hand->input_focus = new_input_focus;
+	if ((hand->input_focus = new_input_focus))
+		hand->input_focus->should_focus = true;
 
-	uint32_t const old_focus_seq = root->focus_seq;
-
+	box->label_changed = true;
+	box->layout_changed = true;
 	increase_focus_seq();
 
 	if (locked != box) {
@@ -3224,7 +3201,7 @@ connect_display(void)
 {
 	static char const DEFAULT_DISPLAY[] = ":0";
 
-	for (int error; (error = xcb_connection_has_error((conn = xcb_connect(NULL, &default_screen))));) {
+	for (int error; (error = xcb_connection_has_error((conn = xcb_connect(NULL, &preferred_screen))));) {
 		char const *const display = getenv("DISPLAY");
 
 		if (display) {
@@ -3484,17 +3461,11 @@ body_set_display(Body const *const body)
 	char *p;
 	if ((p = realloc(host, host_size + sizeof display_screen))) {
 		host = p;
-		sprintf(p + host_size, ":%d.%d", display, body->screen_index) + 1;
+		sprintf(p + host_size, ":%d.%d", display, body->screen_index);
 
 		setenv("DISPLAY", host, true);
 	}
 	free(host);
-}
-
-static void
-box_reset_name(Box *const box)
-{
-	memset(box->name, 0, sizeof box->name);
 }
 
 static int
@@ -3657,7 +3628,7 @@ setup_display(void)
 	     ++i, xcb_screen_next(&iter))
 	{
 		xcb_screen_t *const screen = iter.data;
-		Body *const body = &bodies[default_screen == i ? 0 : i + 1];
+		Body *const body = &bodies[preferred_screen == i ? 0 : i + 1];
 
 		body->screen_index = i;
 		body->screen = screen;
@@ -4344,7 +4315,7 @@ static bool
 hand_input_find_label(Hand *hand, Label **out)
 {
 	uint8_t n = strnlen(hand->user_input, sizeof hand->user_input);
-	if (0 == n)
+	if (!n)
 		return false;
 	else if (n < sizeof hand->user_input)
 		++n;
@@ -4713,11 +4684,20 @@ box_explode(Box *const box, bool const vertical)
 	parent->children[2]->num_columns = parent->num_columns;
 	parent->num_columns = vertical ? UINT16_MAX : 1;
 
-	for (uint8_t i = 3; 0 < i;) {
-		Box *const split = parent->children[--i];
+	/* vacuum may reparent splits */
+	Box *const splits[3] = {
+		parent->children[0],
+		parent->children[1],
+		parent->children[2],
+	};
+
+	for (uint8_t i = 0; i < 3; ++i) {
+		Box *const split = splits[i];
 		*split->name = '\0';
 		box_name(split);
-		box_vacuum(split);
+		/* box->parent will surely receive a child */
+		if (split != box->parent)
+			box_vacuum(split);
 	}
 }
 
@@ -4886,8 +4866,10 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 			if (!label)
 				return;
 
-			for (num_columns = 0;
-			     parent->children[num_columns++] != label->base;);
+			num_columns = 1;
+			for (Box **child = parent->children; *child != label->base; ++child)
+				if (box_is_visible(*child))
+					++num_columns;
 
 			if (num_columns == parent->num_children)
 				num_columns = UINT16_MAX;
@@ -5072,12 +5054,18 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 			 * focus lock on a container that has more than
 			 * one children */
 			do
-				box_set_focus_lock(box, set);
+				if (set != box->focus_lock) {
+					box->focus_lock = set;
+					box->layout_changed = true;
+				}
 			while (box->num_children <= 1 && (box = box->parent));
 		else
 			/* set focus lock from input_focus up to focus */
 			do
-				box_set_focus_lock((box = box->parent), set);
+				if (set != (box = box->parent)->focus_lock) {
+					box->focus_lock = set;
+					box->layout_changed = true;
+				}
 			while (hand->focus != box);
 
 		/* we change properties only at a subtree so it is enough if we
