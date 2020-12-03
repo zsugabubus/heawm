@@ -1168,6 +1168,9 @@ find_box_by_name(Box **const optimum, char name[static membersizeof(Box, name)])
 		return false;
 
 	for (Box *top = *optimum;; top = root) {
+		if (!top)
+			continue;
+
 		bool complete = true;
 
 		*optimum = NULL;
