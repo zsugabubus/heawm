@@ -3883,7 +3883,10 @@ handle_input_focus_in(xcb_input_focus_in_event_t const *const event)
 		return;
 
 	Hand *const hand = get_hand_by_master_keyboard(event->deviceid);
-	if (event->event != hand_get_wanted_focus(hand))
+	if (event->event != hand_get_wanted_focus(hand) ||
+	    /* focus in event generated for root (and no focus out) but we have
+	     * to forcefully focus it again to make it really focused... */
+	    !hand->input_focus)
 		hand_refocus(hand);
 }
 
