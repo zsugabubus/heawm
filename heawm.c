@@ -4939,6 +4939,18 @@ box_maximize(Box *const box, bool const recursive)
 	}
 }
 
+static void
+hand_center_pointer(Hand const *const hand, Box const *const box)
+{
+	DEBUG_CHECK(xcb_input_xi_warp_pointer, conn,
+			XCB_WINDOW_NONE,
+			bodies[box->body].screen->root,
+			0, 0, 0, 0,
+			(box->rect.x + box->rect.width  / 2) << 16,
+			(box->rect.y + box->rect.height / 2) << 16,
+			hand->master_pointer);
+}
+
 static bool
 hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool const repeating)
 {
@@ -5221,19 +5233,8 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 	 * Center pointer inside box.
 	 */
 	case XKB_KEY_z:
-	{
-		Box *box = hand->focus;
-		if (!box)
-			break;
-
-		DEBUG_CHECK(xcb_input_xi_warp_pointer, conn,
-				XCB_WINDOW_NONE,
-				bodies[box->body].screen->root,
-				0, 0, 0, 0,
-				(box->rect.x + box->rect.width  / 2) << 16,
-				(box->rect.y + box->rect.height / 2) << 16,
-				hand->master_pointer);
-	}
+		if (hand->focus)
+			hand_center_pointer(hand, hand->focus);
 		break;
 
 	default:
