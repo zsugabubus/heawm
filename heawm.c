@@ -2814,20 +2814,6 @@ body_get_by_root(xcb_window_t const root_window)
 }
 
 static void
-box_set_size_hints(Box *const box, xcb_get_property_reply_t const *const reply)
-{
-	xcb_size_hints_t const *const hints = xcb_get_property_value(reply);
-
-	if (sizeof *hints != xcb_get_property_value_length(reply))
-		return;
-
-	if (XCB_ICCCM_SIZE_HINT_P_RESIZE_INC & hints->flags) {
-		box->mod_y = hints->height_inc;
-		box->mod_x = hints->width_inc;
-	}
-}
-
-static void
 box_set_class(Box *const box, xcb_get_property_reply_t const *const reply)
 {
 	int const len = xcb_get_property_value_length(reply);
@@ -2841,6 +2827,117 @@ box_set_class(Box *const box, xcb_get_property_reply_t const *const reply)
 			memcpy(box->class, class, len);
 }
 
+typedef union {
+	xcb_window_t window;
+	Box *box;
+} BoxOrWindow;
+
+static xcb_get_property_cookie_t
+box_update_property(BoxOrWindow box, xcb_atom_t const property, xcb_get_property_cookie_t cookie, bool const from_event)
+{
+	xcb_get_property_reply_t *reply;
+	void *data;
+	int len;
+	xcb_atom_t type = XCB_ATOM_NONE;
+
+process_reply:
+	if (XCB_ATOM_WM_NAME == property || ATOM(_NET_WM_NAME) == property) {
+		if (!type) {
+			type = XCB_ATOM_WM_NAME == property ? XCB_ATOM_STRING : ATOM(UTF8_STRING);
+			len = XCB_STRING_MAX / sizeof(uint32_t);
+			goto send_request;
+		}
+
+		free(box.box->title);
+		if ((box.box->title = malloc(len + 1 /* NULL */))) {
+			memcpy(box.box->title, data, len);
+			box.box->title[len] = '\0';
+		}
+	} else if (ATOM(WM_NORMAL_HINTS) == property) {
+		if (!type) {
+			type = ATOM(WM_SIZE_HINTS);
+			len = sizeof(xcb_size_hints_t) / sizeof(uint32_t);
+			goto send_request;
+		}
+
+		xcb_size_hints_t const *const hints = data;
+
+		if (sizeof *hints == len) {
+			if (XCB_ICCCM_SIZE_HINT_P_RESIZE_INC & hints->flags) {
+				box.box->mod_y = hints->height_inc;
+				box.box->mod_x = hints->width_inc;
+			}
+		} else {
+			box.box->mod_y = 0;
+			box.box->mod_x = 0;
+		}
+	} else if (ATOM(WM_CLIENT_LEADER) == property) {
+		if (!type) {
+			type = XCB_ATOM_WINDOW;
+			len = sizeof(xcb_window_t) / sizeof(uint32_t);
+			goto send_request;
+		}
+
+		box.box->leader = sizeof box.box->leader == len
+			? *(xcb_window_t *)data
+			: XCB_WINDOW_NONE;
+	} else if (XCB_ATOM_WM_CLASS == property) {
+		if (!type) {
+			type = XCB_ATOM_STRING;
+			len = XCB_STRING_MAX / sizeof(uint32_t);
+			goto send_request;
+		}
+
+		box_set_class(box.box, reply);
+	} else if (ATOM(_HEAWM_NAME) == property) {
+		if (!type) {
+			type = XCB_ATOM_STRING;
+			len = membersizeof(Box, name);
+			goto send_request;
+		}
+
+		if ((int)membersizeof(Box, name) < len) {
+			fprintf(stderr, "0x%x._HEAWM_NAME = \"%.*s\" is too long."
+					" Maximum allowed size is %zu.\n",
+					box.box->window,
+					len, (char *)data,
+					membersizeof(Box, name));
+		} else {
+			memcpy(box.box->name, data, len);
+			memset(box.box->name + len, 0, sizeof box.box->name - len);
+			if (len < (int)membersizeof(Box, name))
+				box.box->name[len] = '\0';
+		}
+	} else {
+		/* debug_print_atom_name("property", property); */
+		return (xcb_get_property_cookie_t){ 0 };
+	}
+
+	free(reply);
+	return (xcb_get_property_cookie_t){ 0 };
+
+send_request:
+	if (from_event && !(box.box = find_box_by_window(root, root, offsetof(Box, window), box.window)))
+		return (xcb_get_property_cookie_t){ 0 };
+
+	if (!cookie.sequence) {
+		cookie = xcb_get_property(conn, 0, box.box->window, property, (type), 0 /* offset */, len);
+		if (!from_event)
+			return cookie;
+	}
+
+	if (!(reply = xcb_get_property_reply(conn, cookie, NULL)))
+		return (xcb_get_property_cookie_t){ 0 };
+
+	data = xcb_get_property_value(reply);
+	len = xcb_get_property_value_length(reply);
+	goto process_reply;
+
+#undef FIND_BOX
+#undef REQUEST_PROPERTY
+}
+
+
 /* manage window */
 static Box *
 box_window(xcb_window_t const root_window, xcb_window_t const window)
@@ -2852,62 +2949,26 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 
 	/* DEBUG_CHECK(xcb_configure_window, conn, window, XCB_CONFIG_WINDOW_BORDER_WIDTH, &(uint32_t const){ 0 }); */
 
-	xcb_get_property_cookie_t const cookies[] = {
-		xcb_get_property(conn, 0, window, ATOM(_NET_WM_STATE),       XCB_ATOM_ATOM,       0, 1),
-		xcb_get_property(conn, 0, window, XCB_ATOM_WM_TRANSIENT_FOR, XCB_ATOM_WINDOW,     0, 1),
-		xcb_get_property(conn, 0, window, ATOM(WM_CLIENT_LEADER),    XCB_ATOM_WINDOW,     0, 1),
-		xcb_get_property(conn, 0, window, ATOM(WM_NORMAL_HINTS),     ATOM(WM_SIZE_HINTS), 0, 1),
-		xcb_get_property(conn, 0, window, ATOM(_HEAWM_NAME),         XCB_ATOM_STRING,     0, membersizeof(Box, name)),
-		xcb_get_property(conn, 0, window, XCB_ATOM_WM_CLASS,         XCB_ATOM_STRING,     0, XCB_STRING_MAX / sizeof(uint32_t)),
+	struct {
+		xcb_atom_t atom;
+		xcb_get_property_cookie_t cookie;
+	} properties[] = {
+#define PROPERTY(atom) { (atom), (xcb_get_property_cookie_t){ 0 } }
+		PROPERTY(ATOM(_NET_WM_STATE)),
+		PROPERTY(XCB_ATOM_WM_TRANSIENT_FOR),
+		PROPERTY(ATOM(WM_CLIENT_LEADER)),
+		PROPERTY(ATOM(WM_NORMAL_HINTS)),
+		PROPERTY(ATOM(_HEAWM_NAME)),
+		PROPERTY(XCB_ATOM_WM_CLASS),
+		PROPERTY(XCB_ATOM_WM_NAME),
+		PROPERTY(ATOM(_NET_WM_NAME)),
+#undef PROPERTY
 	};
 
-	xcb_atom_t state = XCB_ATOM_NONE;
-	xcb_window_t transient_for = XCB_WINDOW_NONE;
-
-	for (size_t i = 0; i < ARRAY_SIZE(cookies); ++i) {
-		xcb_get_property_reply_t *const reply = xcb_get_property_reply(conn, cookies[i], NULL);
-		if (!reply)
-			continue;
-
-		int const len = xcb_get_property_value_length(reply);
-		void const *const value = xcb_get_property_value(reply);
-
-		switch (i) {
-		case 0:
-			if (sizeof state == len)
-				state = *(xcb_atom_t const *)value;
-			break;
-
-		case 1:
-			if (sizeof transient_for == len)
-				transient_for = *(xcb_window_t const *)value;
-			break;
-
-		case 2:
-			if (sizeof box->leader == len)
-				box->leader = *(xcb_window_t const *)value;
-			break;
-
-		case 3:
-			box_set_size_hints(box, value);
-			break;
-
-		case 4:
-			memcpy(box->name, value, len);
-			memset(box->name + len, 0, sizeof box->name - len);
-			break;
-
-		case 5:
-			box_set_class(box, reply);
-			break;
-
-		case ARRAY_SIZE(cookies):
-		default:
-			abort();
-		}
-
-		free(reply);
-	}
+	for (uint8_t j = 0; j < 2; ++j)
+		for (size_t i = 0; i < ARRAY_SIZE(properties); ++i)
+			if (!j || properties[i].cookie.sequence)
+				properties[i].cookie = box_update_property((BoxOrWindow){ .box = box }, properties[i].atom, properties[i].cookie, false);
 
 	Hand *box_hand = NULL;
 	Box *parent = NULL;
@@ -2915,9 +2976,8 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 	bool focus = false;
 
 	if (0 < num_hands) {
-		Box *origin = NULL;
-		(origin = find_box_by_window(root, root, offsetof(Box, window), transient_for)) ||
-		(origin = find_box_by_window(root, root, offsetof(Box, leader), box->leader));
+		Box *origin;
+		origin = find_box_by_window(root, root, offsetof(Box, leader), box->leader);
 
 		/* find the hand that could possibly create this window */
 		if (origin) {
@@ -3658,19 +3718,6 @@ debug_print_atom_name(char const *const name, xcb_atom_t const atom)
 #endif
 }
 
-#if 0
-static void
-box_set_title(Box *const box, xcb_get_property_reply_t const *const reply)
-{
-	int const size = xcb_get_property_value_length(reply);
-	char *p;
-	if (!(p = realloc(box->title, size + 1)))
-		return;
-	memcpy((box->title = p), xcb_get_property_value(reply), size);
-	box->title[size] = '\0';
-}
-#endif
-
 static void
 box_flatten(Box *into, uint16_t pos, Box const *const box)
 {
@@ -3769,73 +3816,7 @@ retry:
 static void
 handle_property_notify(xcb_property_notify_event_t const *const event)
 {
-	xcb_get_property_reply_t *reply;
-
-#define REQUEST_PROPERTY(object, type, length) do { \
-	if (!(reply = xcb_get_property_reply(conn, xcb_get_property(conn, 0, (object)->window, event->atom, (type), 0, (length)), NULL))) \
-		return; \
-} while (0)
-
-#define FIND_BOX \
-	Box *const box = find_box_by_window(root, root, offsetof(Box, window), event->window); \
-	if (!box) \
-		goto out;
-
-#if 0
-	if (ATOM(_NET_WM_NAME) == event->atom) {
-		FIND_BOX;
-		REQUEST_PROPERTY(box, ATOM(UTF8_STRING), XCB_STRING_MAX / sizeof(uint32_t));
-
-		box_set_title(box, reply);
-	} else if (XCB_ATOM_WM_NAME == event->atom) {
-		FIND_BOX;
-		REQUEST_PROPERTY(box, XCB_ATOM_STRING, XCB_STRING_MAX / sizeof(uint32_t));
-
-		box_set_title(box, reply);
-	} else
-#endif
-	if (ATOM(WM_NORMAL_HINTS) == event->atom) {
-		FIND_BOX;
-		REQUEST_PROPERTY(box, ATOM(WM_SIZE_HINTS), sizeof(xcb_size_hints_t) / sizeof(uint32_t));
-
-		box_set_size_hints(box, reply);
-	} else if (ATOM(WM_CLIENT_LEADER) == event->atom) {
-		FIND_BOX;
-		REQUEST_PROPERTY(box, XCB_ATOM_WINDOW, sizeof(xcb_window_t) / sizeof(uint32_t));
-
-		box->leader = *(xcb_window_t *)xcb_get_property_value(reply);
-	} else if (XCB_ATOM_WM_CLASS == event->atom) {
-		FIND_BOX;
-		REQUEST_PROPERTY(box, XCB_ATOM_STRING, XCB_STRING_MAX / sizeof(uint32_t));
-
-		box_set_class(box, reply);
-	} else if (ATOM(_HEAWM_NAME) == event->atom) {
-		FIND_BOX;
-		REQUEST_PROPERTY(box, XCB_ATOM_STRING, membersizeof(Box, name));
-
-		int const len = xcb_get_property_value_length(reply);
-		if ((int)membersizeof(Box, name) < len) {
-			fprintf(stderr, "0x%x._HEAWM_NAME = \"%.*s\" is too long."
-					" Maximum allowed size is %zu.\n",
-					box->window,
-					len, (char *)xcb_get_property_value(reply),
-					membersizeof(Box, name));
-			goto out;
-		}
-
-		memcpy(box->name, xcb_get_property_value(reply), len);
-		if (len < (int)membersizeof(Box, name))
-			box->name[len] = '\0';
-	} else {
-		/* debug_print_atom_name("property", event->atom); */
-		return;
-	}
-
-out:
-	free(reply);
-
-#undef FIND_BOX
-#undef REQUEST_PROPERTY
+	box_update_property((BoxOrWindow){ .window = event->window }, event->atom, (xcb_get_property_cookie_t){ 0 }, true);
 }
 
 static void
@@ -3957,15 +3938,6 @@ handle_configure_request(xcb_configure_request_event_t const *const event)
 					.override_redirect = false,
 				));
 	}
-	/* 	DEBUG_CHECK(xcb_configure_window, conn, event->window,
-				XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
-				XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
-				&(const uint32_t[]){
-					40, 0,
-					300, 400
-				});
-		xcb_flush(conn);
-	} */
 }
 
 static void
