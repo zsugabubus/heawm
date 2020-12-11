@@ -219,9 +219,15 @@ typedef struct box Box;
 struct box {
 	xcb_rectangle_t rect;
 
-	/** user requested rect; mainly for floating windows */
-	int16_t user_x, user_y;
-	uint16_t user_width, user_height;
+	/** last time (sequence number) when box has been focused
+	 *
+	 * (1) {never focused box}->focus_seq := 0
+	 * (2) {old focus}->focus_seq < {new focus}->focus_seq
+	 * (3) parent->focus_seq := MAX(children[..]->focus_seq)
+	 *  => {focused box(es)}->focus_seq := root->focus_seq
+	 *  => {focused child(ren)}->focus_seq := parent->focus_seq
+	 */
+	uint32_t focus_seq;
 
 	xcb_window_t window;
 	/* parent of window
@@ -244,7 +250,6 @@ struct box {
 	 * - it also makes very convenient to continue the walk where we left
 	 *   off */
 	         iter,
-
 	/**
 	 * specially:
 	 * - 0: auto,
@@ -253,7 +258,11 @@ struct box {
 	 * - other: fixed, user set */
 	         num_columns;
 
-	char name[2]; /** address of box for user */
+	/** user requested rect; mainly for floating windows */
+	int16_t user_x, user_y;
+	uint16_t user_width, user_height;
+
+	char name[2];
 
 	uint8_t mod_x, mod_y; /** size granulaty */
 
@@ -269,50 +278,35 @@ struct box {
 	 * because simultenously multiple hands can focus a box, it is only
 	 * valid if box->focus_seq != root->focus_seq (not currently focused).
 	 * in these cases focus_hand is garbage and to find out which hand(s)
-	 * hold(s) the focus: hands[..]->input_focus ?= box.
-	 */
+	 * hold(s) the focus: hands[..]->input_focus ?= box. */
 	uint8_t focus_hand;
 
-#if 0
-	char *title; /* stuff that desribes window (X11 window title or monitor name) */
-#endif
-	char *class;
+	uint16_t conceal_group;
 
 	/* we always update the whole scene. these variables help to track changes */
 	bool position_changed: 1, /** rect->{x,y} changed */
 	     layout_changed: 1, /** anything changed that may affect layout of its children */
 	     should_map: 1, /** together with position_changed means that
-	                            window has been freshly mapped (size was
-	                            previously zero) */
+	                      window has been freshly mapped (size was
+	                      previously zero) */
 	     should_focus: 1, /** window freshly focused */
 	     content_changed: 1, /** set by children to indicate parent should
-	                            descend with update (means that this flag
-	                            must be propagated upwards until root);
-	                            for client windows indicates that name or title changed */
+	                           descend with update (means that this flag
+	                           must be propagated upwards until root);
+	                           for client windows indicates that name or title changed */
 	     label_changed: 1, /** label should be repainted */
-#if 0
-	     title_changed: 1, /** for containers, set by children */
-#endif
 	     close_by_force: 1,
-
 	     flagged: 1,
 	     hide_label: 1,
 	     /** show only when has focus; hide otherwise */
 	     concealed: 1,
 	     user_concealed: 1,
 	     /** fix focus position on screen by always swapping newly
-	      * focused window with previously focused window */
+	       focused window with previously focused window */
 	     focus_lock: 1;
 
-	/** last time (sequence number) when box has been focused
-	 *
-	 * (1) {never focused box}->focus_seq := 0
-	 * (2) {old focus}->focus_seq < {new focus}->focus_seq
-	 * (3) parent->focus_seq := MAX(children[..]->focus_seq)
-	 *  => {focused box(es)}->focus_seq := root->focus_seq
-	 *  => {focused child(ren)}->focus_seq := parent->focus_seq
-	 */
-	uint32_t focus_seq;
+	char *title;
+	char *class;
 
 	Box *parent;
 	Box *children[];
@@ -320,15 +314,17 @@ struct box {
 
 /** mother of all boxes */
 static Box *root;
+/** an unique conceal group id */
+static uint16_t conceal_group = 0;
 
 static bool ewmh_client_list_changed;
 
-typedef enum {
+enum LabelType {
 	LABEL_NORMAL, /** text only */
 	LABEL_BOX, /** draw glory if |base| focused */
 	LABEL_HLINE, /** text with a horizontal line */
 	LABEL_VLINE, /** text with a vertical line */
-} LabelType;
+};
 
 /** little angels flying around the screen */
 typedef struct {
@@ -337,7 +333,7 @@ typedef struct {
 	xcb_window_t window;
 	xcb_pixmap_t shape;
 	int16_t x, y;
-	LabelType type: 2;
+	enum LabelType type: 2;
 	bool position_changed: 1,
 	     content_changed: 1;
 	char name[membersizeof(Box, name)];
@@ -362,14 +358,14 @@ static Body *bodies;
 /* not a too exact time */
 static int next_timeout_ms = -1;
 
-typedef enum {
+enum HandMode {
 	HAND_MODE_DEFAULT,
 	HAND_MODE_SETCOLUMNS,
 	HAND_MODE_MOVE,
 	HAND_MODE_SIZE_SIDE,
 	HAND_MODE_SIZE_TO,
 	HAND_MODE_NAME,
-} HandMode;
+};
 
 typedef struct {
 	/* keyboard and pointer are always in pair */
@@ -395,7 +391,7 @@ typedef struct {
 	/** time until |hand_timed_out()| is called; -1 if disarmed */
 	int timeout_ms;
 
-	HandMode mode;
+	enum HandMode mode;
 
 	/* some |mode| related state */
 	Box *mode_box;
@@ -927,16 +923,16 @@ label_set_position(Label *const label, int16_t const x, int16_t const y)
 	label->y = y;
 }
 
-typedef enum {
+enum Orientation {
 	LEFT = -1,
 	TOP = -1,
 	CENTER = 0,
 	RIGHT = 1,
 	BOTTOM = 1,
-} Orientation;
+};
 
 static Point
-box_compute_position(Box const *const box, Orientation const ox, Orientation const oy, bool const outside)
+box_compute_position(Box const *const box, enum Orientation const ox, enum Orientation const oy, bool const outside)
 {
 	Box const *const monitor = box_get_head(box);
 	Point const size = monitor_convert_pt2px(monitor, label_rect);
@@ -961,7 +957,7 @@ box_compute_position(Box const *const box, Orientation const ox, Orientation con
 }
 
 static void
-label_set_position_to_box(Label *const label, Orientation const ox, Orientation const oy, bool const outside)
+label_set_position_to_box(Label *const label, enum Orientation const ox, enum Orientation const oy, bool const outside)
 {
 	Point const pt = box_compute_position(label->base, ox, oy, outside);
 	label_set_position(label, pt.x, pt.y);
@@ -1541,9 +1537,9 @@ generate_name(char name[static membersizeof(Box, name)], uint32_t number)
 	memset(name, 0, membersizeof(Box, name));
 
 	char *p = name;
-	do {
+	do
 		*p++ = 'a' + (number % N_SYMBOLS);
-	} while (0 < (number /= N_SYMBOLS));
+	while (0 < (number /= N_SYMBOLS));
 
 	if (p < name + membersizeof(Box, name))
 		*p = '\0';
@@ -1773,10 +1769,8 @@ box_update(Box *const box)
 	if (box != root)
 		printf(
 				"%*.sbox 0x%p (%.*s) win=0x%x frame=0x%x %ux%u+%d+%d u%ux%u+%d+%d leader=%x"
-#if 0
 				" title=\"%s\""
-#endif
-				" class=\"%s\", \"%s\" focus=%d/%d hand=%d %c%c%c%c\n",
+				" class=\"%s\", \"%s\" focus=%d/%d hand=%d cg=%d %c%c%c%c\n",
 				depth, "",
 				(void *)box,
 				(int)sizeof box->name, box->name,
@@ -1784,13 +1778,12 @@ box_update(Box *const box)
 				box->rect.width, box->rect.height, box->rect.x, box->rect.y,
 				box->user_width, box->user_height, box->user_x, box->user_y,
 				box->leader,
-#if 0
 				box->title,
-#endif
 				box->class,
 				box_get_class_instance(box),
 				box->focus_seq, root->focus_seq,
 				box->focus_hand,
+				box->conceal_group,
 				box_is_floating(box) ? 'F' : '-',
 				box->focus_lock ? 'L' : '-',
 				box->user_concealed ? 'U' : '-',
@@ -1816,9 +1809,6 @@ box_update(Box *const box)
 	box->should_map = false;
 	box->content_changed = false;
 	box->should_focus = false;
-#if 0
-	box->title_changed = false;
-#endif
 	box->label_changed = false;
 
 	if (position_changed) {
@@ -2339,9 +2329,7 @@ hand_leave_mode(Hand *const hand)
 static void
 box_free(Box *const box)
 {
-#if 0
 	free(box->title);
-#endif
 	free(box->class);
 #ifndef HEAWM_NDEBUG
 	memset(box, 0xcc, sizeof *box);
@@ -2439,11 +2427,12 @@ box_vacuum(Box *const box)
 	if (1 == box->num_children &&
 	    (box_is_container(box->children[0]) || !box_is_monitor(box->parent)))
 	{
-		/* keep name only */
+		/* keep name */
 		if (box_is_container(box->children[0]))
 			memcpy(box->children[0]->name, box->name, sizeof box->name);
 		box->children[0]->user_concealed = box->user_concealed;
 		box->children[0]->concealed = box->concealed;
+		box->children[0]->conceal_group = box->conceal_group;
 		box->children[0]->hide_label |= box->hide_label;
 		box_reparent(box->parent, box_get_pos(box), box->children[0]);
 		return;
@@ -2510,6 +2499,13 @@ box_realloc(Box **const box, size_t const new_size)
 }
 
 static void
+box_setup_leg(Box *const box)
+{
+	box->concealed = true;
+	box->conceal_group = ++conceal_group;
+}
+
+static void
 box_reparent(Box *into, uint16_t pos, Box *box)
 {
 	assert(box_is_container(into));
@@ -2545,18 +2541,19 @@ box_reparent(Box *into, uint16_t pos, Box *box)
 	box_update_focus_seq(into);
 	box_name(box);
 
-	/* auto properties: conceal neck */
 	if (into->parent && box_is_monitor(into))
-		box->concealed = true;
+		box_setup_leg(box);
 }
 
 static Box *
 box_new(void)
 {
 	Box *box = calloc(1, sizeof *box + num_hands * sizeof(BoxPointer));
+	box->conceal_group = ++conceal_group;
 	box->focus_hand = NULL_HAND;
 	/* an initially zeroed out box->{x,y} does not mean box->window is
-	 * really at 0,0 and without it no reconfiguration would happen */
+	 * really at this position so marking it changed will force a
+	 * reconfiguration */
 	box->position_changed = true;
 	return box;
 }
@@ -3741,6 +3738,8 @@ retry:
 
 	Box *const parent = box->parent;
 
+	++conceal_group;
+
 	for (uint16_t i = 0; i < parent->num_children;) {
 		Box *const child = parent->children[i];
 
@@ -3755,6 +3754,7 @@ retry:
 			--pos;
 
 		child->concealed = true;
+		child->conceal_group = conceal_group;
 	}
 
 	{
@@ -4916,6 +4916,57 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 	hand_leave_mode(hand);
 }
 
+/* TODO: take hands into account */
+static void
+box_maximize(Box *const box, bool const recursive)
+{
+	bool conceal = !box->concealed;
+
+	/* when user requested unconcealing first check for any box that is not
+	 * concealed, this way user can hide any newly appearing box */
+
+	++conceal_group;
+
+	uint16_t const old_conceal_group = box->conceal_group;
+
+	Box *test;
+	for_each_box(test, root, root)
+		if (old_conceal_group == test->conceal_group)
+			test->conceal_group = conceal_group;
+
+	for (bool do_conceal = false;; do_conceal = true) {
+		Box *parent = box->parent;
+
+		if (do_conceal)
+			/* propagate changes once, from the most inner box */
+			box_propagate_change(parent);
+		else if (conceal)
+			continue;
+
+		do {
+			parent->layout_changed = true;
+			for (uint16_t i = 0; i < parent->num_children; ++i) {
+				Box *const child = parent->children[i];
+				/* do not even touch user stuff */
+				if (child->user_concealed)
+					continue;
+
+				if (!do_conceal && (conceal = !child->concealed))
+					goto do_conceal;
+				else if (do_conceal && conceal != child->concealed &&
+					   (conceal ||
+					    box->conceal_group == child->conceal_group))
+					child->concealed = conceal,
+					child->conceal_group = box->conceal_group;
+			}
+		} while ((recursive && !box_is_floating(parent)) && (parent = parent->parent, true));
+
+		if (do_conceal)
+			break;
+	do_conceal:;
+	}
+}
+
 static bool
 hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool const repeating)
 {
@@ -5094,7 +5145,6 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 	 */
 	case XKB_KEY_h:
 	case XKB_KEY_minus:
-	{
 		if (repeating)
 			break;
 
@@ -5105,9 +5155,9 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 		hand->focus->concealed = sym == XKB_KEY_s || sym == XKB_KEY_plus
 			? false
 			: hand->focus->user_concealed;
+		hand->focus->conceal_group = ++conceal_group;
 		hand->focus->parent->layout_changed = true;
 		box_propagate_change(hand->focus)->label_changed = true;
-	}
 		break;
 
 	/*MAN(Keybindings)
@@ -5125,46 +5175,13 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 	 * for each level inside a floating box.
 	 */
 	case XKB_KEY_f:
-	{
 		if (repeating)
 			break;
 
 		if (!hand->focus)
 			break;
 
-		bool conceal = !hand->focus->concealed;
-		bool const recursive = sym == XKB_KEY_f;
-
-		/* first try conceal any unconcealed box so it is possible to get rid of new boxes */
-
-		for (bool do_conceal = false;; do_conceal = true) {
-			Box *parent = hand->focus->parent;
-
-			if (do_conceal)
-				box_propagate_change(parent);
-			else if (conceal)
-				continue;
-
-			do {
-				parent->layout_changed = true;
-				for (uint16_t i = 0; i < parent->num_children; ++i) {
-					Box *const child = parent->children[i];
-					if (!child->user_concealed) {
-						if (!do_conceal) {
-							if ((conceal = !child->concealed))
-								goto do_conceal;
-						} else {
-							child->concealed = conceal;
-						}
-					}
-				}
-			} while ((recursive && !box_is_floating(parent)) && (parent = parent->parent, true));
-
-			if (do_conceal)
-				break;
-		do_conceal:;
-		}
-	}
+		box_maximize(hand->focus, sym == XKB_KEY_f);
 		break;
 
 	/*MAN(Keybindings)
@@ -5289,7 +5306,7 @@ handle_input_key_press(xcb_input_key_press_event_t const *const event)
 	       event->mods.locked,
 	       event->deviceid, event->sourceid, event->root);
 
-	HandMode const old_mode = hand->mode;
+	enum HandMode const old_mode = hand->mode;
 
 	switch (hand->mode) {
 	case HAND_MODE_DEFAULT:
