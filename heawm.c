@@ -1405,20 +1405,23 @@ static void
 box_restore_pointer(Box const *const box, Hand const *const hand)
 {
 	BoxPointer pointer = Box_pointers(box)[hand - hands];
+	bool check = true;
 
-	/* center pointer for new boxes */
 	if (XCB_WINDOW_NONE == pointer.window) {
+	set_default_location:
+		check = false;
 		pointer.window = bodies[box->body].screen->root;
 		pointer.x = (xcb_input_fp1616_t)(box->rect.x + box->rect.width / 2) << 16;
 		pointer.y = (xcb_input_fp1616_t)(box->rect.y + box->rect.height / M_PHI) << 16;
 	}
 
-	DEBUG_CHECK(xcb_input_xi_warp_pointer, conn,
+	if (CHECK(xcb_input_xi_warp_pointer, conn,
 			XCB_WINDOW_NONE,
 			pointer.window,
 			0, 0, 0, 0,
 			pointer.x, pointer.y,
-			hand->master_pointer);
+			hand->master_pointer) && check)
+		goto set_default_location;
 }
 
 static void
