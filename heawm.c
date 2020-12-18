@@ -4711,6 +4711,25 @@ box_clone(Box const *const box)
 }
 
 static void
+box_reparent_into(Box *const parent, Box *const child)
+{
+	if (!box_is_container(parent)) {
+		Box *container = box_new();
+		box_reparent_checked(parent->parent, box_get_pos(parent), container);
+
+		box_reparent_checked(container, 0, parent), container = parent->parent;
+		parent->user_concealed = false;
+		parent->concealed = true;
+
+		box_reparent_checked(container, 1, child);
+		child->user_concealed = false;
+		child->concealed = true;
+	} else {
+		box_reparent_checked(parent, 0, child);
+	}
+}
+
+static void
 hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand *const hand, xcb_keysym_t const sym)
 {
 	Label *label;
@@ -4765,10 +4784,7 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 
 			case XKB_KEY_i:
 			into:
-				if (!box_is_container(hand->focus))
-					hand->focus = hand->focus->parent;
-
-				box_reparent_checked(hand->focus, 0, hand->mode_box);
+				box_reparent_into(hand->focus, hand->mode_box);
 				break;
 
 			case XKB_KEY_h:
@@ -5046,7 +5062,8 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 	 * Move box before focused one.
 	 * .TP
 	 * .BR i nto
-	 * Move box into container.
+	 * Move box into container. If box is not a container, make a container
+	 * out of it.
 	 * .TP
 	 * .BR h ", " j ", " k ", " l
 	 * Place box visually at the given direction.
