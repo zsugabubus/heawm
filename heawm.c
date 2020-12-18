@@ -1614,7 +1614,9 @@ box_update_label(Box *const box)
 						(Point){ 0, label_size }).y;
 
 				pt.y -= font_size;
-				for (Box const *b = box; !box_is_floating(b); b = b->parent)
+				for (Box const *b = box;
+				     !box_is_floating(b) && b->parent->rect.y == b->rect.y;
+				     b = b->parent)
 					pt.y += font_size;
 			}
 			label_set_position(label, pt.x, pt.y);
