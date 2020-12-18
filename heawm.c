@@ -1984,7 +1984,7 @@ box_update(Box *const box)
 		if (should_map) {
 			printf("%*.s map\n", depth, "");
 			xcb_icccm_set_wm_state(box->window, XCB_ICCCM_WM_STATE_NORMAL);
-			CHECK(xcb_map_window, conn, box->frame);
+			DEBUG_CHECK(xcb_map_window, conn, box->frame);
 		}
 
 		/* xcb_configure_window(conn, box->window, XCB_CONFIG_WINDOW_BORDER_WIDTH, &(uint32_t const){ 4 }); */
