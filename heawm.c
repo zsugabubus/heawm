@@ -1622,9 +1622,13 @@ box_update_label(Box *const box)
 
 				pt.y -= font_size;
 				for (Box const *b = box;
-				     !box_is_floating(b) && b->parent->rect.y == b->rect.y;
+				     !box_is_floating(b) &&
+				     /* at the top of the other; maybe we
+				      * should also check if labels would
+				      * really obscure each other */
+				     b->parent->rect.y == b->rect.y;
 				     b = b->parent)
-					pt.y += font_size;
+					pt.y += !b->parent->hide_label ? font_size : 0;
 			}
 			label_set_position(label, pt.x, pt.y);
 			label->type = LABEL_BOX;
