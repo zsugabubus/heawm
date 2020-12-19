@@ -259,8 +259,7 @@ struct box {
 	         num_columns;
 
 	/** user requested rect; mainly for floating windows */
-	int16_t user_x, user_y;
-	uint16_t user_width, user_height;
+	xcb_rectangle_t user_rect;
 
 	char name[2];
 
@@ -649,7 +648,7 @@ monitor_convert_pt2px(Box const *const monitor, Point const pt)
 {
 	assert(box_is_monitor(monitor));
 
-#define CONVERT(x, width) .x = ((int)monitor->rect.width * (int)pt.x * 254 / 720 / (int)monitor->user_##width)
+#define CONVERT(x, width) .x = ((int)monitor->rect.width * (int)pt.x * 254 / 720 / (int)monitor->user_rect.width)
 	return (Point){ CONVERT(x, width), CONVERT(y, height) };
 #undef CONVERT
 }
@@ -1312,7 +1311,7 @@ box_name(Box *const box)
 static bool
 box_is_floating(Box const *const box)
 {
-	return 0 < box->user_width;
+	return 0 < box->user_rect.width;
 }
 
 static uint16_t
@@ -1783,7 +1782,7 @@ box_update(Box *const box)
 				(int)sizeof box->name, box->name,
 				box->window, box->frame,
 				box->rect.width, box->rect.height, box->rect.x, box->rect.y,
-				box->user_width, box->user_height, box->user_x, box->user_y,
+				box->user_rect.width, box->user_rect.height, box->user_rect.x, box->user_rect.y,
 				box->leader,
 				box->title,
 				box->class,
@@ -3569,8 +3568,8 @@ body_update_heads(Body *const body)
 		head->class = NULL;
 		box_reparent(root, 0, head);
 
-		head->user_width = body->screen->width_in_millimeters;
-		head->user_height = body->screen->height_in_millimeters;
+		head->user_rect.width = body->screen->width_in_millimeters;
+		head->user_rect.height = body->screen->height_in_millimeters;
 		box_set_size(head, body->screen->width_in_pixels, body->screen->height_in_pixels);
 		box_set_position(head, 0, 0);
 	} else {
@@ -3616,8 +3615,8 @@ body_update_heads(Body *const body)
 			}
 
 			/* FIXME: swap values if rotated */
-			head->user_width = monitor->width_in_millimeters;
-			head->user_height = monitor->height_in_millimeters;
+			head->user_rect.width = monitor->width_in_millimeters;
+			head->user_rect.height = monitor->height_in_millimeters;
 			box_set_size(head, monitor->width, monitor->height);
 			box_set_position(head, monitor->x, monitor->y);
 
@@ -3649,8 +3648,8 @@ body_update_heads(Body *const body)
 		*head->name = '\0';
 		if (parent) {
 			free(head->class), head->class = NULL;
-			head->user_width = 0;
-			head->user_height = 0;
+			head->user_rect.width = 0;
+			head->user_rect.height = 0;
 
 			box_reparent(parent, 0, head), parent = head->parent;
 			box_vacuum(head);
