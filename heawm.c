@@ -810,6 +810,8 @@ label_repaint(Label const *const label, bool const shape)
 	if (LABEL_BOX == label->type) {
 		if (label->base->user_concealed)
 			symbol = label->base->concealed ? "-" : "+";
+		else if (label->base->concealed && label->base->parent->focus_seq != label->base->focus_seq)
+			symbol = "~";
 		else if (label->base->focus_lock && box_is_container(label->base))
 			symbol = "\xe2\x80\xa2" /* U+2022 BULLET */;
 	}
