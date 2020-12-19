@@ -65,6 +65,12 @@
 #define offsetof(type, member) (size_t)(&((type *)0)->member)
 #define membersizeof(type, member) (sizeof(((type *)0)->member))
 
+#define SWAP(type, x, y) do { \
+	type const tmp = x; \
+	x = y; \
+	y = tmp; \
+} while (0)
+
 #if defined(__GNUC__)
 # define maybe_unused __attribute__((unused))
 #else
@@ -2175,13 +2181,12 @@ hand_find_recents(Hand *hand, Box *root, uint32_t const focus_seq, Box **const b
 
 	Box *box;
 	for_each_box(box, root, root)
-		if (/* is it a client window? */
+		if (/* only client windows are interesting */
 		    !box_is_container(box) &&
-		    /* if not find a box that... */
 		    (NULL_HAND == box->focus_hand || (
-		     /* is not focused by any hand; so we do not interfere */
+		     /* not focused by others */
 		     focus_seq != box->focus_seq &&
-		     /* but was focused by the current hand; it's in the history */
+		     /* but have been focused by us */
 		     hand - hands == box->focus_hand) ||
 		     box == hand->input_focus))
 		{
@@ -2596,34 +2601,37 @@ box_reparent_checked(Box *const into, uint32_t const pos, Box *box)
 static void
 box_swap(Box *const x, Box *const y)
 {
-	if (!x || !y || x == y)
+	if (!x || !y)
 		return;
 
-	Box **px, **py;
-
-	for (px = x->parent->children; *px != x; ++px);
-	for (py = y->parent->children; *py != y; ++py);
-
-	Box *const y__parent = y->parent;
-	(*px = y)->parent = x->parent;
-	(*py = x)->parent = y__parent;
-
-	box_update_focus_seq(x->parent);
-	box_update_focus_seq(y->parent);
-}
-
-static void
-box_swap_checked(Box *const x, Box *const y)
-{
 	if (box_is_descendant(x, y) ||
 	    box_is_descendant(y, x))
 		return;
 
-	if (box_is_monitor(x) ||
-	    box_is_monitor(y))
+	if (box_is_monitor(x) != box_is_monitor(y))
 		return;
 
-	box_swap(x, y);
+	printf("swap: %s <-> %s\n", x->name, y->name);
+
+	Box **px, **py;
+	for (px = x->parent->children; *px != x; ++px);
+	for (py = y->parent->children; *py != y; ++py);
+	*px = y, *py = x;
+
+	SWAP(Box *, x->parent, y->parent);
+	SWAP(xcb_rectangle_t, x->user_rect, y->user_rect);
+	SWAP(xcb_rectangle_t, x->rect, y->rect);
+	SWAP(uint8_t, x->weight, y->weight);
+
+	x->position_changed = true;
+	y->position_changed = true;
+	x->layout_changed = true;
+	y->layout_changed = true;
+	x->should_map = true;
+	y->should_map = true;
+
+	box_update_focus_seq(x->parent);
+	box_update_focus_seq(y->parent);
 }
 
 static void
@@ -2726,18 +2734,18 @@ hand_focus_box_internal(Hand *const hand, Box *const box)
 
 	/* find most upper locked box */
 	Box *locked = box;
-	{
-		Box *test = box;
-		while (test->parent) {
-			test = test->parent;
-			if (test->focus_lock)
-				locked = test;
-		}
+	for (Box *test = box; (test = test->parent);) {
+		if (test->focus_lock)
+			locked = test;
 	}
 
 	Box *recents[2];
 	hand_find_recents(hand, locked, root->focus_seq, recents, ARRAY_SIZE(recents));
-	if (locked != box && recents[0] != box)
+	if (/* there is something locked */
+	    locked != box &&
+	    /* if we go into a different box avoid swapping if we focus the
+	     * latest focused one */
+	    recents[0] != box)
 		box_swap(recents[1], recents[0]);
 
 	hand->focus = box;
@@ -2764,11 +2772,8 @@ hand_focus_box_internal(Hand *const hand, Box *const box)
 	box->layout_changed = true;
 	increase_focus_seq();
 
-	if (locked != box) {
+	if (locked != box)
 		box_swap(box, recents[1]);
-		/* if there was no such box, that's not a problem: |box| will
-		 * be that beginning from now */
-	}
 
 	hand->check_input = true;
 	hand_grab_keyboard(hand);
@@ -4766,7 +4771,7 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 
 			case XKB_KEY_s:
 			case XKB_KEY_S:
-				box_swap_checked(hand->focus, hand->mode_box);
+				box_swap(hand->focus, hand->mode_box);
 				break;
 
 			case XKB_KEY_b:
