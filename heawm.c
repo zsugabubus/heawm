@@ -4923,6 +4923,9 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 static void
 box_maximize(Box *const box, bool const recursive)
 {
+	if (box_is_floating(box))
+		return;
+
 	bool conceal = !box->concealed;
 
 	/* when user requested unconcealing first check for any box that is not
