@@ -2197,7 +2197,7 @@ hand_find_recents(Hand *hand, Box *root, uint32_t const focus_seq, Box **const b
 			while (i > 0 && boxes[i - 1]->focus_seq <= box->focus_seq)
 				--i;
 			if (i < n) {
-				memmove(&boxes[i], &boxes[i + 1], (n - i - 1) * sizeof *boxes);
+				memmove(&boxes[i + 1], &boxes[i], (n - (i + 1)) * sizeof *boxes);
 				boxes[i] = box;
 			}
 		}
