@@ -286,7 +286,8 @@ struct box {
 	 * hold(s) the focus: hands[..]->input_focus ?= box. */
 	uint8_t focus_hand;
 
-	uint16_t conceal_group;
+	/** when children of this container was last time maximized */
+	uint16_t conceal_seq;
 
 	/* we always update the whole scene. these variables help to track changes */
 	bool position_changed: 1, /** rect->{x,y} changed */
@@ -319,8 +320,6 @@ struct box {
 
 /** mother of all boxes */
 static Box *root;
-/** an unique conceal group id */
-static uint16_t conceal_group = 0;
 
 static bool ewmh_client_list_changed;
 
@@ -1786,7 +1785,7 @@ box_update(Box *const box)
 		printf(
 				"%*.sbox 0x%p (%.*s) win=0x%x frame=0x%x %ux%u+%d+%d u%ux%u+%d+%d leader=%x"
 				" title=\"%s\""
-				" class=\"%s\", \"%s\" focus=%d/%d hand=%d cg=%d %c%c%c%c\n",
+				" class=\"%s\", \"%s\" focus#=%d/%d hand=%d conceal#=%d %c%c%c%c\n",
 				depth, "",
 				(void *)box,
 				(int)sizeof box->name, box->name,
@@ -1799,7 +1798,7 @@ box_update(Box *const box)
 				box_get_class_instance(box),
 				box->focus_seq, root->focus_seq,
 				box->focus_hand,
-				box->conceal_group,
+				box->conceal_seq,
 				box_is_floating(box) ? 'F' : '-',
 				box->focus_lock ? 'L' : '-',
 				box->user_concealed ? 'U' : '-',
@@ -2447,7 +2446,7 @@ box_vacuum(Box *const box)
 			memcpy(box->children[0]->name, box->name, sizeof box->name);
 		box->children[0]->user_concealed = box->user_concealed;
 		box->children[0]->concealed = box->concealed;
-		box->children[0]->conceal_group = box->conceal_group;
+		box->children[0]->conceal_seq = box->conceal_seq;
 		box->children[0]->hide_label |= box->hide_label;
 		box_reparent(box->parent, box_get_pos(box), box->children[0]);
 		return;
@@ -2517,7 +2516,6 @@ static void
 box_setup_leg(Box *const box)
 {
 	box->concealed = true;
-	box->conceal_group = ++conceal_group;
 }
 
 static void
@@ -2564,7 +2562,6 @@ static Box *
 box_new(void)
 {
 	Box *box = calloc(1, sizeof *box + num_hands * sizeof(BoxPointer));
-	box->conceal_group = ++conceal_group;
 	box->focus_hand = NULL_HAND;
 	/* an initially zeroed out box->{x,y} does not mean box->window is
 	 * really at this position so marking it changed will force a
@@ -3800,7 +3797,7 @@ retry:
 
 	Box *const parent = box->parent;
 
-	++conceal_group;
+	parent->conceal_seq = ++root->conceal_seq;
 
 	for (uint16_t i = 0; i < parent->num_children;) {
 		Box *const child = parent->children[i];
@@ -3816,7 +3813,6 @@ retry:
 			--pos;
 
 		child->concealed = true;
-		child->conceal_group = conceal_group;
 	}
 
 	{
@@ -4928,18 +4924,12 @@ box_maximize(Box *const box, bool const recursive)
 
 	bool conceal = !box->concealed;
 
-	/* when user requested unconcealing first check for any box that is not
-	 * concealed, this way user can hide any newly appearing box */
+	uint16_t max_conceal_seq = 0;
 
-	++conceal_group;
+	++root->conceal_seq;
 
-	uint16_t const old_conceal_group = box->conceal_group;
-
-	Box *test;
-	for_each_box(test, root, root)
-		if (old_conceal_group == test->conceal_group)
-			test->conceal_group = conceal_group;
-
+	/* when user requested unconcealing, first check for any box that is
+	 * not concealed, this way user can hide any newly appearing box */
 	for (bool do_conceal = false;; do_conceal = true) {
 		Box *parent = box->parent;
 
@@ -4950,26 +4940,33 @@ box_maximize(Box *const box, bool const recursive)
 			continue;
 
 		do {
-			parent->layout_changed = true;
+			uint16_t curr_conceal_seq = parent->conceal_seq;
+
 			for (uint16_t i = 0; i < parent->num_children; ++i) {
 				Box *const child = parent->children[i];
 				/* do not even touch user stuff */
 				if (child->user_concealed)
 					continue;
 
-				if (!do_conceal && (conceal = !child->concealed))
-					goto do_conceal;
-				else if (do_conceal && conceal != child->concealed &&
-					   (conceal ||
-					    box->conceal_group == child->conceal_group))
+				if (!do_conceal) {
+					if (conceal != child->concealed)
+						if (max_conceal_seq < curr_conceal_seq)
+							max_conceal_seq = curr_conceal_seq;
+
+					if ((conceal |= !child->concealed))
+						break;
+				} else if (conceal != child->concealed &&
+					   (conceal || max_conceal_seq == curr_conceal_seq))
+				{
 					child->concealed = conceal,
-					child->conceal_group = box->conceal_group;
+					parent->layout_changed = true;
+					parent->conceal_seq = root->conceal_seq;
+				}
 			}
 		} while ((recursive && !box_is_floating(parent)) && (parent = parent->parent, true));
 
 		if (do_conceal)
 			break;
-	do_conceal:;
 	}
 }
 
@@ -5174,7 +5171,6 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 		hand->focus->concealed = sym == XKB_KEY_s || sym == XKB_KEY_plus
 			? false
 			: hand->focus->user_concealed;
-		hand->focus->conceal_group = ++conceal_group;
 		hand->focus->parent->layout_changed = true;
 		box_propagate_change(hand->focus)->label_changed = true;
 		break;
