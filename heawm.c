@@ -2389,14 +2389,19 @@ box_delete(Box *box)
 
 	box_delete_labels(box);
 
-	if (focus_changed)
-		increase_focus_seq();
-
 	Box *const box_parent = box->parent;
 	box_unparent(box);
 
-	if (focus_changed)
+	if (focus_changed) {
+		/* strictly after unparent: if there is only one hand and we
+		 * have just now deleted its focused box, layout may not be
+		 * updated properly, because after unparent the maximum
+		 * focus_seq is not focused in any hand. and when we try to
+		 * focus that box it seems like it has been already focused
+		 * since root->focus_seq == that_box->focus_seq. */
+		increase_focus_seq();
 		focus_all_hands(real_focus_seq);
+	}
 
 	if (!box_is_container(box)) {
 		DEBUG_CHECK(xcb_shape_select_input, conn, box->window, false);
