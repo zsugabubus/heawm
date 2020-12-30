@@ -4920,14 +4920,23 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 	hand_leave_mode(hand);
 }
 
-/* TODO: take hands into account */
 static void
 box_maximize(Box *const box, bool const recursive)
 {
-	if (box_is_floating(box))
+	enum State {
+		STATE_DISCOVER,
+		STATE_FIRST = STATE_DISCOVER,
+		STATE_PREPARE,
+		STATE_COMMIT,
+		STATE_LAST = STATE_COMMIT,
+	};
+
+	assert(box_is_container(box));
+
+	if (box_is_floating(box) || box == root)
 		return;
 
-	bool conceal = !box->concealed;
+	bool conceal = false;
 
 	uint16_t max_conceal_seq = 0;
 
@@ -4935,14 +4944,15 @@ box_maximize(Box *const box, bool const recursive)
 
 	/* when user requested unconcealing, first check for any box that is
 	 * not concealed, this way user can hide any newly appearing box */
-	for (bool do_conceal = false;; do_conceal = true) {
-		Box *parent = box->parent;
+	for (enum State state = STATE_FIRST;
+	     state <= STATE_LAST;
+	     ++state)
+	{
+		Box *parent = box;
 
-		if (do_conceal)
+		if (state == STATE_COMMIT)
 			/* propagate changes once, from the most inner box */
 			box_propagate_change(parent);
-		else if (conceal)
-			continue;
 
 		do {
 			uint16_t curr_conceal_seq = parent->conceal_seq;
@@ -4953,25 +4963,30 @@ box_maximize(Box *const box, bool const recursive)
 				if (child->user_concealed)
 					continue;
 
-				if (!do_conceal) {
+				switch (state) {
+				case STATE_DISCOVER:
+					if (!child->concealed)
+						conceal = true;
+					break;
+
+				case STATE_PREPARE:
 					if (conceal != child->concealed)
 						if (max_conceal_seq < curr_conceal_seq)
 							max_conceal_seq = curr_conceal_seq;
+					break;
 
-					if ((conceal |= !child->concealed))
-						break;
-				} else if (conceal != child->concealed &&
+				case STATE_COMMIT:
+					if (conceal != child->concealed &&
 					   (conceal || max_conceal_seq == curr_conceal_seq))
-				{
-					child->concealed = conceal,
-					parent->layout_changed = true;
-					parent->conceal_seq = root->conceal_seq;
+					{
+						child->concealed = conceal,
+						parent->layout_changed = true;
+						parent->conceal_seq = root->conceal_seq;
+					}
+					break;
 				}
 			}
 		} while ((recursive && !box_is_floating(parent)) && (parent = parent->parent, true));
-
-		if (do_conceal)
-			break;
 	}
 }
 
@@ -5201,7 +5216,7 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 		if (!hand->focus)
 			break;
 
-		box_maximize(hand->focus, sym == XKB_KEY_f);
+		box_maximize(hand->focus->parent, sym == XKB_KEY_f);
 		break;
 
 	/*MAN(Keybindings)
