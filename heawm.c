@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -16,29 +17,28 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
-#include <ctype.h>
 
-#include <cairo/cairo.h>
 #include <cairo/cairo-xcb.h>
+#include <cairo/cairo.h>
+#include <xcb/bigreq.h>
 #include <xcb/randr.h>
 #include <xcb/shape.h>
+#include <xcb/xcb.h>
 #include <xcb/xcb_atom.h>
 #include <xcb/xcb_aux.h>
 #include <xcb/xcb_cursor.h>
 #include <xcb/xcb_event.h>
-#include <xcb/xcb.h>
 #include <xcb/xcb_icccm.h>
 #include <xcb/xcb_image.h>
 #include <xcb/xcb_keysyms.h>
 #include <xcb/xcb_xrm.h>
 #include <xcb/xfixes.h>
-#include <xcb/bigreq.h>
 #include <xcb/xinput.h>
 #include <xcb/xkb.h>
 #include <xcb/xproto.h>
 #include <xcb/xtest.h>
-#include <xkbcommon/xkbcommon.h>
 #include <xkbcommon/xkbcommon-x11.h>
+#include <xkbcommon/xkbcommon.h>
 
 /* TEST: https://superuser.com/questions/801611/how-to-make-all-applications-respect-my-modified-xkb-layout/844673#844673 */
 
