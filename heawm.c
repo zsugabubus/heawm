@@ -4464,7 +4464,10 @@ hand_handle_input_key_normal(xcb_input_key_press_event_t const *const event, Han
 static Box *
 hand_get_latest_input(Hand const *const hand)
 {
-	return hand->latest_input[hand->focus == hand->latest_input[0]];
+	Box const *ret = hand->latest_input[hand->focus == hand->latest_input[0]];
+	if (!ret)
+		hand_find_recents(hand, root, root->focus_seq, &ret, 1);
+	return ret;
 }
 
 static void
