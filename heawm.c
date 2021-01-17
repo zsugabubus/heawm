@@ -255,14 +255,7 @@ struct box {
 	 *   possible depth
 	 * - it also makes very convenient to continue the walk where we left
 	 *   off */
-	         iter,
-	/**
-	 * specially:
-	 * - 0: auto,
-	 * - 1: column,
-	 * - -1: row,
-	 * - other: fixed, user set */
-	         num_columns;
+	         iter;
 
 	/** user requested rect; mainly for floating windows */
 	xcb_rectangle_t user_rect;
@@ -364,7 +357,6 @@ static int next_timeout_ms = -1;
 
 enum HandMode {
 	HAND_MODE_DEFAULT,
-	HAND_MODE_SETCOLUMNS,
 	HAND_MODE_MOVE,
 	HAND_MODE_SIZE_SIDE,
 	HAND_MODE_SIZE_TO,
@@ -1320,38 +1312,24 @@ box_is_floating(Box const *const box)
 }
 
 static uint16_t
-box_compute_num_columns(Box const *const box, uint16_t num_tiles)
+compute_num_columns(xcb_rectangle_t const *const rect, uint16_t const num_tiles)
 {
-	if (0 == box->num_columns) {
-		/* compare whether adding a new row or a new column will result
-		 * in more squary tiles. the process repeats until we can place
-		 * all tiles. */
-		uint_fast16_t cols = 1, rows = 1;
-		while (cols * rows < num_tiles) {
+	/* compare whether adding a new row or a new column will result
+	 * in more squary tiles. the process repeats until we can place
+	 * all tiles. */
+	uint_fast16_t cols = 1, rows = 1;
+	while (cols * rows < num_tiles) {
 #define R(a, b) ((a) < (b) ? (uint32_t)(b) << 16 / (a) : (uint32_t)(a) << 16 / (b))
 
-			if (R(box->rect.width / (cols + 1), box->rect.height / rows) <
-			    R(box->rect.width / cols,       box->rect.height / (rows + 1)))
-				++cols;
-			else
-				++rows;
+		if (R(rect->width / (cols + 1), rect->height / rows) <
+		    R(rect->width / cols,       rect->height / (rows + 1)))
+			++cols;
+		else
+			++rows;
 
 #undef R
-		}
-
-		return cols;
-	} else {
-		return box->num_columns <= num_tiles
-			? box->num_columns
-			: num_tiles;
 	}
-}
-
-static bool
-box_is_split(Box const *const box)
-{
-	uint16_t const num_columns = box_compute_num_columns(box, box->num_children);
-	return 1 == num_columns || box->num_children <= num_columns;
+	return cols;
 }
 
 static void
@@ -1521,40 +1499,10 @@ box_is_tiled(Box const *const box)
 	return box_is_visible(box) && !box_is_floating(box);
 }
 
-static uint16_t
-box_get_num_tiles(Box const *const box)
-{
-	uint16_t count = 0;
-
-	for (uint16_t i = 0; i < box->num_children; ++i)
-		count += box_is_tiled(box->children[i]);
-
-	return count;
-}
-
 static void
 label_assign_hand(Label *const label, Hand const *const hand)
 {
 	label->hands |= 1 << (hand - hands);
-}
-
-static void
-generate_name(char name[static membersizeof(Box, name)], uint32_t number)
-{
-	enum { N_SYMBOLS = 'z' - 'a' + 1 };
-
-	memset(name, 0, membersizeof(Box, name));
-
-	char *p = name;
-	do
-		*p++ = 'a' + (number % N_SYMBOLS);
-	while (0 < (number /= N_SYMBOLS));
-
-	if (p < name + membersizeof(Box, name))
-		*p = '\0';
-
-	for (char *q = name; q < p;)
-		*q++ = *--p;
 }
 
 #if 0
@@ -1675,19 +1623,6 @@ box_update_label(Box *const box)
 			break;
 #endif
 
-		case HAND_MODE_SETCOLUMNS:
-		{
-			if (box->parent != hand->mode_box->parent)
-				break;
-
-			label = label_new_for(box);
-			generate_name(name, hand->num_labels++);
-			label_set_name(label, name);
-			label_set_position_to_box(label, CENTER, CENTER, false);
-			label_update(label);
-		}
-			break;
-
 		case HAND_MODE_SIZE_SIDE:
 		{
 			if (box_is_monitor(box))
@@ -1695,9 +1630,6 @@ box_update_label(Box *const box)
 
 			if (box_is_floating(box))
 				goto all_four;
-
-			if (!box_is_split(box->parent))
-				break;
 
 		all_four:
 			label = label_new_for(box);
@@ -1860,20 +1792,28 @@ box_update(Box *const box)
 			if (!tiles)
 				goto no_tiles;
 
-			uint16_t num_columns = box_compute_num_columns(box, tiles);
+			xcb_rectangle_t tile = { 0 };
+			uint16_t num_columns = 0, num_rows = 0;
 
-			uint16_t const num_rows = (tiles + num_columns - 1) / num_columns;
-			uint16_t row = 0, column = 0;
-			int16_t y = 0, x = 0;
-			uint16_t height = box->rect.height / (!num_rows ? 1 : num_rows);
-
-			printf("%*.srearrange: children=%d tiles=%d cols=%d\n",
-					depth, "", box->num_children, tiles, num_columns);
-			uint16_t width = box->rect.width / num_columns;
+			printf("%*.srearrange: children=%d tiles=%d\n",
+					depth, "", box->num_children, tiles);
 			for (uint16_t i = 0; i < box->num_children; ++i) {
 				Box *const child = box->children[i];
 
 				if (box_is_tiled(child)) {
+					if (!tile.x) {
+						num_columns = compute_num_columns(
+								&(xcb_rectangle_t) {
+									.width = box->rect.width - tile.x,
+									.height = box->rect.height - tile.y,
+								}, tiles);
+						if (!tile.y)
+							num_rows = (tiles + num_columns - 1) / num_columns;
+					}
+
+					tile.width = box->rect.width / num_columns;
+					tile.height = box->rect.height / num_rows;
+
 					struct {
 						uint16_t top;
 						uint16_t right;
@@ -1891,43 +1831,45 @@ box_update(Box *const box)
 					gap.top = gap.left;
 					gap.bottom = gap.right;
 
-					if (0 == column)
+					if (!tile.x)
 						gap.left = 0;
-					if (num_columns == column + 1)
+					if (box->rect.width < tile.x + 2 * tile.width)
 						gap.right = 0;
 
-					if (0 == row)
+					if (!tile.y)
 						gap.top = 0;
-					if (num_rows == row + 1)
+					if (box->rect.height < tile.y + 2 * tile.height)
 						gap.bottom = 0;
 
-					/* per window width/height:
-					 * - last children in column or row eats up all space,
-					 * - size is rounded to the nearest mod_{x,y}
+					/* Window dimensions need a slight of adjustments:
+					 * - Last children eats up all
+					 *   remaining space to ensure pixel
+					 *   perfect display.
+					 * - Size is rounded to the nearest
+					 *   mod_{x,y} just because.
 					 */
-					uint16_t const tile_width =
-						column + 1 == num_columns
-						? box->rect.width - x
-						: width + (1 == num_rows && 1 < tiles && 0 < child->mod_x ? child->mod_x / 2 - (width + child->mod_x / 2) % child->mod_x : 0);
-					uint16_t const tile_height =
+#define COMPUTE_SIZE(num_rows, x, width) ( \
+	tile.width + (1 == num_rows && 1 < tiles && 0 < child->mod_##x \
+		? child->mod_##x / 2 - (tile.width + child->mod_##x / 2) % child->mod_##x \
+		: 0))
+					tile.width =
+						box->rect.width < tile.x + 2 * tile.width
+						? box->rect.width - tile.x
+						: COMPUTE_SIZE(num_rows, x, width);
+
+					tile.height =
 						1 == tiles
-						? box->rect.height - y
-						: height + (1 == num_columns && 1 < tiles && 0 < child->mod_y ? child->mod_y / 2 - (height + child->mod_y / 2) % child->mod_y : 0);
-					box_set_position(child, box->rect.x + x + gap.left, box->rect.y + y + gap.top);
-					box_set_size(child, tile_width - (gap.left + gap.right), tile_height - (gap.top + gap.bottom));
+						? box->rect.height - tile.y
+						: COMPUTE_SIZE(num_columns, y, height);
+#undef COMPUTE_SIZE
+
+					box_set_position(child, box->rect.x + tile.x + gap.left, box->rect.y + tile.y + gap.top);
+					box_set_size(child, tile.width - (gap.left + gap.right), tile.height - (gap.top + gap.bottom));
 
 					--tiles;
-					if (++column < num_columns) {
-						x += tile_width;
-					} else {
-						++row, column = 0;
-						y += tile_height, x = 0;
-
-						if (0 < tiles && tiles < num_columns) {
-							num_columns = tiles;
-							width = box->rect.width / num_columns;
-						}
-					}
+					tile.x += tile.width;
+					if (box->rect.width <= tile.x)
+						tile.x = 0, tile.y += tile.height;
 				} else if (!box_is_visible(child)) {
 					box_set_size(child, 0, 0);
 				}
@@ -4633,16 +4575,7 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 	return false;
 }
 
-static void
-box_change_columns(Box *const box, uint16_t const num_columns)
-{
-	assert(box_is_container(box));
-	if (num_columns == box->num_columns)
-		return;
 
-	box->num_columns = num_columns;
-	box_propagate_change(box)->layout_changed = true;
-}
 
 static void
 box_explode(Box *const box, bool const vertical)
@@ -4672,11 +4605,6 @@ box_explode(Box *const box, bool const vertical)
 
 #undef L
 #undef U
-
-	parent->children[0]->num_columns = parent->num_columns;
-	parent->children[1]->num_columns = vertical ? 1 : UINT16_MAX;
-	parent->children[2]->num_columns = parent->num_columns;
-	parent->num_columns = vertical ? UINT16_MAX : 1;
 
 	/* vacuum may reparent splits */
 	Box *const splits[3] = {
@@ -4863,58 +4791,6 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 		}
 		box_propagate_change(hand->mode_box)->label_changed = true;
 		return;
-
-	case HAND_MODE_SETCOLUMNS:
-	{
-		if (!(KEY_MOD_MASK & event->mods.base))
-			hand_handle_input(hand, sym);
-
-		Box *const parent = hand->mode_box->parent;
-		uint16_t num_columns;
-
-		if (hand_input_find_label(hand, &label)) {
-			if (!label)
-				return;
-
-			num_columns = 1;
-			for (Box **child = parent->children; *child != label->base; ++child)
-				if (box_is_visible(*child))
-					++num_columns;
-
-			if (num_columns == parent->num_children)
-				num_columns = UINT16_MAX;
-		} else switch (sym) {
-		case XKB_KEY_equal:
-			num_columns = 0;
-			break;
-
-		case XKB_KEY_slash:
-			num_columns = 1;
-			break;
-
-		case XKB_KEY_asterisk:
-			num_columns = UINT16_MAX;
-			break;
-
-		case XKB_KEY_plus:
-			num_columns = box_compute_num_columns(parent, box_get_num_tiles(parent)) + 1;
-			break;
-
-		case XKB_KEY_minus:
-			num_columns = box_compute_num_columns(parent, box_get_num_tiles(parent));
-			if (1 < num_columns)
-				--num_columns;
-			break;
-
-		default:
-			num_columns = parent->num_columns;
-			break;
-		}
-
-		box_change_columns(parent, num_columns);
-	}
-		break;
-
 	}
 
 	hand_leave_mode(hand);
@@ -5006,41 +4882,6 @@ static bool
 hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool const repeating)
 {
 	switch (sym) {
-	/*MAN(Keybindings)
-	 * .TP
-	 * .BR Mod-Ctrl-c "olumns \fIhow\fR"
-	 * Set number of columns.
-	 * .I how
-	 * can be:
-	 * .RS
-	 * .TP
-	 * .RB { a-z }
-	 * Set number of columns by selecting box that should appear at the end of the first row.
-	 * .TP
-	 * .B =
-	 * Auto layout.
-	 * .TP
-	 * .B *
-	 * Card (vertical stack) layout.
-	 * .TP
-	 * .B /
-	 * (Horizontal) Stack layout.
-	 * .TP
-	 * .B +
-	 * One more column.
-	 * .TP
-	 * .B -
-	 * One less column.
-	 * .RE
-	 */
-	case XKB_KEY_c:
-		if (!hand->focus)
-			break;
-
-		hand->mode = HAND_MODE_SETCOLUMNS;
-		hand->mode_box = hand->focus;
-		break;
-
 	/*MAN( Keybindings)
 	 * .TP
 	 * .BR Mod-Ctrl-r \fIwhat\fR \fIto-where\fR
