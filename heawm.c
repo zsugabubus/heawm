@@ -658,6 +658,16 @@ box_is_container(Box const *const box)
 }
 
 static bool
+box_is_super_container(Box const *const box)
+{
+	assert(box_is_container(box));
+	for (uint16_t i = 0; i < box->num_children; ++i)
+		if (!box_is_container(box->children[i]))
+			return false;
+	return true;
+}
+
+static bool
 box_is_focused(Box const *const box)
 {
 	return box->focus_seq && root->focus_seq == box->focus_seq;
@@ -2386,7 +2396,8 @@ box_vacuum(Box *const box)
 
 	/* substitute box with its only children */
 	if (1 == box->num_children &&
-	    (box_is_container(box->children[0]) || !box_is_monitor(box->parent)))
+	    (box_is_container(box->children[0]) ||
+	     !box_is_super_container(box->parent)))
 	{
 		/* keep name */
 		if (box_is_container(box->children[0]))
