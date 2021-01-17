@@ -53,7 +53,7 @@
 # define M_PHI 1.6180339887 /* Golden Ratio */
 #endif
 
-#define EXTREMAL_NAME_CHAR '\xff'
+#define EXTREMAL_NAME_CHAR '\x7f'
 
 #define RGB8_TO_FLOATS(color) \
 	(uint8_t)((color) >> 16) / 256., \
@@ -1216,9 +1216,39 @@ box_match_class(Box const *const box, char const *const class, char const *const
 }
 
 static void
+box_clear_name(Box *const box)
+{
+	*box->name = '\0';
+}
+
+static void
+box_set_placeholder_name(Box *const box)
+{
+	*box->name = EXTREMAL_NAME_CHAR;
+}
+
+static bool
+box_has_placeholder_name(Box const *const box)
+{
+	return EXTREMAL_NAME_CHAR == *box->name;
+}
+
+static char
+to_ascii_lower(char c)
+{
+	return 'A' <= c && c <= 'Z' ? c - 'A' + 'a' : c;
+}
+
+static char
+to_ascii_upper(char c)
+{
+	return 'a' <= c && c <= 'z' ? c - 'a' + 'A' : c;
+}
+
+static void
 box_name(Box *const box)
 {
-	if (EXTREMAL_NAME_CHAR == *box->name)
+	if (box_has_placeholder_name(box))
 		return;
 
 	assert(box != root && box->parent);
@@ -1226,7 +1256,7 @@ box_name(Box *const box)
 	bool const is_container = box_is_container(box);
 	struct {
 		uint32_t focus_seq;
-	} letters[127] = { { UINT32_MAX }, /* 0, 0, 0, ... */ };
+	} letters[128] = { { UINT32_MAX }, /* 0, 0, 0, ... */ };
 
 	uint8_t n = strnlen(box->name, sizeof box->name);
 	if (n)
@@ -1243,13 +1273,26 @@ box_name(Box *const box)
 			optimum = 't';
 	}
 
+	if (!optimum) {
+		for (uint16_t i = 0; i < box->num_children; ++i) {
+			Box const *const child = box->children[i];
+			if (!box_has_placeholder_name(child)) {
+				assert(child->name[0] && "box has parent but no name");
+				for (uint8_t j = n; !(optimum = child->name[j--]););
+				break;
+			}
+		}
+	}
+
+	optimum = (box_is_container(box) ? to_ascii_upper : to_ascii_lower)(optimum);
+
 #define NAME_MATCHES(test_box) \
 	(/* prefix matches */ \
 	 !memcmp((test_box)->name, box->name, n) && \
 	 /* end of name */ \
 	 ((uint8_t)membersizeof(Box, name) <= n + 1 || !(test_box)->name[n + 1]))
 
-	/* exclude names of children so we can always move at least one downwards */
+	/* Exclude names of children so we can always move at least one downwards. */
 	for (uint16_t i = 0; i < box->num_children; ++i) {
 		Box const *const child = box->children[i];
 		if (NAME_MATCHES(child))
@@ -1257,7 +1300,7 @@ box_name(Box *const box)
 	}
 
 	if (!box_is_monitor(box) && box_is_monitor(box->parent))
-		/* exclude names of neck (treat all necks from all heads as children) */
+		/* Exclude names of neck (treat all necks from all heads as children). */
 		for (uint16_t i = 0; i < root->num_children; ++i) {
 			Box const *const head = root->children[i];
 			for (uint16_t j = 0; j < head->num_children; ++j) {
@@ -1267,14 +1310,14 @@ box_name(Box *const box)
 			}
 		}
 	else
-		/* exclude names of siblings so we can always move horizontally */
+		/* Exclude names of siblings so we can always move horizontally. */
 		for (uint16_t i = 0; i < box->parent->num_children; ++i) {
 			Box const *const child = box->parent->children[i];
 			if (child != box && NAME_MATCHES(child))
 				letters[(unsigned char)child->name[n]].focus_seq = UINT32_MAX;
 		}
 
-	/* exclude parent names so we can always move upwards */
+	/* Exclude parent names so we can always move upwards. */
 	for (Box const *parent = box; (parent = parent->parent);)
 		if (NAME_MATCHES(parent))
 			letters[(unsigned char)parent->name[n]].focus_seq = UINT32_MAX;
@@ -1283,8 +1326,8 @@ box_name(Box *const box)
 	for_each_box(test, root, root)
 		if (test != box && NAME_MATCHES(test)) {
 			uint32_t *const p = &letters[(unsigned char)test->name[n]].focus_seq;
-			/* use a non-zero focus_seq to avoid treating never
-			 * focused boxes as free letters */
+			/* Use a non-zero focus_seq to avoid treating never
+			 * focused boxes as free letters. */
 			if (*p < test->focus_seq + 1)
 				*p = test->focus_seq + 1;
 		}
@@ -2546,11 +2589,16 @@ box_reparent_checked(Box *const into, uint32_t const pos, Box *box)
 	    root == into)
 		return;
 
-	/* insert an intermediate box under monitor */
+	/* Insert an intermediate box under monitor. */
 	if (box_is_monitor(into) && !box_is_container(box)) {
-		Box *const container = box_new();
-		box_reparent(into, pos, container);
-		box_reparent(container, 0, box);
+		{
+			Box *const container = box_new();
+			box_set_placeholder_name(container);
+			box_reparent(into, pos, container);
+			box_reparent(container, 0, box);
+		}
+		box_clear_name(box->parent);
+		box_name(box->parent);
 		return;
 	}
 
@@ -3517,7 +3565,7 @@ body_update_heads(Body *const body)
 	for (uint16_t i = 0; i < root->num_children; ++i) {
 		Box *const head = root->children[i];
 		if ((body - bodies) == head->body)
-			*head->name = EXTREMAL_NAME_CHAR;
+			box_set_placeholder_name(head);
 	}
 
 	Box *parent = NULL;
@@ -3587,7 +3635,7 @@ body_update_heads(Body *const body)
 			/* primary monitors named before others to get
 			 * stable names */
 			if (monitor->primary) {
-				*head->name = '\0';
+				box_clear_name(head);
 				box_name(head);
 			}
 
@@ -3606,10 +3654,10 @@ body_update_heads(Body *const body)
 	for (uint16_t i = root->num_children; 0 < i;) {
 		Box *const head = root->children[--i];
 
-		if (EXTREMAL_NAME_CHAR != *head->name)
+		if (!box_has_placeholder_name(head))
 			continue;
 
-		*head->name = '\0';
+		box_clear_name(head);
 		if (parent) {
 			free(head->class), head->class = NULL;
 			head->user_rect.width = 0;
@@ -3749,7 +3797,7 @@ retry:
 
 	{
 		Box *const container = box_new();
-		*container->name = EXTREMAL_NAME_CHAR;
+		box_set_placeholder_name(container);
 		box_reparent(box->parent, pos, container);
 	}
 
@@ -3775,7 +3823,7 @@ retry:
 
 	{
 		Box *const container = parent->children[pos];
-		*container->name = '\0';
+		box_clear_name(container);
 		box_name(container);
 	}
 
@@ -4601,7 +4649,7 @@ box_explode(Box *const box, bool const vertical)
 		container->hide_label = box->hide_label;
 		box_reparent(box->parent, box_get_pos(box), container);
 
-		*box->name = '\0';
+		box_clear_name(box);
 		box->hide_label = false;
 		box->label_changed = true;
 		box->concealed = false;
@@ -4615,7 +4663,7 @@ box_explode(Box *const box, bool const vertical)
 
 	for (uint8_t i = 0; i < 3; ++i) {
 		Box *const split = box_new();
-		*split->name = EXTREMAL_NAME_CHAR;
+		box_set_placeholder_name(split);
 		box_reparent(box->parent, i, split);
 	}
 
@@ -4648,7 +4696,7 @@ box_explode(Box *const box, bool const vertical)
 
 	for (uint8_t i = 0; i < 3; ++i) {
 		Box *const split = splits[i];
-		*split->name = '\0';
+		box_clear_name(split);
 		box_name(split);
 		/* box->parent will surely receive a child */
 		if (split != box->parent)
