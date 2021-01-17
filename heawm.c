@@ -4580,6 +4580,28 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 static void
 box_explode(Box *const box, bool const vertical)
 {
+	if (box_is_monitor(box))
+		/* TODO: Possibly we should do something. */
+		return;
+
+	if (box_is_monitor(box->parent)) {
+		Box *const container = box_new();
+		memcpy(container->name, box->name, sizeof container->name);
+		container->hide_label = box->hide_label;
+		box_reparent(box->parent, box_get_pos(box), container);
+
+		*box->name = '\0';
+		box->hide_label = false;
+		box->label_changed = true;
+		box->concealed = false;
+		box->user_concealed = false;
+		box_reparent(container, 0, box);
+
+		/* It is totally unnecessary to go through the complete
+		 * exploding process since we have a singe children. */
+		return;
+	}
+
 	for (uint8_t i = 0; i < 3; ++i) {
 		Box *const split = box_new();
 		*split->name = EXTREMAL_NAME_CHAR;
