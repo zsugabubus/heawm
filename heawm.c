@@ -4753,6 +4753,26 @@ box_reparent_into(Box *const parent, Box *const child)
 }
 
 static void
+hand_focus_parent(Hand *const hand)
+{
+	if (hand->focus && hand->focus->parent &&
+	    /* Addressable? */
+	    *hand->focus->parent->name)
+		hand_focus_box(hand, hand->focus->parent);
+}
+
+static void
+hand_focus_child(Hand *const hand)
+{
+	if (hand->focus && hand->input_focus && hand->focus != hand->input_focus) {
+		Box *box = hand->input_focus;
+		while (box->parent != hand->focus)
+			box = box->parent;
+		hand_focus_box(hand, box);
+	}
+}
+
+static void
 hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand *const hand, xcb_keysym_t const sym)
 {
 	Label *label;
@@ -4769,8 +4789,20 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 				hand_input_try_jump(hand);
 			return;
 
+		case XCB_MOD_MASK_4 | XCB_MOD_MASK_CONTROL:
+		case XCB_MOD_MASK_4 | XCB_MOD_MASK_1:
+			switch (sym) {
+			case XKB_KEY_k:
+				hand_focus_parent(hand);
+				break;
+
+			case XKB_KEY_j:
+				hand_focus_child(hand);
+				break;
+			}
+			return;
+
 		case 0:
-		case XCB_MOD_MASK_SHIFT:
 			switch (sym) {
 			case XKB_KEY_F:
 				if (!box_is_container(hand->mode_box))
@@ -4837,6 +4869,9 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 				return;
 			}
 			break;
+
+		default:
+			return;
 		}
 		break;
 
@@ -5165,10 +5200,7 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 	 * Focus parent.
 	 */
 	case XKB_KEY_k:
-		if (hand->focus && hand->focus->parent &&
-		    /* addressable? */
-		    *hand->focus->parent->name)
-			hand_focus_box(hand, hand->focus->parent);
+		hand_focus_parent(hand);
 		break;
 
 	/*MAN(Keybindings)
@@ -5177,12 +5209,7 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 	 * Focus child.
 	 */
 	case XKB_KEY_j:
-		if (hand->focus && hand->input_focus && hand->focus != hand->input_focus) {
-			Box *box = hand->input_focus;
-			while (box->parent != hand->focus)
-				box = box->parent;
-			hand_focus_box(hand, box);
-		}
+		hand_focus_child(hand);
 		break;
 
 	/*MAN(Keybindings)
