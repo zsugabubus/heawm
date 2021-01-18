@@ -221,8 +221,8 @@ typedef struct {
 
 #define Box_pointers(box) ((BoxPointer *)&box->children)
 
-typedef struct box Box;
-struct box {
+typedef struct Box Box;
+struct Box {
 	xcb_rectangle_t rect;
 
 	/** last time (sequence number) when box has been focused
@@ -311,7 +311,7 @@ struct box {
 	Box *children[];
 };
 
-/** mother of all boxes */
+/** Mother of all boxes. */
 static Box *root;
 
 static bool ewmh_client_list_changed;
@@ -352,9 +352,6 @@ typedef struct {
 static uint8_t num_bodies;
 static Body *bodies;
 
-/* not a too exact time */
-static int next_timeout_ms = -1;
-
 enum HandMode {
 	HAND_MODE_DEFAULT,
 	HAND_MODE_MOVE,
@@ -383,9 +380,6 @@ typedef struct {
 	char user_input[membersizeof(Box, name)];
 
 	uint32_t num_labels; /** number of labels owned by this hand */
-
-	/** time until |hand_timed_out()| is called; -1 if disarmed */
-	int timeout_ms;
 
 	enum HandMode mode;
 
@@ -4328,28 +4322,7 @@ hand_input_find_label(Hand *hand, Label **out)
 	return false;
 }
 
-#if 0
-static void
-hand_set_timeout(Hand *const hand, int const timeout_ms)
-{
-	assert(0 != timeout_ms && "timeout already elapsed you dumbass");
-	printf("setto=%d\n", timeout_ms);
-	if (next_timeout_ms < timeout_ms) {
-		next_timeout_ms = hand->timeout_ms = timeout_ms;
-	} else if (next_timeout_ms <= hand->timeout_ms) {
-		next_timeout_ms = hand->timeout_ms = timeout_ms;
-		for_each_hand {
-			if (next_timeout_ms < hand->timeout_ms)
-				next_timeout_ms = hand->timeout_ms;
-		}
-	} else {
-		hand->timeout_ms = timeout_ms;
-	}
-
-}
-#endif
-
-/** modifiers we are interested in */
+/** Modifiers we are interested in. */
 #define KEY_MOD_MASK \
 (	XCB_MOD_MASK_CONTROL \
 |	XCB_MOD_MASK_1 \
@@ -5527,41 +5500,6 @@ handle_generic_event(xcb_ge_generic_event_t const *const event)
 		unreachable;
 }
 
-static void
-hand_timed_out(Hand *const hand)
-{
-	assert(HAND_MODE_DEFAULT == hand->mode);
-	printf("hand_timed_out(()\n");
-	hand->mode = HAND_MODE_DEFAULT;
-}
-
-static void
-hands_time_elapsed(int elapsed_ms)
-{
-	if (next_timeout_ms < elapsed_ms)
-		elapsed_ms = next_timeout_ms;
-
-	int new_timeout_ms = -1;
-
-	printf("Elapsed=%dms\n", elapsed_ms);
-	for (uint8_t i = 0; i < num_hands; ++i) {
-		Hand *const hand = &hands[i];
-		printf("hand to=%d\n", hand->timeout_ms);
-		if (hand->timeout_ms < 0)
-			continue;
-
-		if ((hand->timeout_ms -= elapsed_ms) <= 0) {
-			hand->timeout_ms = -1;
-			hand_timed_out(hand);
-		} else if (new_timeout_ms < hand->timeout_ms) {
-			new_timeout_ms = hand->timeout_ms;
-		}
-	}
-
-	next_timeout_ms = new_timeout_ms;
-	printf("next timeout =%d\n", next_timeout_ms);
-}
-
 static int
 run(void)
 {
@@ -5573,35 +5511,17 @@ run(void)
 
 	for (xcb_generic_event_t *event;; free(event)) {
 		while (!(event = xcb_poll_for_event(conn)) &&
-		       /* update screen if we have no more pending requests */
-		       /* FIXME: investigate whether starvation could be a problem */
+		       /* Update screen if we have no more pending requests. */
+		       /* FIXME: Investigate whether starvation could be a problem. */
 		       (do_update(), xcb_flush(conn),
-		        /* make XCB poll()-ing again to see whether we
+		        /* Make XCB poll()-ing again to see whether we
 		         * have received something after flushing. poll()
 		         * should be level-triggered so not sure why it
 		         * is needed... */
 		        !(event = xcb_poll_for_event(conn))))
 		{
-			struct timespec poll_start;
-
-			if (0 < next_timeout_ms)
-				clock_gettime(HAND_TIMEOUT_CLOCK, &poll_start);
-			assert(0 != next_timeout_ms && "next_timeout_ms should never be 0");
-
-			assert(next_timeout_ms == -1);
-			if (0 == poll(&pfd, 1, next_timeout_ms)) {
-				assert(0);
-				hands_time_elapsed(next_timeout_ms);
-				continue;
-			} else if (0 < next_timeout_ms) {
-				assert(0);
-				struct timespec now;
-				clock_gettime(HAND_TIMEOUT_CLOCK, &now);
-				hands_time_elapsed(((now.tv_sec - poll_start.tv_sec) << 10) + ((now.tv_nsec - poll_start.tv_nsec) >> 20));
-				assert(0 != next_timeout_ms);
-			}
-
-			if (pfd.revents & ~POLLIN)
+			if (poll(&pfd, 1, -1) <= 0 ||
+			    (pfd.revents & ~POLLIN))
 				return EXIT_FAILURE;
 		}
 
