@@ -62,11 +62,12 @@
 
 /* sizeof array... but in elements */
 #define ARRAY_SIZE(...) (sizeof((__VA_ARGS__)) / sizeof(*(__VA_ARGS__)))
-#define offsetof(type, member) (size_t)(&((type *)0)->member)
+#define offsetof(type, member) ((size_t)(&((type *)0)->member))
+#define memberof(type, base, offset) ((type *)((uintptr_t)(base) + (offset)))
 #define membersizeof(type, member) (sizeof(((type *)0)->member))
 
-#define SWAP(type, x, y) do { \
-	type const tmp = x; \
+#define SWAP(x, y) do { \
+	__typeof__(x) const tmp = x; \
 	x = y; \
 	y = tmp; \
 } while (0)
@@ -110,8 +111,10 @@
 #define MAX(x, y) ((x) < (y) ? (y) : (x))
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 
-/* because xcb_send_event() does not take an |event| length argument, no matter
- * what, it will copy a fixed number of bytes. to avoid reading (then sending)
+#define XCB_ERROR_NOTIFY 0
+
+/* Because xcb_send_event() does not take an |event| length argument, no matter
+ * what, it will copy a fixed number of bytes. To avoid reading (then sending)
  * out-of-bounds bytes we must make sure we have as many bytes as XCB needs. */
 #define XCB_SEND_EVENT_EVENT(event, ...) \
 	(char const *)&(alignas(membersizeof(xcb_send_event_request_t, ev##ent)) \
@@ -317,13 +320,12 @@ static Box *root;
 static bool ewmh_client_list_changed;
 
 enum LabelType {
-	LABEL_NORMAL, /** text only */
-	LABEL_BOX, /** draw glory if |base| focused */
-	LABEL_HLINE, /** text with a horizontal line */
-	LABEL_VLINE, /** text with a vertical line */
+	LABEL_NORMAL, /** Text only. */
+	LABEL_BOX, /** Draw glory if |base| focused. */
+	LABEL_HLINE, /** Text with a horizontal line. */
+	LABEL_VLINE, /** Text with a vertical line. */
 };
 
-/** little angels flying around the screen */
 typedef struct {
 	Box *base;
 	uint64_t hands;
@@ -597,7 +599,7 @@ find_box_by_window(Box *const root, Box *start, size_t const offset, xcb_window_
 
 	Box *box;
 	for_each_box(box, root, start)
-		if (window == *(xcb_window_t const *)((uintptr_t)box + offset))
+		if (window == *memberof(xcb_window_t const, box, offset))
 			break;
 	return box;
 }
@@ -1791,8 +1793,6 @@ box_update(Box *const box)
 
 	bool const content_changed = box->content_changed;
 	bool const position_changed = box->position_changed;
-	/* because of relative position values, layout change must be
-	 * propagated so children will be repositioned correctly */
 	bool const should_focus = box->should_focus;
 	bool const layout_changed = box->layout_changed;
 	bool const should_map = box->should_map;
@@ -2161,7 +2161,7 @@ hand_focus_box(Hand *hand, Box *box);
 
 /* fill *boxes with the n latest focused box associated with hand */
 static void
-hand_find_recents(Hand *hand, Box *root, uint32_t const focus_seq, Box **const boxes, uint32_t const n)
+hand_find_recents(Hand const *const hand, Box *root, uint32_t const focus_seq, Box **const boxes, uint32_t const n)
 {
 	static Box const EMPTY_BOX;
 
@@ -2553,6 +2553,7 @@ box_reparent(Box *into, uint16_t pos, Box *box)
 		box_setup_leg(box);
 }
 
+__attribute__((malloc))
 static Box *
 box_new(void)
 {
@@ -2619,10 +2620,10 @@ box_swap(Box *const x, Box *const y)
 	for (py = y->parent->children; *py != y; ++py);
 	*px = y, *py = x;
 
-	SWAP(Box *, x->parent, y->parent);
-	SWAP(xcb_rectangle_t, x->user_rect, y->user_rect);
-	SWAP(xcb_rectangle_t, x->rect, y->rect);
-	SWAP(uint8_t, x->weight, y->weight);
+	SWAP(x->parent, y->parent);
+	SWAP(x->user_rect, y->user_rect);
+	SWAP(x->rect, y->rect);
+	SWAP(x->weight, y->weight);
 
 	x->position_changed = true;
 	y->position_changed = true;
@@ -4373,6 +4374,7 @@ out:
 static void
 hand_handle_input_key_normal(xcb_input_key_press_event_t const *const event, Hand *const hand, xcb_keysym_t const sym, bool const repeating)
 {
+	(void)event;
 #if 0
 	uint32_t const grab_detail = XKB_KEY_Return == sym ? event->detail : XCB_GRAB_ANY;
 	/* one shot. but it is *required* before fake input, otherwise we will
@@ -4437,7 +4439,7 @@ hand_handle_input_key_normal(xcb_input_key_press_event_t const *const event, Han
 static Box *
 hand_get_latest_input(Hand const *const hand)
 {
-	Box const *ret = hand->latest_input[hand->focus == hand->latest_input[0]];
+	Box *ret = hand->latest_input[hand->focus == hand->latest_input[0]];
 	if (!ret)
 		hand_find_recents(hand, root, root->focus_seq, &ret, 1);
 	return ret;
@@ -5529,7 +5531,7 @@ run(void)
 
 		switch (XCB_EVENT_RESPONSE_TYPE(event)) {
 #define EVENT(type, handler) case type: handler((void *)event); break;
-		EVENT(0,                     handle_error);
+		EVENT(XCB_ERROR_NOTIFY ,     handle_error);
 		EVENT(XCB_MAP_REQUEST,       handle_map_request);
 		EVENT(XCB_CONFIGURE_NOTIFY,  handle_configure_notify);
 		EVENT(XCB_CONFIGURE_REQUEST, handle_configure_request);
