@@ -305,7 +305,8 @@ struct Box {
 	     user_concealed: 1,
 	     /** fix focus position on screen by always swapping newly
 	       focused window with previously focused window */
-	     focus_lock: 1;
+	     focus_lock: 1,
+	     vertical: 1;
 
 	char *title;
 	char *class;
@@ -1363,22 +1364,24 @@ box_is_floating(Box const *const box)
 static uint16_t
 compute_num_columns(xcb_rectangle_t const *const rect, uint16_t const num_tiles)
 {
-	/* compare whether adding a new row or a new column will result
-	 * in more squary tiles. the process repeats until we can place
-	 * all tiles. */
-	uint_fast16_t cols = 1, rows = 1;
-	while (cols * rows < num_tiles) {
-#define R(a, b) ((a) < (b) ? (uint32_t)(b) << 16 / (a) : (uint32_t)(a) << 16 / (b))
-
-		if (R(rect->width / (cols + 1), rect->height / rows) <
-		    R(rect->width / cols,       rect->height / (rows + 1)))
-			++cols;
-		else
-			++rows;
-
-#undef R
+	uint16_t ret = 0;
+	uint16_t minimal_row = 0;
+	uint32_t minimal = UINT32_MAX;
+	for (uint16_t cols = 1; cols <= num_tiles; ++cols) {
+		uint16_t rows = (num_tiles + cols - 1) / cols;
+		uint16_t last_cols = num_tiles - (rows - 1) * cols;
+		uint32_t perimeter =
+			((rect->width / cols) + (rect->height / rows)) * (rows - 1) * cols +
+			/* Note: This is not what really is on the screen. */
+			((rect->width / last_cols) + (rect->height / rows)) * last_cols * 1;
+		if (perimeter < minimal && minimal_row != rows) {
+			ret = cols;
+			minimal_row = rows;
+			minimal = perimeter;
+		}
 	}
-	return cols;
+#undef R
+	return ret;
 }
 
 static void
@@ -1840,7 +1843,20 @@ box_update(Box *const box)
 				goto no_tiles;
 
 			xcb_rectangle_t tile = { 0 };
-			uint16_t num_columns = 0, num_rows = 0;
+			uint16_t num_columns, num_rows;
+			if (!box->vertical) {
+				num_columns = compute_num_columns(&(xcb_rectangle_t const){
+					.width =  box->rect.width - tile.x,
+					.height = box->rect.height - tile.y,
+				}, tiles);
+				num_rows = (tiles + num_columns - 1) / num_columns;
+			} else {
+				num_rows = compute_num_columns(&(xcb_rectangle_t const){
+					.width =  box->rect.height - tile.y,
+					.height = box->rect.width - tile.x,
+				}, tiles);
+				num_columns = (tiles + num_rows - 1) / num_rows;
+			}
 
 			printf("%*.srearrange: children=%d tiles=%d\n",
 					depth, "", box->num_children, tiles);
@@ -1848,15 +1864,9 @@ box_update(Box *const box)
 				Box *const child = box->children[i];
 
 				if (box_is_tiled(child)) {
-					if (!tile.x) {
-						num_columns = compute_num_columns(
-								&(xcb_rectangle_t) {
-									.width = box->rect.width - tile.x,
-									.height = box->rect.height - tile.y,
-								}, tiles);
-						if (!tile.y)
-							num_rows = (tiles + num_columns - 1) / num_columns;
-					}
+					uint16_t *num = !box->vertical ? &num_columns : &num_rows;
+					if ((!box->vertical ? !tile.x : !tile.y) && tiles < *num)
+						*num /= *num / tiles;
 
 					tile.width = box->rect.width / num_columns;
 					tile.height = box->rect.height / num_rows;
@@ -1888,6 +1898,17 @@ box_update(Box *const box)
 					if (box->rect.height < tile.y + 2 * tile.height)
 						gap.bottom = 0;
 
+#define CORRECT_PIXEL(width, num_columns) do { \
+	uint16_t error = box->rect.width % num_columns; \
+	if (error) { \
+		error = box->rect.width / error; \
+		tile.width += (tile.x / error) != ((tile.x + tile.width + 1 /* Corrected pixel. */) / error); \
+	} \
+} while (0)
+					CORRECT_PIXEL(width, num_columns);
+					CORRECT_PIXEL(height, num_rows);
+#undef CORRECT_PIXEL
+
 					/* Window dimensions need a slight of adjustments:
 					 * - Last children eats up all
 					 *   remaining space to ensure pixel
@@ -1895,28 +1916,30 @@ box_update(Box *const box)
 					 * - Size is rounded to the nearest
 					 *   mod_{x,y} just because.
 					 */
-#define COMPUTE_SIZE(num_rows, x, width) ( \
-	tile.width + (1 == num_rows && 1 < tiles && 0 < child->mod_##x \
+#define ADJUST_SIZE(num_rows, x, width) ( \
+	1 == tiles || box->rect.width < tile.x + 2 * tile.width \
+	? box->rect.width - tile.x \
+	: tile.width + (1 == num_rows && 1 < tiles && 0 < child->mod_##x \
 		? child->mod_##x / 2 - (tile.width + child->mod_##x / 2) % child->mod_##x \
 		: 0))
-					tile.width =
-						box->rect.width < tile.x + 2 * tile.width
-						? box->rect.width - tile.x
-						: COMPUTE_SIZE(num_rows, x, width);
-
-					tile.height =
-						1 == tiles
-						? box->rect.height - tile.y
-						: COMPUTE_SIZE(num_columns, y, height);
-#undef COMPUTE_SIZE
+					/* TODO: Distribute error. */
+					tile.width = ADJUST_SIZE(num_rows, x, width);
+					tile.height = ADJUST_SIZE(num_columns, y, height);
+#undef ADJUST_SIZE
 
 					box_set_position(child, box->rect.x + tile.x + gap.left, box->rect.y + tile.y + gap.top);
 					box_set_size(child, tile.width - (gap.left + gap.right), tile.height - (gap.top + gap.bottom));
 
 					--tiles;
-					tile.x += tile.width;
-					if (box->rect.width <= tile.x)
-						tile.x = 0, tile.y += tile.height;
+					if (!box->vertical) {
+						tile.x += tile.width;
+						if (box->rect.width <= tile.x)
+							tile.x = 0, tile.y += tile.height;
+					} else {
+						tile.y += tile.height;
+						if (box->rect.height <= tile.y)
+							tile.y = 0, tile.x += tile.width;
+					}
 				} else if (!box_is_visible(child)) {
 					box_set_size(child, 0, 0);
 				}
@@ -5117,6 +5140,23 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 			break;
 
 		box_maximize(hand->focus->parent, sym == XKB_KEY_f);
+		break;
+
+	/*MAN(Keybindings)
+	 * .TP
+	 * .BR Mod-Ctrl-|
+	 * Toggle between vertical and horizontal fill modes.
+	 */
+	case XKB_KEY_backslash:
+	case XKB_KEY_bar:
+		if (repeating)
+			break;
+
+		if (!hand->focus)
+			break;
+
+		hand->focus->parent->vertical ^= true;
+		box_propagate_change(hand->focus->parent)->layout_changed = true;
 		break;
 
 	/*MAN(Keybindings)
