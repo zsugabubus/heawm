@@ -1756,6 +1756,127 @@ xcb_icccm_set_wm_state(xcb_window_t const window, xcb_icccm_wm_state_t const sta
 }
 
 static void
+box_update(Box *const box);
+
+static void
+box_update_layout(Box const *const box)
+{
+	uint32_t total_weight = 0;
+	uint16_t tiles = 0;
+
+	for (uint16_t i = 0; i < box->num_children; ++i) {
+		Box const *const child = box->children[i];
+		if (box_is_tiled(child)) {
+			total_weight += child->weight;
+			++tiles;
+		}
+	}
+
+	xcb_rectangle_t tile = { 0 };
+	uint16_t num_columns, num_rows;
+	if (!box->vertical) {
+		num_columns = compute_num_columns(&(xcb_rectangle_t const){
+			.width =  box->rect.width - tile.x,
+			.height = box->rect.height - tile.y,
+		}, tiles);
+		num_rows = (tiles + num_columns - 1) / num_columns;
+	} else {
+		num_rows = compute_num_columns(&(xcb_rectangle_t const){
+			.width =  box->rect.height - tile.y,
+			.height = box->rect.width - tile.x,
+		}, tiles);
+		num_columns = (tiles + num_rows - 1) / num_rows;
+	}
+
+	for (uint16_t i = 0; i < box->num_children; ++i) {
+		Box *const child = box->children[i];
+
+		if (box_is_tiled(child)) {
+			uint16_t *num = !box->vertical ? &num_columns : &num_rows;
+			if ((!box->vertical ? !tile.x : !tile.y) && tiles < *num)
+				*num /= *num / tiles;
+
+			tile.width = box->rect.width / num_columns;
+			tile.height = box->rect.height / num_rows;
+
+			struct {
+				uint16_t top;
+				uint16_t right;
+				uint16_t bottom;
+				uint16_t left;
+			} gap;
+
+			gap.left = box->focus_lock
+				? 0
+				: box_is_container(child)
+				? CONTAINER_GAP : WINDOW_GAP;
+			gap.right = gap.left / 2;
+			gap.left -= gap.right;
+
+			gap.top = gap.left;
+			gap.bottom = gap.right;
+
+			if (!tile.x)
+				gap.left = 0;
+			if (box->rect.width < tile.x + 2 * tile.width)
+				gap.right = 0;
+
+			if (!tile.y)
+				gap.top = 0;
+			if (box->rect.height < tile.y + 2 * tile.height)
+				gap.bottom = 0;
+
+#define CORRECT_PIXEL(width, num_columns) do { \
+uint16_t error = box->rect.width % num_columns; \
+if (error) { \
+error = box->rect.width / error; \
+tile.width += (tile.x / error) != ((tile.x + tile.width + 1 /* Corrected pixel. */) / error); \
+} \
+} while (0)
+			CORRECT_PIXEL(width, num_columns);
+			CORRECT_PIXEL(height, num_rows);
+#undef CORRECT_PIXEL
+
+			/* Window dimensions need a slight of adjustments:
+			 * - Last children eats up all
+			 *   remaining space to ensure pixel
+			 *   perfect display.
+			 * - Size is rounded to the nearest
+			 *   mod_{x,y} just because.
+			 */
+#define ADJUST_SIZE(num_rows, x, width) ( \
+1 == tiles || box->rect.width < tile.x + 2 * tile.width \
+? box->rect.width - tile.x \
+: tile.width + (1 == num_rows && 1 < tiles && 0 < child->mod_##x \
+? child->mod_##x / 2 - (tile.width + child->mod_##x / 2) % child->mod_##x \
+: 0))
+			/* TODO: Distribute error. */
+			tile.width = ADJUST_SIZE(num_rows, x, width);
+			tile.height = ADJUST_SIZE(num_columns, y, height);
+#undef ADJUST_SIZE
+
+			box_set_position(child, box->rect.x + tile.x + gap.left, box->rect.y + tile.y + gap.top);
+			box_set_size(child, tile.width - (gap.left + gap.right), tile.height - (gap.top + gap.bottom));
+
+			--tiles;
+			if (!box->vertical) {
+				tile.x += tile.width;
+				if (box->rect.width <= tile.x)
+					tile.x = 0, tile.y += tile.height;
+			} else {
+				tile.y += tile.height;
+				if (box->rect.height <= tile.y)
+					tile.y = 0, tile.x += tile.width;
+			}
+		} else if (!box_is_visible(child)) {
+			box_set_size(child, 0, 0);
+		}
+
+		box_update(child);
+	}
+}
+
+static void
 box_update(Box *const box)
 {
 	static int depth = 0;
@@ -1824,130 +1945,7 @@ box_update(Box *const box)
 			list[i++] = box->rect.width;
 			list[i++] = box->rect.height;
 
-			if (!box->num_children)
-				goto no_children;
-
-			uint32_t total_weight = 0;
-			uint16_t tiles = 0;
-
-			for (uint16_t i = 0; i < box->num_children; ++i) {
-				Box const *const child = box->children[i];
-				if (!box_is_tiled(child))
-					continue;
-
-				total_weight += child->weight;
-				++tiles;
-			}
-
-			if (!tiles)
-				goto no_tiles;
-
-			xcb_rectangle_t tile = { 0 };
-			uint16_t num_columns, num_rows;
-			if (!box->vertical) {
-				num_columns = compute_num_columns(&(xcb_rectangle_t const){
-					.width =  box->rect.width - tile.x,
-					.height = box->rect.height - tile.y,
-				}, tiles);
-				num_rows = (tiles + num_columns - 1) / num_columns;
-			} else {
-				num_rows = compute_num_columns(&(xcb_rectangle_t const){
-					.width =  box->rect.height - tile.y,
-					.height = box->rect.width - tile.x,
-				}, tiles);
-				num_columns = (tiles + num_rows - 1) / num_rows;
-			}
-
-			printf("%*.srearrange: children=%d tiles=%d\n",
-					depth, "", box->num_children, tiles);
-			for (uint16_t i = 0; i < box->num_children; ++i) {
-				Box *const child = box->children[i];
-
-				if (box_is_tiled(child)) {
-					uint16_t *num = !box->vertical ? &num_columns : &num_rows;
-					if ((!box->vertical ? !tile.x : !tile.y) && tiles < *num)
-						*num /= *num / tiles;
-
-					tile.width = box->rect.width / num_columns;
-					tile.height = box->rect.height / num_rows;
-
-					struct {
-						uint16_t top;
-						uint16_t right;
-						uint16_t bottom;
-						uint16_t left;
-					} gap;
-
-					gap.left = box->focus_lock
-						? 0
-						: box_is_container(child)
-						? CONTAINER_GAP : WINDOW_GAP;
-					gap.right = gap.left / 2;
-					gap.left -= gap.right;
-
-					gap.top = gap.left;
-					gap.bottom = gap.right;
-
-					if (!tile.x)
-						gap.left = 0;
-					if (box->rect.width < tile.x + 2 * tile.width)
-						gap.right = 0;
-
-					if (!tile.y)
-						gap.top = 0;
-					if (box->rect.height < tile.y + 2 * tile.height)
-						gap.bottom = 0;
-
-#define CORRECT_PIXEL(width, num_columns) do { \
-	uint16_t error = box->rect.width % num_columns; \
-	if (error) { \
-		error = box->rect.width / error; \
-		tile.width += (tile.x / error) != ((tile.x + tile.width + 1 /* Corrected pixel. */) / error); \
-	} \
-} while (0)
-					CORRECT_PIXEL(width, num_columns);
-					CORRECT_PIXEL(height, num_rows);
-#undef CORRECT_PIXEL
-
-					/* Window dimensions need a slight of adjustments:
-					 * - Last children eats up all
-					 *   remaining space to ensure pixel
-					 *   perfect display.
-					 * - Size is rounded to the nearest
-					 *   mod_{x,y} just because.
-					 */
-#define ADJUST_SIZE(num_rows, x, width) ( \
-	1 == tiles || box->rect.width < tile.x + 2 * tile.width \
-	? box->rect.width - tile.x \
-	: tile.width + (1 == num_rows && 1 < tiles && 0 < child->mod_##x \
-		? child->mod_##x / 2 - (tile.width + child->mod_##x / 2) % child->mod_##x \
-		: 0))
-					/* TODO: Distribute error. */
-					tile.width = ADJUST_SIZE(num_rows, x, width);
-					tile.height = ADJUST_SIZE(num_columns, y, height);
-#undef ADJUST_SIZE
-
-					box_set_position(child, box->rect.x + tile.x + gap.left, box->rect.y + tile.y + gap.top);
-					box_set_size(child, tile.width - (gap.left + gap.right), tile.height - (gap.top + gap.bottom));
-
-					--tiles;
-					if (!box->vertical) {
-						tile.x += tile.width;
-						if (box->rect.width <= tile.x)
-							tile.x = 0, tile.y += tile.height;
-					} else {
-						tile.y += tile.height;
-						if (box->rect.height <= tile.y)
-							tile.y = 0, tile.x += tile.width;
-					}
-				} else if (!box_is_visible(child)) {
-					box_set_size(child, 0, 0);
-				}
-
-				box_update(child);
-			}
-		no_tiles:;
-		no_children:;
+			box_update_layout(box);
 		} else {
 			box_delete_labels(box);
 			if (box->window != XCB_WINDOW_NONE) {
