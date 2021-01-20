@@ -4108,10 +4108,8 @@ update_hands(void)
 		if (XCB_INPUT_DEVICE_TYPE_MASTER_POINTER != input_device->type)
 			goto add_device;
 
-		int const len = xcb_input_xi_device_info_name_length(input_device) - strlen(" pointer");
-		char *name = malloc(len + 1/* NULL */);
-		memcpy(name, xcb_input_xi_device_info_name(input_device), len);
-		name[len] = '\0';
+		int const master_name_len = xcb_input_xi_device_info_name_length(input_device) - strlen(" pointer");
+		char const *const master_name = xcb_input_xi_device_info_name(input_device);
 
 		Hand *const old_hand = find_hand_by_master_pointer(input_device->deviceid);
 
@@ -4160,7 +4158,7 @@ update_hands(void)
 		 */
 		hand->color = 0xfe0202, 0xffaf5f;
 		for (char *value;
-		     load_resource(&value, "heawm.hand.%s.color", name) ||
+		     load_resource(&value, "heawm.hand.%.*s.color", master_name_len, master_name) ||
 		     load_resource(&value, "heawm.hand.%u.color", new_num_hands) ||
 		     load_resource(&value, "heawm.hand.color", new_num_hands);)
 		{
@@ -4229,8 +4227,6 @@ update_hands(void)
 		/* it is safe to call because we know that hand currently
 		 * has no focus */
 		hand_refocus(hand);
-
-		free(name);
 
 		++hand;
 
