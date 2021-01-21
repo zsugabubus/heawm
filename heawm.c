@@ -2618,6 +2618,23 @@ hand_assign_latest_input(Hand *const hand)
 }
 
 static void
+box_propagate_labels_change(Box *const box)
+{
+	/* Labels may get shifted upwards or downwards when focus changes on a
+	 * box with hidden label */
+	if (!box->hide_label)
+		return;
+
+	Box *b;
+	for_each_box(b, box)
+		if (box_is_container(b)) {
+			b->label_changed = true;
+			/* We walk every box so there will be no discontinuities. */
+			b->parent->content_changed = true;
+		}
+}
+
+static void
 hand_focus_box_internal(Hand *const hand, Box *const box)
 {
 	if (hand->input_focus)
@@ -2625,12 +2642,7 @@ hand_focus_box_internal(Hand *const hand, Box *const box)
 
 	if (hand->input_focus) {
 		box_propagate_change(hand->input_focus)->label_changed = true;
-		/* Labels may get shifted upward between input_focus and focus
-		 * if label gets hidden (but previously was visible because it
-		 * had focus). */
-		if (hand->focus->hide_label)
-			for (Box *b = hand->focus; b != hand->focus; b = b->parent)
-				b->label_changed = true;
+		box_propagate_labels_change(hand->focus);
 	} else if (hand->focus)
 		box_propagate_change(hand->focus)->label_changed = true;
 
@@ -2680,17 +2692,7 @@ hand_focus_box_internal(Hand *const hand, Box *const box)
 	hand->check_input = true;
 	hand_grab_keyboard(hand);
 
-	/* Shift labels downwards. */
-	if (hand->focus->hide_label) {
-		Box *box;
-		for_each_box(box, hand->focus)
-			if (box_is_container(box)) {
-				box->label_changed = true;
-				/* We walk every boxes so there will be no
-				 * gaps. */
-				box->parent->content_changed = true;
-			}
-	}
+	box_propagate_labels_change(hand->focus);
 
 	printf("focus=%.*s; input=%.*s\n",
 			(int)sizeof box->name, hand->focus ? hand->focus->name : NULL,
