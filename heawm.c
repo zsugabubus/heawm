@@ -2178,46 +2178,11 @@ increase_focus_seq(void)
 static void
 hand_do_mode_changes(Hand *const hand)
 {
-#if 1
 	Box *box;
 	for_each_box(box, root) {
 		box->label_changed = true;
 		box->content_changed = true;
 	}
-#else
-	switch (hand->mode, mode_move_a) {
-	case mode_default:
-		/* noop */
-		break;
-
-	case mode_size_side:
-	case mode_size_to:
-		break;
-
-	case mode_move_a:
-	case mode_move_b:
-	{
-		Box *box;
-		for_each_box(box, root, root) {
-			box->label_changed = true;
-			box->content_changed = true;
-		}
-	}
-		break;
-
-	case mode_setcolumns:
-		box_propagate_change(hand->mode_box);
-		for (uint16_t i = 0; i < hand->mode_box->parent->num_children; ++i) {
-			Box *const child = hand->mode_box->parent->children[i];
-			child->label_changed = true;
-		}
-		break;
-
-	case mode_name:
-		box_propagate_change(hand->mode_box)->label_changed = true;
-		break;
-	}
-#endif
 
 	hand->num_labels = 0;
 
@@ -2896,7 +2861,6 @@ send_request:
 #undef FIND_BOX
 #undef REQUEST_PROPERTY
 }
-
 
 /* manage window */
 static Box *
