@@ -2640,40 +2640,42 @@ hand_focus_box_internal(Hand *const hand, Box *const box)
 	if (hand->input_focus)
 		box_save_pointer(hand->input_focus, hand);
 
-	if (hand->input_focus) {
+	if (hand->input_focus)
 		box_propagate_change(hand->input_focus)->label_changed = true;
-		box_propagate_labels_change(hand->focus);
-	} else if (hand->focus)
+	else if (hand->focus)
 		box_propagate_change(hand->focus)->label_changed = true;
 
-	/* find most upper locked box */
-	Box *locked = box;
-	for (Box *test = box; (test = test->parent);) {
-		if (test->focus_lock)
-			locked = test;
+	if (hand->focus) {
+		box_propagate_labels_change(hand->focus);
+		hand->focus->layout_changed = true;
 	}
+
+	/* Find most upper locked box. */
+	Box *locked = box;
+	for (Box *b = box; (b = b->parent);)
+		if (b->focus_lock)
+			locked = b;
 
 	Box *recents[2];
 	hand_find_recents(hand, locked, root->focus_seq, recents, ARRAY_SIZE(recents));
-	if (/* there is something locked */
-	    locked != box &&
-	    /* if we go into a different box avoid swapping if we focus the
-	     * latest focused one */
-	    recents[0] != box)
-		box_swap(recents[1], recents[0]);
+	if (locked == box ||
+	    recents[0] == box)
+		recents[1] = NULL;
 
-	hand->focus = box;
+	box_swap(recents[1], recents[0]);
 
 	Box *const new_input_focus = !box_is_container(box)
 		? box
 		: recents[0];
 
-	/* avoid moving pointer if it would be unintuitive */
+	hand->focus = box;
+
+	/* Avoid unintuitive pointer movements. */
 	if (hand->input_focus &&
 	    new_input_focus &&
-	    (/* window under pointer would be focused */
+	    (/* ...if window under pointer would be focused; */
 	     new_input_focus->frame == Box_pointers(hand->input_focus)[hand - hands].window ||
-	     /* mouse would be warped in the same window */
+	     /* ...if mouse would be warped in the same window. */
 	     Box_pointers(new_input_focus)[hand - hands].window == Box_pointers(hand->input_focus)[hand - hands].window))
 		memcpy(&Box_pointers(new_input_focus)[hand - hands],
 		       &Box_pointers(hand->input_focus)[hand - hands],
@@ -2686,17 +2688,12 @@ hand_focus_box_internal(Hand *const hand, Box *const box)
 	box->layout_changed = true;
 	increase_focus_seq();
 
-	if (locked != box)
-		box_swap(box, recents[1]);
+	box_swap(box, recents[1]);
 
 	hand->check_input = true;
 	hand_grab_keyboard(hand);
 
 	box_propagate_labels_change(hand->focus);
-
-	printf("focus=%.*s; input=%.*s\n",
-			(int)sizeof box->name, hand->focus ? hand->focus->name : NULL,
-			(int)sizeof box->name, hand->input_focus ? hand->input_focus->name : NULL);
 }
 
 static void
@@ -4360,7 +4357,7 @@ hand_input_try_jump(Hand *const hand)
 		goto reset_input;
 	}
 
-	/* if focus would not change, try focus an interesting window */
+	/* If focus would not change, try focus an interesting window. */
 	if (box == hand->focus)
 		box = hand_get_latest_input(hand);
 
