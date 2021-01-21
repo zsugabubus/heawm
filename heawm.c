@@ -2105,14 +2105,14 @@ hand_find_recents(Hand const *const hand, Box *root, uint32_t const focus_seq, B
 
 	Box *box;
 	for_each_box(box, root)
-		if (/* only client windows are interesting */
+		if (/* Only client windows are interesting. */
 		    !box_is_container(box) &&
-		    (NULL_HAND == box->focus_hand || (
-		     /* not focused by others */
-		     focus_seq != box->focus_seq &&
-		     /* but have been focused by us */
-		     hand - hands == box->focus_hand) ||
-		     box == hand->input_focus))
+		    (NULL_HAND == box->focus_hand ||
+		     (/* Not focused. */
+		      focus_seq != box->focus_seq &&
+		      /* But have been focused by us. */
+		      hand - hands == box->focus_hand) ||
+		      box == hand->input_focus))
 		{
 			uint32_t i = n;
 			while (i > 0 && boxes[i - 1]->focus_seq <= box->focus_seq)
@@ -2702,8 +2702,6 @@ hand_focus_box_internal(Hand *const hand, Box *const box)
 static void
 hand_focus_box(Hand *const hand, Box *const box)
 {
-	hand_assign_latest_input(hand);
-
 	Box *neck = box;
 	if (!box_is_monitor(neck) && 1 < root->num_children) {
 		while (!box_is_monitor(neck->parent))
@@ -4327,8 +4325,11 @@ static Box *
 hand_get_latest_input(Hand const *const hand)
 {
 	Box *ret = hand->latest_input[hand->focus == hand->latest_input[0]];
-	if (!ret)
-		hand_find_recents(hand, root, root->focus_seq, &ret, 1);
+	if (!ret) {
+		Box *recents[2];
+		hand_find_recents(hand, root, root->focus_seq, recents, 2);
+		ret = recents[hand->focus == recents[0]];
+	}
 	return ret;
 }
 
