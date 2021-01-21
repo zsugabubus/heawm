@@ -358,8 +358,6 @@ static Body *bodies;
 enum HandMode {
 	HAND_MODE_DEFAULT,
 	HAND_MODE_MOVE,
-	HAND_MODE_SIZE_SIDE,
-	HAND_MODE_SIZE_TO,
 	HAND_MODE_NAME,
 };
 
@@ -469,13 +467,7 @@ static uint16_t const CONTAINER_GAP = 4;
 static char const *label_font = "monospace";
 static Point label_rect = { .x = 30, .y = 60 }; /** in pts */
 static int label_stroke = /* 4 */ 2 /* .5 */;
-static int label_size =
-#if 1
-17
-#else
-22
-#endif
-;
+static int label_font_size = 17;
 
 #include "atoms.h"
 
@@ -680,7 +672,7 @@ label_repaint(Label const *const label, bool const shape)
 	Box const *const monitor = box_get_head(label->base);
 	Point const size = monitor_convert_pt2px(monitor, label_rect);
 	int const font_size = monitor_convert_pt2px(monitor,
-			(Point){ 0, label_size }).y;
+			(Point){ 0, label_font_size }).y;
 	int const stroke_width = monitor_convert_pt2px(monitor,
 			(Point){ label_stroke, 0 }).x;
 
@@ -962,13 +954,6 @@ box_compute_position(Box const *const box, enum Orientation const ox, enum Orien
 }
 
 static void
-label_set_position_to_box(Label *const label, enum Orientation const ox, enum Orientation const oy, bool const outside)
-{
-	Point const pt = box_compute_position(label->base, ox, oy, outside);
-	label_set_position(label, pt.x, pt.y);
-}
-
-static void
 label_create_window(Label *const label)
 {
 	assert(label->base);
@@ -1021,21 +1006,6 @@ label_create_window(Label *const label)
 			label->window,
 			size.x, size.y,
 			label->shape);
-}
-
-static void
-hide_label(Label *const label)
-{
-	DEBUG_CHECK(xcb_unmap_window, conn, label->window);
-}
-
-static void
-delete_label(Label *const label)
-{
-	if (XCB_WINDOW_NONE != label->window) {
-		DEBUG_CHECK(xcb_destroy_window, conn, label->window);
-		DEBUG_CHECK(xcb_free_pixmap, conn, label->shape);
-	}
 }
 
 static void
@@ -1552,22 +1522,16 @@ box_is_tiled(Box const *const box)
 }
 
 static void
-label_assign_hand(Label *const label, Hand const *const hand)
+label_assign_all_hands(Label *const label)
 {
-	label->hands |= 1 << (hand - hands);
+	label->hands |= -1;
 }
 
 #if 0
-/* TODO: do not regenerate labels on focus change */
 static void
-box_repaint_labels(Box const *const box)
+label_assign_hand(Label *const label, Hand const *const hand)
 {
-	Body *body = &bodies[box->body];
-	for (uint32_t j = body->num_labels_used; 0 < j;) {
-		Label *const label = &body->labels[--j];
-		if (box == label->base)
-			label_repaint(label, false);
-	}
+	label->hands |= 1 << (hand - hands);
 }
 #endif
 
@@ -1585,6 +1549,25 @@ box_delete_labels(Box const *const box)
 	}
 }
 
+static bool
+box_label_is_visible(Box const *const box)
+{
+	for_each_hand {
+		switch (hand->mode) {
+		case HAND_MODE_DEFAULT:
+			if (box->hide_label)
+				return false;
+			break;
+
+		case HAND_MODE_NAME:
+		case HAND_MODE_MOVE:
+			return true;
+		}
+	}
+
+	return true;
+}
+
 static void
 box_update_label(Box *const box)
 {
@@ -1592,144 +1575,49 @@ box_update_label(Box *const box)
 		return;
 
 	box_delete_labels(box);
+	if (!box_label_is_visible(box))
+		return;
 
-	for_each_hand {
-		char name[membersizeof(Box, name)];
-		Label *label;
+	char name[membersizeof(Box, name)];
 
-		switch (hand->mode) {
-		case HAND_MODE_DEFAULT:
-			if (box->hide_label)
-				break;
-			/* fall through */
-		case HAND_MODE_NAME:
-		case HAND_MODE_MOVE:
-			label = label_new_for(box);
-			if (HAND_MODE_NAME == hand->mode && hand->mode_box == box) {
-				char display_name[sizeof name + 1];
-				memcpy(display_name, hand->user_input, sizeof display_name);
-				display_name[strnlen(display_name, sizeof display_name)] = '?';
-				label_set_name(label, display_name);
-			} else {
-				label_set_name(label, box->name);
-			}
-			Point pt = box_compute_position(label->base, box_is_container(box) ? CENTER : RIGHT, TOP, false);
-			if (box_is_container(box)) {
-				Box const *const monitor = box_get_head(box);
-				int const font_size = monitor_convert_pt2px(monitor,
-						(Point){ 0, label_size }).y;
-
-				pt.y -= font_size;
-				for (Box const *b = box;
-				     !box_is_floating(b) &&
-				     /* at the top of the other; maybe we
-				      * should also check if labels would
-				      * really obscure each other */
-				     b->parent->rect.y == b->rect.y;
-				     b = b->parent)
-					pt.y += !b->parent->hide_label ? font_size : 0;
-			}
-			label_set_position(label, pt.x, pt.y);
-			label->type = LABEL_BOX;
-			label_assign_hand(label, hand);
-			label_update(label);
-			break;
-
-#if 0
+	Label *label = label_new_for(box);
+	Hand const *naming = NULL;
+	for_each_hand
+		if (hand->mode_box == box &&
+		    HAND_MODE_NAME == hand->mode)
 		{
-			/* not a real child */
-			if (box_is_monitor(box))
-				break;
-
-			bool const is_container = box_is_container(box);
-			bool const leftmost_col = box->parent->x == box->x;
-			bool const top_row = box->parent->y != box->y;
-			bool const bottom_row = box->parent->y + box->height == box->y + box->height;
-			bool const rightmost_col = box->parent->x + box->width == box->x + box->width;
-			uint8_t i = 0;
-			int to[8];
-
-			if (is_container || !(top_row && leftmost_col))
-				to[i++] = left, to[i++] = top;
-
-			if (is_container || (bottom_row && !leftmost_col))
-				to[i++] = left, to[i++] = bottom;
-
-			if (is_container || (!top_row && rightmost_col))
-				to[i++] = right, to[i++] = bottom;
-
-			if (is_container || !(bottom_row && rightmost_col))
-				to[i++] = right, to[i++] = top;
-
-			while (0 < i) {
-				i -= 2;
-
-				generate_name(name, hand->num_labels++);
-				label = label_new_for(box);
-				label_assign_hand(label, hand);
-				label_set_name(label, name);
-				label_set_position_to_box(label, to[i], to[i + 1], true);
-				label_update(label);
-			}
-		}
-			break;
-#endif
-
-		case HAND_MODE_SIZE_SIDE:
-		{
-			if (box_is_monitor(box))
-				break;
-
-			if (box_is_floating(box))
-				goto all_four;
-
-		all_four:
-			label = label_new_for(box);
-			strncpy(name, "h", sizeof name);
-			label_set_name(label, name);
-			label_set_position_to_box(label, LEFT, CENTER, true);
-			label_update(label);
-
-			label = label_new_for(box);
-			strncpy(name, "j", sizeof name);
-			label_set_name(label, name);
-			label_set_position_to_box(label, CENTER, BOTTOM, true);
-			label_update(label);
-
-			label = label_new_for(box);
-			strncpy(name, "k", sizeof name);
-			label_set_name(label, name);
-			label_set_position_to_box(label, CENTER, TOP, true);
-			label_update(label);
-
-			label = label_new_for(box);
-			strncpy(name, "l", sizeof name);
-			label_set_name(label, name);
-			label_set_position_to_box(label, RIGHT, CENTER, true);
-			label_update(label);
-		}
-			break;
-
-		case HAND_MODE_SIZE_TO:
-		{
-			if (box != hand->mode_box)
-				break;
-
-			Box const *const monitor = box_get_head(box);
-			Point const size = monitor_convert_pt2px(monitor, label_rect);
-
-			for (char ch = 'a'; ch <= 'z'; ++ch) {
-				label = label_new_for(box);
-				name[0] = ch;
-				name[1] = '\0';
-				label_set_name(label, name);
-				label_set_position(label, box->rect.x + (ch - 'a') * size.x, box->rect.y + box->rect.height / 2);
-				label_update(label);
-			}
-		}
+			naming = hand;
 			break;
 		}
+
+	if (naming) {
+		char display_name[sizeof name + 1];
+		memcpy(display_name, naming->user_input, sizeof display_name);
+		display_name[strnlen(display_name, sizeof display_name)] = '?';
+		label_set_name(label, display_name);
+	} else {
+		label_set_name(label, box->name);
 	}
+	Point pt = box_compute_position(label->base, box_is_container(box) ? CENTER : RIGHT, TOP, false);
+	if (box_is_container(box)) {
+		Box const *const monitor = box_get_head(box);
+		int const font_size = monitor_convert_pt2px(monitor,
+				(Point){ 0, label_font_size }).y;
+
+		pt.y -= font_size;
+		for (Box const *b = box;
+		     !box_is_floating(b) &&
+		     /* at the top of the other; maybe we
+		      * should also check if labels would
+		      * really obscure each other */
+		     b->parent->rect.y == b->rect.y;
+		     b = b->parent)
+			pt.y += box_label_is_visible(b->parent) ? font_size : 0;
+	}
+	label_set_position(label, pt.x, pt.y);
+	label->type = LABEL_BOX;
+	label_assign_all_hands(label);
+	label_update(label);
 }
 
 static void
@@ -2109,7 +1997,7 @@ do_update(void)
 		assert(body->num_labels_used <= body->num_labels_mapped);
 		while (body->num_labels_used < body->num_labels_mapped) {
 			Label *label = &body->labels[--body->num_labels_mapped];
-			hide_label(label);
+			DEBUG_CHECK(xcb_unmap_window, conn, label->window);
 		}
 
 		ewmh_update(body);
@@ -3778,7 +3666,9 @@ box_flatten(Box *into, uint16_t pos, Box const *const box)
 	} while (0 < --i);
 }
 
-/** create a new box that contains all related boxes at the place of |box| */
+/**
+ * Create a new box that contains all related boxes at the place of |box|.
+ */
 static bool
 box_group(Box const *const box)
 {
@@ -3910,7 +3800,7 @@ handle_input_focus_in(xcb_input_focus_in_event_t const *const event)
 static void
 handle_unmap_notify(xcb_unmap_notify_event_t const *const event)
 {
-	/* not because reparenting */
+	/* Ignore reparenting related events. */
 	if (event->event != event->window)
 		return;
 
@@ -3976,8 +3866,7 @@ handle_configure_request(xcb_configure_request_event_t const *const event)
 static void
 handle_expose(xcb_expose_event_t const *const event)
 {
-	/* ignore events that will surely be followed by another expose event.
-	 * we only repaint labels at the last one in the sequence. */
+	/* Act only on the last expose event in the row. */
 	if (0 < event->count)
 		return;
 
@@ -3996,7 +3885,7 @@ static void
 wm_close_window(xcb_window_t const window)
 {
 	DEBUG_CHECK(xcb_send_event, conn, false, window,
-			XCB_EVENT_MASK_NO_EVENT/* client messages cannot be masked */,
+			XCB_EVENT_MASK_NO_EVENT/* Client messages cannot be masked. */,
 			(char const *)&(xcb_client_message_event_t){
 				.response_type = XCB_CLIENT_MESSAGE,
 				.format = 32,
@@ -4699,6 +4588,7 @@ box_explode(Box *const box, bool const vertical)
 	}
 }
 
+#if 0
 static Box *
 box_clone(Box const *const box)
 {
@@ -4726,6 +4616,7 @@ box_clone(Box const *const box)
 
 	return new;
 }
+#endif
 
 static void
 box_reparent_into(Box *const parent, Box *const child)
@@ -4769,8 +4660,6 @@ hand_focus_child(Hand *const hand)
 static void
 hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand *const hand, xcb_keysym_t const sym)
 {
-	Label *label;
-
 	switch (hand->mode) {
 	case HAND_MODE_DEFAULT:
 		unreachable;
@@ -4868,20 +4757,6 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 			return;
 		}
 		break;
-
-	case HAND_MODE_SIZE_SIDE:
-		if (hand_input_find_label(hand, &label)) {
-			hand->mode = HAND_MODE_SIZE_TO;
-			hand->mode_box = label->base;
-			break;
-		}
-		return;
-
-	case HAND_MODE_SIZE_TO:
-		if (hand_input_find_label(hand, &label)) {
-			break;
-		}
-		return;
 
 	case HAND_MODE_NAME:
 		if (!(KEY_MOD_MASK & event->mods.base))
@@ -4993,19 +4868,6 @@ static bool
 hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool const repeating)
 {
 	switch (sym) {
-	/*MAN( Keybindings)
-	 * .TP
-	 * .BR Mod-Ctrl-r \fIwhat\fR \fIto-where\fR
-	 * Resize a split or a side of a floating window.
-	 * .IP
-	 * .B =
-	 * sets equalizes sizes for all splits in the grid.
-	 */
-	case XKB_KEY_r:
-		/* TODO: take account window gravity */
-		hand->mode = HAND_MODE_SIZE_SIDE;
-		break;
-
 	/*MAN(Keybindings)
 	 * .TP
 	 * .BR Mod-Ctrl-g roup
