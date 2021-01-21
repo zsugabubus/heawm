@@ -585,7 +585,7 @@ spawn(char const *argv[], void(*fork_cb)(void *), void *arg)
 }
 
 static Box *
-find_box_by_window(Box *const root, Box *start, size_t const offset, xcb_window_t const window)
+find_box_by_window(Box *const root, Box *start, unsigned const offset, xcb_window_t const window)
 {
 	if (XCB_WINDOW_NONE == window)
 		return NULL;
@@ -598,7 +598,7 @@ find_box_by_window(Box *const root, Box *start, size_t const offset, xcb_window_
 }
 
 static Box *
-find_box_in_body_by_window(Body *const body, size_t const offset, xcb_window_t const window)
+find_box_in_body_by_window(Body *const body, unsigned const offset, xcb_window_t const window)
 {
 	uint8_t const body_pos = body - bodies;
 
@@ -1334,7 +1334,7 @@ box_is_floating(Box const *const box)
 static uint16_t
 compute_num_columns(xcb_rectangle_t const *const rect, uint16_t const num_tiles)
 {
-	uint16_t ret = 0;
+	uint16_t ret = 1; /* Return non-zero. */
 	uint16_t minimal_row = 0;
 	uint32_t minimal = UINT32_MAX;
 	for (uint16_t cols = 1; cols <= num_tiles; ++cols) {
@@ -1505,13 +1505,20 @@ hand_focus(Hand *const hand)
 }
 
 static bool
+box_has_hand_focus(Box const *const box)
+{
+	for_each_hand
+		if (box->parent == hand->focus)
+			return true;
+	return false;
+}
+
+static bool
 box_is_visible(Box const *const box)
 {
 	bool const ret = !box->concealed || box->parent->focus_seq == box->focus_seq;
 	if (!ret && box->parent->focus_seq == root->focus_seq)
-		for_each_hand
-			if (box->parent == hand->focus)
-				return true;
+		return box_has_hand_focus(box);
 	return ret;
 }
 
@@ -1879,7 +1886,7 @@ box_update(Box *const box)
 		if (0 < i) {
 			mask |= XCB_CONFIG_WINDOW_STACK_MODE;
 			list[i++] = XCB_STACK_MODE_BELOW;
-			printf("%*.s configure n=%d\n", depth, "", i);
+			/* printf("%*.s configure n=%d\n", depth, "", i); */
 			DEBUG_CHECK(xcb_configure_window, conn, box->frame, mask, list);
 
 			if ((XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT) & mask) {
@@ -1892,7 +1899,7 @@ box_update(Box *const box)
 
 		/* map only after configure */
 		if (should_map) {
-			printf("%*.s map\n", depth, "");
+			/* printf("%*.s map\n", depth, ""); */
 			xcb_icccm_set_wm_state(box->window, XCB_ICCCM_WM_STATE_NORMAL);
 			DEBUG_CHECK(xcb_map_window, conn, box->frame);
 		}
@@ -2243,9 +2250,6 @@ box_free(Box *const box)
 {
 	free(box->title);
 	free(box->class);
-#ifndef HEAWM_NDEBUG
-	memset(box, 0xcc, sizeof *box);
-#endif
 	free(box);
 }
 
@@ -3028,6 +3032,7 @@ fail:
 	return NULL;
 }
 
+#if 0
 static void
 generate_coredump(void)
 {
@@ -3043,6 +3048,7 @@ handle_signal_segfault(int signum)
 	generate_coredump();
 	restart();
 }
+#endif
 
 static void
 setup_signals(void)
@@ -3239,7 +3245,7 @@ xrm_setup(void)
 		label_font = value;
 
 	if (load_resource(&value, "heawm.label.fontSize"))
-		label_size = strtol(value, NULL, 10);
+		label_font_size = strtol(value, NULL, 10);
 
 	if (load_resource(&value, "heawm.label.strokeWidth"))
 		label_stroke = strtol(value, NULL, 10);
@@ -3822,8 +3828,7 @@ handle_map_request(xcb_map_request_event_t const *const event)
 static void
 handle_configure_notify(xcb_configure_notify_event_t const *const event)
 {
-	/* we are interested in root window size changes when XRandR is not
-	 * available */
+	/* We need this only when XRandR is not available. */
 	if (randr_base_event)
 		return;
 
@@ -3832,8 +3837,7 @@ handle_configure_notify(xcb_configure_notify_event_t const *const event)
 			continue;
 
 		body_update_heads(body);
-
-		return;
+		break;
 	}
 }
 
@@ -4204,29 +4208,6 @@ find_hand_by_master_pointer(xcb_input_device_id_t const master_pointer)
 	}
 
 	return NULL;
-}
-
-/* TODO: accept numbers and minus prefix */
-static bool
-hand_input_find_label(Hand *hand, Label **out)
-{
-	uint8_t n = strnlen(hand->user_input, sizeof hand->user_input);
-	if (!n)
-		return false;
-	else if (n < sizeof hand->user_input)
-		++n;
-
-	for_each_body {
-		for (uint32_t j = 0; j < body->num_labels_used; ++j) {
-			Label *const label = &body->labels[j];
-			if (memcmp(label->name, hand->user_input, n))
-				continue;
-			*out = label;
-			return true;
-		}
-	}
-
-	return false;
 }
 
 /** Modifiers we are interested in. */
