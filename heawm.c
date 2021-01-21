@@ -469,6 +469,18 @@ static Point label_rect = { .x = 30, .y = 60 }; /** in pts */
 static int label_stroke = /* 4 */ 2 /* .5 */;
 static int label_font_size = 17;
 
+typedef struct {
+	char name[membersizeof(Box, name)];
+	char const *class_instance;
+} Rule;
+
+static Rule const RULES[] = {
+	{ "b", "Navigator\0firefox", },
+	{ "t", "telegram-desktop\0TelegramDesktop", },
+	{ "v", "gl\0mpv", },
+	{ "z", "org.pwmt.zathura\0Zathura", },
+};
+
 #include "atoms.h"
 
 static char const *const ATOM_NAMES[] =
@@ -1226,18 +1238,20 @@ box_name(Box *const box)
 	} letters[128] = { { UINT32_MAX }, /* 0, 0, 0, ... */ };
 
 	uint8_t n = strnlen(box->name, sizeof box->name);
-	if (n)
-		--n;
+	n -= !!n;
 
 	char optimum = box->name[n];
 
-	if (!n && !optimum && !is_container) {
-		if (box_match_class(box, "gl", "mpv"))
-			optimum = 'v';
-		else if (box_match_class(box, "Navigator", "firefox"))
-			optimum = 'b';
-		else if (box_match_class(box, "telegram-desktop", "TelegramDesktop"))
-			optimum = 't';
+	for (size_t i = 0; i < ARRAY_SIZE(RULES); ++i) {
+		Rule const *const rule = &RULES[i];
+		if (!(rule->name[n] && !rule->name[n + 1]))
+			continue;
+
+		/* Try assigning reserved letters last. */
+		letters[(unsigned char)rule->name[n]].focus_seq = root->focus_seq + 1;
+
+		if (!optimum && box_match_class(box, rule->class_instance, rule->class_instance + strlen(rule->class_instance) + 1))
+			optimum = rule->name[n];
 	}
 
 	if (!optimum) {
@@ -1295,8 +1309,8 @@ box_name(Box *const box)
 			uint32_t *const p = &letters[(unsigned char)test->name[n]].focus_seq;
 			/* Use a non-zero focus_seq to avoid treating never
 			 * focused boxes as free letters. */
-			if (*p < test->focus_seq + 1)
-				*p = test->focus_seq + 1;
+			if (*p < test->focus_seq + 2)
+				*p = test->focus_seq + 2;
 		}
 
 #undef NAME_MATCHES
