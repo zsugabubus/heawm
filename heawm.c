@@ -1507,7 +1507,7 @@ static bool
 box_has_hand_focus(Box const *const box)
 {
 	for_each_hand
-		if (box->parent == hand->focus)
+		if (box == hand->focus)
 			return true;
 	return false;
 }
@@ -1517,7 +1517,7 @@ box_is_visible(Box const *const box)
 {
 	bool const ret = !box->concealed || box->parent->focus_seq == box->focus_seq;
 	if (!ret && box->parent->focus_seq == root->focus_seq)
-		return box_has_hand_focus(box);
+		return box_has_hand_focus(box->parent);
 	return ret;
 }
 
@@ -1561,7 +1561,9 @@ box_label_is_visible(Box const *const box)
 	for_each_hand {
 		switch (hand->mode) {
 		case HAND_MODE_DEFAULT:
-			if (box->hide_label)
+			if (box->hide_label &&
+			    /* Show labels for focused containers. */
+			    !(box_is_container(box) && box_has_hand_focus(box)))
 				return false;
 			break;
 
