@@ -194,10 +194,11 @@
 		for (elem_type *const name = &list[name##_index], *loop_ = (void *)true; loop_; loop_ = (void *)false)
 
 #define for_each_body for_each_template_(Body, bodies, uint8_t, body, 0 == body_index)
+
 #define for_each_hand for_each_template_(Hand, hands, uint8_t, hand, 0)
 
-#define for_each_box(x, root, start) \
-	for (bool loop_ = ((x) = (start), true); loop_ && ((x)->iter = 0, true); ({ \
+#define for_each_box(x, root) \
+	for (bool loop_ = ((x) = (root), true); loop_ && ((x)->iter = 0, true); ({ \
 		while ((x)->num_children <= (x)->iter) { \
 			if ((x) == (root)) { \
 				(x) = NULL; \
@@ -597,13 +598,13 @@ spawn(char const *argv[], void(*fork_cb)(void *), void *arg)
 }
 
 static Box *
-find_box_by_window(Box *const root, Box *start, unsigned const offset, xcb_window_t const window)
+find_box_by_window(Box *const root, unsigned const offset, xcb_window_t const window)
 {
 	if (XCB_WINDOW_NONE == window)
 		return NULL;
 
 	Box *box;
-	for_each_box(box, root, start)
+	for_each_box(box, root)
 		if (window == *memberof(xcb_window_t const, box, offset))
 			break;
 	return box;
@@ -619,7 +620,7 @@ find_box_in_body_by_window(Body *const body, unsigned const offset, xcb_window_t
 		if (body_pos != head->body)
 			continue;
 
-		Box *const box = find_box_by_window(head, head, offset, window);
+		Box *const box = find_box_by_window(head, offset, window);
 		if (box)
 			return box;
 	}
@@ -1159,7 +1160,7 @@ find_box_by_name(Box **const optimum, char name[static membersizeof(Box, name)])
 		*optimum = NULL;
 
 		Box *box;
-		for_each_box(box, top, top) {
+		for_each_box(box, top) {
 			if (!memcmp(name, box->name, n)) {
 				complete &= membersizeof(Box, name) <= n || !box->name[n];
 				if (!*optimum || (*optimum)->focus_seq < box->focus_seq)
@@ -1304,7 +1305,7 @@ box_name(Box *const box)
 			letters[(unsigned char)parent->name[n]].focus_seq = UINT32_MAX;
 
 	Box *test;
-	for_each_box(test, root, root)
+	for_each_box(test, root)
 		if (test != box && NAME_MATCHES(test)) {
 			uint32_t *const p = &letters[(unsigned char)test->name[n]].focus_seq;
 			/* Use a non-zero focus_seq to avoid treating never
@@ -1404,7 +1405,7 @@ box_save_pointer(Box *const box, Hand const *const hand)
 	if (!reply)
 		return;
 
-	Box const *const base = find_box_by_window(root, root, offsetof(Box, frame), reply->child);
+	Box const *const base = find_box_by_window(root, offsetof(Box, frame), reply->child);
 	Box_pointers(box)[hand - hands] = base
 		? (BoxPointer){
 			.window = reply->child,
@@ -1980,7 +1981,7 @@ ewmh_client_list_update(Body const *const body)
 	}
 
 	Box *box;
-	for_each_box(box, root, root)
+	for_each_box(box, root)
 		if ((body - bodies) == box->body && !box_is_container(box)) {
 			windows[num_windows++] = box->window;
 			if (max_num_windows == num_windows) {
@@ -2103,7 +2104,7 @@ hand_find_recents(Hand const *const hand, Box *root, uint32_t const focus_seq, B
 		boxes[i] = (Box *)&EMPTY_BOX;
 
 	Box *box;
-	for_each_box(box, root, root)
+	for_each_box(box, root)
 		if (/* only client windows are interesting */
 		    !box_is_container(box) &&
 		    (NULL_HAND == box->focus_hand || (
@@ -2179,7 +2180,7 @@ hand_do_mode_changes(Hand *const hand)
 {
 #if 1
 	Box *box;
-	for_each_box(box, root, root) {
+	for_each_box(box, root) {
 		box->label_changed = true;
 		box->content_changed = true;
 	}
@@ -2657,9 +2658,15 @@ hand_focus_box_internal(Hand *const hand, Box *const box)
 	if (hand->input_focus)
 		box_save_pointer(hand->input_focus, hand);
 
-	if (hand->input_focus)
+	if (hand->input_focus) {
 		box_propagate_change(hand->input_focus)->label_changed = true;
-	else if (hand->focus)
+		/* Labels may get shifted upward between input_focus and focus
+		 * if label gets hidden (but previously was visible because it
+		 * had focus). */
+		if (hand->focus->hide_label)
+			for (Box *b = hand->focus; b != hand->focus; b = b->parent)
+				b->label_changed = true;
+	} else if (hand->focus)
 		box_propagate_change(hand->focus)->label_changed = true;
 
 	/* find most upper locked box */
@@ -2707,6 +2714,18 @@ hand_focus_box_internal(Hand *const hand, Box *const box)
 
 	hand->check_input = true;
 	hand_grab_keyboard(hand);
+
+	/* Shift labels downwards. */
+	if (hand->focus->hide_label) {
+		Box *box;
+		for_each_box(box, hand->focus)
+			if (box_is_container(box)) {
+				box->label_changed = true;
+				/* We walk every boxes so there will be no
+				 * gaps. */
+				box->parent->content_changed = true;
+			}
+	}
 
 	printf("focus=%.*s; input=%.*s\n",
 			(int)sizeof box->name, hand->focus ? hand->focus->name : NULL,
@@ -2858,7 +2877,7 @@ process_reply:
 	return (xcb_get_property_cookie_t){ 0 };
 
 send_request:
-	if (from_event && !(box.box = find_box_by_window(root, root, offsetof(Box, window), box.window)))
+	if (from_event && !(box.box = find_box_by_window(root, offsetof(Box, window), box.window)))
 		return (xcb_get_property_cookie_t){ 0 };
 
 	if (!cookie.sequence) {
@@ -2918,7 +2937,7 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 
 	if (0 < num_hands) {
 		Box *origin;
-		origin = find_box_by_window(root, root, offsetof(Box, leader), box->leader);
+		origin = find_box_by_window(root, offsetof(Box, leader), box->leader);
 
 		/* find the hand that could possibly create this window */
 		if (origin) {
@@ -3826,7 +3845,7 @@ handle_unmap_notify(xcb_unmap_notify_event_t const *const event)
 		return;
 
 	/* printf("unmap notify %x event=%x, from_configure=%d\n", event->window, event->event, event->from_configure); */
-	Box *const box = find_box_by_window(root, root, offsetof(Box, window), event->window);
+	Box *const box = find_box_by_window(root, offsetof(Box, window), event->window);
 	if (box)
 		box_delete(box);
 }
@@ -3835,7 +3854,7 @@ static void
 handle_map_request(xcb_map_request_event_t const *const event)
 {
 	/* printf("map request %x\n", event->window); */
-	Box *const box = find_box_by_window(root, root, offsetof(Box, window), event->window);
+	Box *const box = find_box_by_window(root, offsetof(Box, window), event->window);
 	if (!box)
 		box_window(event->parent, event->window);
 }
@@ -3860,7 +3879,7 @@ static void
 handle_configure_request(xcb_configure_request_event_t const *const event)
 {
 	Box *box;
-	if ((box = find_box_by_window(root, root, offsetof(Box, window), event->window))) {
+	if ((box = find_box_by_window(root, offsetof(Box, window), event->window))) {
 		/* GPLv3 Annex 1: DO NOT FUCKING TOUCH IT. PLEASE. */
 		DEBUG_CHECK(xcb_send_event, conn, false, box->window,
 				XCB_EVENT_MASK_STRUCTURE_NOTIFY,
@@ -3922,7 +3941,7 @@ static void
 box_close(Box *const root)
 {
 	Box *box;
-	for_each_box(box, root, root) {
+	for_each_box(box, root) {
 		if (box_is_container(box))
 			continue;
 
@@ -3940,14 +3959,14 @@ static void
 handle_client_message(xcb_client_message_event_t const *const event)
 {
 	if (ATOM(_NET_CLOSE_WINDOW) == event->type) {
-		Box *const box = find_box_by_window(root, root, offsetof(Box, window), event->window);
+		Box *const box = find_box_by_window(root, offsetof(Box, window), event->window);
 		if (box)
 			box_close(box);
 	} else if (ATOM(_NET_ACTIVE_WINDOW) == event->type) {
 		if (2 != event->data.data32[0])
 			return;
 
-		Box *const box = find_box_by_window(root, root, offsetof(Box, window), event->window);
+		Box *const box = find_box_by_window(root, offsetof(Box, window), event->window);
 		if (box) {
 			Hand *hand;
 			if (NULL_HAND == box->focus_hand) {
@@ -4166,7 +4185,7 @@ update_hands(void)
 
 	/* update focus history */
 	Box *box;
-	for_each_box(box, root, root) {
+	for_each_box(box, root) {
 		box->focus_hand = hand_map[box->focus_hand];
 
 		if (!box_is_container(box)) {
@@ -5248,7 +5267,7 @@ handle_input_enter(xcb_input_enter_event_t const *const event)
 
 	if (0 && XCB_MOD_MASK_4 == event->mods.base) {
 		Hand *const hand = find_hand_by_master_pointer(event->deviceid);
-		Box *const box = find_box_by_window(root, root, offsetof(Box, window), event->event);
+		Box *const box = find_box_by_window(root, offsetof(Box, window), event->event);
 		printf("mod enter\n");
 		hand_focus_box(hand, box);
 	} else {
@@ -5259,7 +5278,7 @@ handle_input_enter(xcb_input_enter_event_t const *const event)
 static void
 handle_shape_notify(xcb_shape_notify_event_t const *const event)
 {
-	Box *const box = find_box_by_window(root, root, offsetof(Box, window), event->affected_window);
+	Box *const box = find_box_by_window(root, offsetof(Box, window), event->affected_window);
 	if (!box)
 		return;
 
