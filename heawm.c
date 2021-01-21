@@ -1342,7 +1342,6 @@ compute_num_columns(xcb_rectangle_t const *const rect, uint16_t const num_tiles)
 		uint16_t last_cols = num_tiles - (rows - 1) * cols;
 		uint32_t perimeter =
 			((rect->width / cols) + (rect->height / rows)) * (rows - 1) * cols +
-			/* Note: This is not what really is on the screen. */
 			((rect->width / last_cols) + (rect->height / rows)) * last_cols * 1;
 		if (perimeter < minimal && minimal_row != rows) {
 			ret = cols;
@@ -1689,7 +1688,7 @@ box_update_layout(Box const *const box)
 		if (box_is_tiled(child)) {
 			uint16_t *num = !box->vertical ? &num_columns : &num_rows;
 			if ((!box->vertical ? !tile.x : !tile.y) && tiles < *num)
-				*num /= *num / tiles;
+				*num = tiles;
 
 			tile.width = box->rect.width / num_columns;
 			tile.height = box->rect.height / num_rows;
