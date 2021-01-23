@@ -301,9 +301,10 @@ struct Box {
 	     close_by_force: 1,
 	     flagged: 1,
 	     hide_label: 1,
-	     /** show only when has focus; hide otherwise */
+	     /** Show only when has focus; hide otherwise. */
 	     concealed: 1,
 	     user_concealed: 1,
+	     saved_concealed: 1,
 	     /** fix focus position on screen by always swapping newly
 	       focused window with previously focused window */
 	     focus_lock: 1,
@@ -360,6 +361,7 @@ enum HandMode {
 	HAND_MODE_DEFAULT,
 	HAND_MODE_MOVE,
 	HAND_MODE_NAME,
+	HAND_MODE_OPEN,
 };
 
 typedef struct {
@@ -1583,8 +1585,7 @@ box_label_is_visible(Box const *const box)
 				return false;
 			break;
 
-		case HAND_MODE_NAME:
-		case HAND_MODE_MOVE:
+		default:
 			return true;
 		}
 	}
@@ -2208,6 +2209,23 @@ hand_input_reset(Hand *const hand)
 }
 
 static void
+box_open(Box *const box, bool open) {
+	box_propagate_change(box);
+
+	Box *b;
+	for_each_box(b, box) {
+		b->layout_changed = true;
+		b->content_changed = true;
+		if (open) {
+			b->saved_concealed = b->concealed;
+			b->concealed = false;
+		} else {
+			b->concealed = b->saved_concealed;
+		}
+	}
+}
+
+static void
 hand_leave_mode(Hand *const hand)
 {
 	hand_do_mode_changes(hand);
@@ -2216,6 +2234,10 @@ hand_leave_mode(Hand *const hand)
 	switch (hand->mode) {
 	case HAND_MODE_MOVE:
 		hand_focus_box(hand, hand->mode_box);
+		break;
+
+	case HAND_MODE_OPEN:
+		box_open(hand->mode_box, false);
 		break;
 
 	default:
@@ -4331,13 +4353,14 @@ hand_get_latest_input(Hand const *const hand)
 	return ret;
 }
 
-static void
+static bool
 hand_input_try_jump(Hand *const hand)
 {
 	Box *box = hand->focus
 		? (box_is_container(hand->focus) ? hand->focus : hand->focus->parent)
 		: NULL;
 	bool const complete = find_box_by_name(&box, hand->user_input);
+	bool ret = false;
 
 	assert(box != root);
 
@@ -4367,10 +4390,13 @@ hand_input_try_jump(Hand *const hand)
 
 	printf("jump %.*s\n", (int)sizeof box->name, box->name);
 	hand_focus_box(hand, box);
+	ret = true;
 
 reset_input:
 	if (complete)
 		hand_input_reset(hand);
+
+	return ret;
 }
 
 static bool
@@ -4390,6 +4416,15 @@ hand_handle_input(Hand *const hand, xcb_keysym_t const sym)
 	return true;
 
 #undef INPUT_BETWEEN
+}
+
+static void
+hand_update_mode(Hand *const hand)
+{
+	if (HAND_MODE_DEFAULT != hand->mode) {
+		hand_input_reset(hand);
+		hand_do_mode_changes(hand);
+	}
 }
 
 static bool
@@ -4489,6 +4524,31 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 
 		hand->want_focus = true;
 		SPAWN(config.terminal);
+		break;
+
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B Mod-(
+	 * Open up all boxes.
+	 */
+	case XKB_KEY_parenleft:
+	{
+		if (!hand->focus)
+			break;
+
+		hand->mode = HAND_MODE_OPEN;
+		hand->mode_box = hand->focus;
+		if (!box_is_container(hand->mode_box)) {
+			while ((!hand->mode_box->concealed ||
+			        1 == hand->mode_box->parent->num_children) &&
+			       !box_is_floating(hand->mode_box->parent))
+				hand->mode_box = hand->mode_box->parent;
+			hand->mode_box = hand->mode_box->parent;
+		}
+
+		box_open(hand->mode_box, true);
+		hand_update_mode(hand);
+	}
 		break;
 
 	default:
@@ -4645,6 +4705,33 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 		unreachable;
 		return;
 
+	case HAND_MODE_OPEN:
+		switch (KEY_MOD_MASK & event->mods.base) {
+		case 0:
+		case XCB_MOD_MASK_4:
+			if (hand_handle_input(hand, sym)) {
+				if (hand_input_try_jump(hand))
+					break;
+			} else if (XKB_KEY_parenleft == sym) {
+				Box *const parent = hand->mode_box->parent;
+				if (!parent)
+					return;
+
+				parent->layout_changed = true;
+				for (uint16_t i = 0; i < parent->num_children; ++i) {
+					Box *const child = parent->children[i];
+					if (hand->mode_box != child)
+						box_open(child, true);
+				}
+
+				hand->mode_box = parent;
+			}
+			return;
+		default:
+			return;
+		}
+		break;
+
 	case HAND_MODE_MOVE:
 		switch (KEY_MOD_MASK & event->mods.base) {
 		case XCB_MOD_MASK_4:
@@ -4757,6 +4844,9 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 		}
 		box_propagate_change(hand->mode_box)->label_changed = true;
 		return;
+
+	default:
+		abort();
 	}
 
 	hand_leave_mode(hand);
@@ -5095,10 +5185,7 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 		return true;
 	}
 
-	if (HAND_MODE_DEFAULT != hand->mode) {
-		hand_input_reset(hand);
-		hand_do_mode_changes(hand);
-	}
+	hand_update_mode(hand);
 
 	return false;
 }
