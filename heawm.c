@@ -462,8 +462,9 @@ typedef struct {
 #define label_stroke_rgb 0, 0, 0
 #define label_color_rgb 1, 1, 0
 
-static uint16_t const WINDOW_GAP = 1;
+static uint16_t const MONITOR_GAP = 0;
 static uint16_t const CONTAINER_GAP = 4;
+static uint16_t const WINDOW_GAP = 1;
 
 static char const *label_font = "monospace";
 static Point label_rect = { .x = 30, .y = 60 }; /** in pts */
@@ -1630,12 +1631,10 @@ box_update_label(Box *const box)
 		pt.y -= font_size;
 		for (Box const *b = box;
 		     !box_is_floating(b) &&
-		     /* at the top of the other; maybe we
-		      * should also check if labels would
-		      * really obscure each other */
-		     b->parent->rect.y == b->rect.y;
+		     /* Labels would really obscure each other */
+		     b->rect.y < b->parent->rect.y + font_size;
 		     b = b->parent)
-			pt.y += box_label_is_visible(b->parent) ? font_size : 0;
+			pt.y += (box_label_is_visible(b->parent) ? font_size : 0) - (b->rect.y - b->parent->rect.y);
 	}
 	label_set_position(label, pt.x, pt.y);
 	label->type = LABEL_BOX;
@@ -1699,6 +1698,8 @@ box_update_layout(Box const *const box)
 		num_columns = (tiles + num_rows - 1) / num_rows;
 	}
 
+	bool const is_monitor = box_is_monitor(box);
+
 	for (uint16_t i = 0; i < box->num_children; ++i) {
 		Box *const child = box->children[i];
 
@@ -1728,14 +1729,14 @@ box_update_layout(Box const *const box)
 			gap.bottom = gap.right;
 
 			if (!tile.x)
-				gap.left = 0;
+				gap.left = is_monitor ? MONITOR_GAP : 0;
 			if (box->rect.width < tile.x + 2 * tile.width)
-				gap.right = 0;
+				gap.right = is_monitor ? MONITOR_GAP : 0;
 
 			if (!tile.y)
-				gap.top = 0;
+				gap.top = is_monitor ? MONITOR_GAP : 0;
 			if (box->rect.height < tile.y + 2 * tile.height)
-				gap.bottom = 0;
+				gap.bottom = is_monitor ? MONITOR_GAP : 0;
 
 #define CORRECT_PIXEL(width, num_columns) do { \
 uint16_t error = box->rect.width % num_columns; \
@@ -1756,7 +1757,7 @@ tile.width += (tile.x / error) != ((tile.x + tile.width + 1 /* Corrected pixel. 
 			 *   mod_{x,y} just because.
 			 */
 #define ADJUST_SIZE(num_rows, x, width) ( \
-1 == tiles || box->rect.width < tile.x + 2 * tile.width \
+1 == tiles || box->rect.width + 1 /* Pixel correction overrun. */ < tile.x + 2 * tile.width \
 ? box->rect.width - tile.x \
 : tile.width + (1 == num_rows && 1 < tiles && 0 < child->mod_##x \
 ? child->mod_##x / 2 - (tile.width + child->mod_##x / 2) % child->mod_##x \
