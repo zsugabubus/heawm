@@ -4561,13 +4561,13 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 
 
 static void
-box_explode(Box *const box, bool const vertical)
+box_explode(Box *const box, bool const vertical, bool const inner)
 {
 	if (box_is_monitor(box))
 		/* TODO: Possibly we should do something. */
 		return;
 
-	if (box_is_monitor(box->parent)) {
+	if (box_is_monitor(box->parent) || inner) {
 		Box *const container = box_new();
 		memcpy(container->name, box->name, sizeof container->name);
 		container->hide_label = box->hide_label;
@@ -4579,9 +4579,6 @@ box_explode(Box *const box, bool const vertical)
 		box->concealed = false;
 		box->user_concealed = false;
 		box_reparent(container, 0, box);
-
-		/* It is totally unnecessary to go through the complete
-		 * exploding process since we have a singe children. */
 		return;
 	}
 
@@ -4793,19 +4790,35 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 				break;
 
 			case XKB_KEY_h:
-				box_explode(hand->focus, false);
+				box_explode(hand->focus, false, false);
 				goto insert;
 
 			case XKB_KEY_j:
-				box_explode(hand->focus, true);
+				box_explode(hand->focus, true, false);
 				goto append;
 
 			case XKB_KEY_k:
-				box_explode(hand->focus, true);
+				box_explode(hand->focus, true, false);
 				goto insert;
 
 			case XKB_KEY_l:
-				box_explode(hand->focus, false);
+				box_explode(hand->focus, false, false);
+				goto append;
+
+			case XKB_KEY_H:
+				box_explode(hand->focus, false, true);
+				goto insert;
+
+			case XKB_KEY_J:
+				box_explode(hand->focus, true, true);
+				goto append;
+
+			case XKB_KEY_K:
+				box_explode(hand->focus, true, true);
+				goto insert;
+
+			case XKB_KEY_L:
+				box_explode(hand->focus, false, true);
 				goto append;
 
 #if 0
@@ -4983,6 +4996,9 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 	 * .TP
 	 * .BR h ", " j ", " k ", " l
 	 * Place box visually at the given direction.
+	 * .TP
+	 * .BR H ", " J ", " K ", " L
+	 * Make container from box before move.
 	 * .TP
 	 * .BR s wap
 	 * Swap box with focused one.
