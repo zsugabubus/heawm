@@ -4878,7 +4878,7 @@ box_maximize(Box *const box, bool const recursive)
 
 	assert(box_is_container(box));
 
-	if (box_is_floating(box) || box == root)
+	if (box == root)
 		return;
 
 	bool conceal = false;
