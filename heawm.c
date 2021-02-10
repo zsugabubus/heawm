@@ -4739,6 +4739,14 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 		case XCB_MOD_MASK_4 | XCB_MOD_MASK_CONTROL:
 		case XCB_MOD_MASK_4 | XCB_MOD_MASK_1:
 			switch (sym) {
+			case XKB_KEY_t: /* Same as MOVE introducer. */
+			{
+				Box *box = hand->mode_box->parent;
+				if (box)
+					hand->mode_box = box;
+			}
+				break;
+
 			case XKB_KEY_k:
 				hand_focus_parent(hand);
 				break;
