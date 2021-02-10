@@ -365,11 +365,11 @@ enum HandMode {
 };
 
 typedef struct {
-	/* keyboard and pointer are always in pair */
-	xcb_input_device_id_t master_pointer; /** master pointer device */
-	xcb_input_device_id_t master_keyboard; /** master key device */
+	/* Keyboard and pointer are always in pair */
+	xcb_input_device_id_t master_pointer; /** Master pointer device */
+	xcb_input_device_id_t master_keyboard; /** Master key device */
 
-	/** focus freshly mapped related windows */
+	/** Focus freshly mapped related windows */
 	bool want_focus: 1,
 	     check_input: 1,
 	     barricade: 1;
@@ -379,19 +379,18 @@ typedef struct {
 	 *1 BOX 3
 	 *   2
 	 */
-	xcb_xfixes_barrier_t barriers[4]; /** pointer barrier (four sides) */
+	xcb_xfixes_barrier_t barriers[4]; /** Pointer barrier (around) */
 
 	char user_input[membersizeof(Box, name)];
 
-	uint32_t num_labels; /** number of labels owned by this hand */
-
 	enum HandMode mode;
 
-	/* some |mode| related state */
+	/* Some |mode| related state */
 	Box *mode_box;
 	unsigned mode_dir;
 
-	/** box that last time received keyboard input (only non-container);
+	/**
+	 * Box that last time received keyboard input (only non-container);
 	 * we also store the box that was focused before last time since if
 	 * we start typing into the currently focused window that is not
 	 * really interesting to remember for */
@@ -469,8 +468,8 @@ static uint16_t const CONTAINER_GAP = 4;
 static uint16_t const WINDOW_GAP = 1;
 
 static char const *label_font = "monospace";
-static Point label_rect = { .x = 30, .y = 60 }; /** in pts */
-static int label_stroke = /* 4 */ 2 /* .5 */;
+static Point label_rect = { .x = 30, .y = 60 }; /** In pts */
+static int label_stroke = 2;
 static int label_font_size = 17;
 
 typedef struct {
@@ -479,6 +478,7 @@ typedef struct {
 } Rule;
 
 static Rule const RULES[] = {
+	/* FIXME: Ehhm... Probably class<->instance. */
 	{ "b", "Navigator\0firefox", },
 	{ "t", "telegram-desktop\0TelegramDesktop", },
 	{ "v", "gl\0mpv", },
@@ -539,6 +539,18 @@ static char **argv;
 
 #define heawm_file(name) heawm_file_internal((char[PATH_MAX]){ 0 }, PATH_MAX, name)
 
+enum Orientation {
+	LEFT = -1,
+	TOP = -1,
+	CENTER = 0,
+	RIGHT = 1,
+	BOTTOM = 1,
+};
+
+#define SPAWN(...) spawn((char const *[]){ __VA_ARGS__, NULL }, NULL, NULL)
+#define HOOK_SPAWN(hook, arg, ...) spawn((char const *[]){ __VA_ARGS__, NULL }, (void(*)(void *))hook, arg)
+#define BODY_SPAWN(body, ...) spawn((char const *[]){ __VA_ARGS__, NULL }, (void(*)(void *))body_set_display, (body))
+
 static char const *
 heawm_file_internal(char *str, size_t size, char *name)
 {
@@ -547,9 +559,6 @@ heawm_file_internal(char *str, size_t size, char *name)
 	strncat(str, name, size);
 	return str;
 }
-
-#define SPAWN(...) spawn((char const *[]){ __VA_ARGS__, NULL }, NULL, NULL)
-#define BODY_SPAWN(body, ...) spawn((char const *[]){ __VA_ARGS__, NULL }, (void(*)(void *))body_set_display, (body))
 
 static pid_t
 spawn(char const *argv[], void(*fork_cb)(void *), void *arg)
@@ -936,14 +945,6 @@ label_set_position(Label *const label, int16_t const x, int16_t const y)
 	label->y = y;
 }
 
-enum Orientation {
-	LEFT = -1,
-	TOP = -1,
-	CENTER = 0,
-	RIGHT = 1,
-	BOTTOM = 1,
-};
-
 static Point
 box_compute_position(Box const *const box, enum Orientation const ox, enum Orientation const oy, bool const outside)
 {
@@ -1239,7 +1240,7 @@ box_name(Box *const box)
 	bool const is_container = box_is_container(box);
 	struct {
 		uint32_t focus_seq;
-	} letters[128] = { { UINT32_MAX }, /* 0, 0, 0, ... */ };
+	} letters[(unsigned)EXTREMAL_NAME_CHAR + 1] = { { UINT32_MAX }, /* 0, 0, 0, ... */ };
 
 	uint8_t n = strnlen(box->name, sizeof box->name);
 	n -= !!n;
@@ -2186,8 +2187,6 @@ hand_do_mode_changes(Hand *const hand)
 		box->content_changed = true;
 	}
 
-	hand->num_labels = 0;
-
 	uint64_t const hand_mask = ~(1 << (hand - hands));
 	for_each_body {
 		for (uint32_t j = body->num_labels_used; 0 < j;) {
@@ -2348,7 +2347,7 @@ box_vacuum(Box *const box)
 	    box_is_monitor(box))
 		goto out;
 
-	/* substitute box with its only children */
+	/* Substitute box with its only children. */
 	if (1 == box->num_children &&
 	    (box_is_container(box->children[0]) ||
 	     !box_is_super_container(box->parent)))
@@ -2372,7 +2371,7 @@ box_vacuum(Box *const box)
 	return;
 
 out:
-	/* called after box lost a child so it changed */
+	/* Called after box lost a child so it changed. */
 	box_propagate_change(box)->layout_changed = true;
 }
 
@@ -3050,24 +3049,6 @@ fail:
 	return NULL;
 }
 
-#if 0
-static void
-generate_coredump(void)
-{
-	if (!fork())
-		abort();
-}
-
-static void
-handle_signal_segfault(int signum)
-{
-	(void)signum;
-
-	generate_coredump();
-	restart();
-}
-#endif
-
 static void
 setup_signals(void)
 {
@@ -3093,11 +3074,6 @@ setup_signals(void)
 	sigaction(SIGINT, &sa, NULL);
 	sigaction(SIGTERM, &sa, NULL);
 	sigaction(SIGQUIT, &sa, NULL);
-
-#if 0
-	sa.sa_handler = handle_signal_segfault;
-	sigaction(SIGSEGV, &sa, NULL);
-#endif
 
 	/* automatically clean up children */
 	sa.sa_handler = SIG_DFL;
@@ -4067,7 +4043,7 @@ update_hands(void)
 		 * heawm.hand.color: 0xffff00
 		 * .EE
 		 */
-		hand->color = 0xfe0202, 0xffaf5f;
+		hand->color = 0xfe0202 /*, 0xffaf5f*/;
 		for (char *value;
 		     load_resource(&value, "heawm.hand.%.*s.color", master_name_len, master_name) ||
 		     load_resource(&value, "heawm.hand.%u.color", new_num_hands) ||
@@ -4557,8 +4533,6 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 
 	return false;
 }
-
-
 
 static void
 box_explode(Box *const box, bool const vertical, bool const inner)
