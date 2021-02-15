@@ -172,6 +172,8 @@
 
 #define MONITOR_CLASS "heawm-monitor"
 
+enum { XCB_MOD_MASK_NUM_LOCK = XCB_MOD_MASK_2, };
+
 # define NORMAL_GRAB_MASKS { \
 	0, \
 	XCB_MOD_MASK_SHIFT, \
@@ -183,6 +185,12 @@
 	XCB_MOD_MASK_LOCK | XCB_MOD_MASK_CONTROL, \
 	XCB_MOD_MASK_LOCK | XCB_MOD_MASK_1, \
 }
+
+#define EFFECTIVE_MASK(mask) \
+	                                            (mask), \
+	XCB_MOD_MASK_LOCK |                         (mask), \
+	                    XCB_MOD_MASK_NUM_LOCK | (mask), \
+	XCB_MOD_MASK_LOCK | XCB_MOD_MASK_NUM_LOCK | (mask)
 
 #define for_each_template_(elem_type, list, index_type, name, extra) \
 	for (index_type name##_index = 0; (extra) || name##_index < num_##list; ++name##_index) \
@@ -2609,17 +2617,10 @@ hand_grab_keyboard(Hand const *const hand)
 					XCB_INPUT_GRAB_OWNER_NO_OWNER,
 					XCB_INPUT_XI_EVENT_MASK_KEY_PRESS,
 					{
-						XCB_MOD_MASK_4                     | 0,
-						XCB_MOD_MASK_4                     | XCB_MOD_MASK_SHIFT,
-						XCB_MOD_MASK_4                     | XCB_MOD_MASK_CONTROL,
-						XCB_MOD_MASK_4                     | XCB_MOD_MASK_1,
-
-						/* Uses effective modifiers so we have to specify them
-						 * with their CapsLock variants too. */
-						XCB_MOD_MASK_4 | XCB_MOD_MASK_LOCK | 0,
-						XCB_MOD_MASK_4 | XCB_MOD_MASK_LOCK | XCB_MOD_MASK_SHIFT,
-						XCB_MOD_MASK_4 | XCB_MOD_MASK_LOCK | XCB_MOD_MASK_CONTROL,
-						XCB_MOD_MASK_4 | XCB_MOD_MASK_LOCK | XCB_MOD_MASK_1,
+						EFFECTIVE_MASK(XCB_MOD_MASK_4 | 0),
+						EFFECTIVE_MASK(XCB_MOD_MASK_4 | XCB_MOD_MASK_SHIFT),
+						EFFECTIVE_MASK(XCB_MOD_MASK_4 | XCB_MOD_MASK_CONTROL),
+						EFFECTIVE_MASK(XCB_MOD_MASK_4 | XCB_MOD_MASK_1),
 					});
 
 #if 0
@@ -4286,14 +4287,14 @@ find_hand_by_master_pointer(xcb_input_device_id_t const master_pointer)
 }
 
 /** Modifiers we are interested in. */
-#define KEY_MOD_MASK \
+#define KEY_MOD_MASK ( \
 (	XCB_MOD_MASK_CONTROL \
 |	XCB_MOD_MASK_1 \
 |	XCB_MOD_MASK_2 \
 |	XCB_MOD_MASK_3 \
 |	XCB_MOD_MASK_4 \
 |	XCB_MOD_MASK_5 \
-)
+) & ~XCB_MOD_MASK_NUM_LOCK)
 
 static void
 handle_input_key_release(xcb_input_key_press_event_t const *const event)
@@ -5572,11 +5573,9 @@ run(void)
 		         * should be level-triggered so not sure why it
 		         * is needed... */
 		        !(event = xcb_poll_for_event(conn))))
-		{
 			if (poll(&pfd, 1, -1) <= 0 ||
 			    (pfd.revents & ~POLLIN))
 				return EXIT_FAILURE;
-		}
 
 		/* printf("event = (%d)%s\n", event->response_type, xcb_event_get_label(event->response_type)); */
 
