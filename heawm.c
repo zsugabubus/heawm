@@ -4896,10 +4896,26 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 			*c = box_is_container(hand->mode_box) ? toupper(*c) : tolower(*c);
 			box_name(hand->mode_box);
 			break;
-		} else if (XKB_KEY_space == sym && !*hand->user_input) {
-			hand->mode_box->hide_label ^= 1;
-			box_propagate_change(hand->mode_box)->label_changed = true;
-			break;
+		/* Allow commands till we have empty input. */
+		} else if (!*hand->user_input) {
+			if (XKB_KEY_space == sym) {
+				bool hide_label = (hand->mode_box->hide_label ^= true);
+				/* Propagate hide_label when only children. */
+				for (Box *b = hand->mode_box; (b = b->parent) && 1 == b->num_children;)
+					b->hide_label = hide_label;
+
+				box_propagate_change(hand->mode_box)->label_changed = true;
+				break;
+			} else if (XKB_KEY_asterisk == sym) {
+				bool const hide_label = !hand->mode_box->hide_label;
+				Box *b;
+				for_each_box(b, hand->mode_box) {
+					b->hide_label = hide_label;
+					b->content_changed = true;
+					b->label_changed = true;
+				}
+				break;
+			}
 		}
 		box_propagate_change(hand->mode_box)->label_changed = true;
 		return;
@@ -5202,8 +5218,20 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .BR Mod-Ctrl-n "ame {" a-zA-Z "}... Return"
-	 * Name focused box.
+	 * .BR Mod-Ctrl-n "ame {" A-Za-z "}... Return"
+	 * Name focused box. When left empty, an automatic name will be assigned
+	 * for the box.
+	 *
+	 * Some special keys also recogzined, namely:
+	 * .RS
+	 * .TP
+	 * .BR space
+	 * Toggle visibility of name label.
+	 * .TP
+	 * .BR *
+	 * Recursive
+	 * .BR space .
+	 * .RE
 	 */
 	case XKB_KEY_n:
 		if (repeating)
