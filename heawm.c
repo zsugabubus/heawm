@@ -4727,12 +4727,21 @@ box_clone(Box const *const box)
 }
 #endif
 
+static Box *
+box_get_parent_checked(Box const *const box)
+{
+	if (box->parent &&
+	    /* Is addressable by user. */
+	    *box->parent->name)
+		return box->parent;
+
+	return NULL;
+}
+
 static void
 hand_focus_parent(Hand *const hand)
 {
-	if (hand->focus && hand->focus->parent &&
-	    /* Addressable? */
-	    *hand->focus->parent->name)
+	if (hand->focus && box_get_parent_checked(hand->focus))
 		hand_focus_box(hand, hand->focus->parent);
 }
 
@@ -4794,7 +4803,7 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 			switch (sym) {
 			case XKB_KEY_t: /* Same as MOVE introducer. */
 			{
-				Box *box = hand->mode_box->parent;
+				Box *box = box_get_parent_checked(hand->mode_box);
 				if (box)
 					hand->mode_box = box;
 			}
