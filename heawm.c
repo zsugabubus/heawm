@@ -4610,6 +4610,20 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 	}
 		break;
 
+	/*MAN(Keybindings)
+	 * .TP
+	 * .BR Mod-Esc
+	 * Escape from wherever you are.
+	 */
+	case XKB_KEY_Escape:
+	{
+		if (!hand->input_focus)
+			break;
+
+		hand_focus_box(hand, hand->input_focus);
+	}
+		break;
+
 	default:
 		return true;
 	}
