@@ -501,14 +501,8 @@ static Rule const RULES[] = {
 
 static char const *const ATOM_NAMES[] =
 {
+
 	"_HEAWM_NAME",
-	"UTF8_STRING",
-	"WM_CLIENT_LEADER",
-	"WM_DELETE_WINDOW",
-	"WM_NORMAL_HINTS",
-	"WM_PROTOCOLS",
-	"WM_SIZE_HINTS",
-	"WM_STATE",
 	"_NET_ACTIVE_WINDOW",
 	"_NET_CLIENT_LIST",
 	"_NET_CLOSE_WINDOW",
@@ -519,6 +513,14 @@ static char const *const ATOM_NAMES[] =
 	"_NET_WM_STATE_FOCUSED",
 	"_NET_WM_STATE_HIDDEN",
 	"_NET_WM_TRANSIENT_FOR",
+	"WM_CLIENT_LEADER",
+	"WM_DELETE_WINDOW",
+	"WM_NORMAL_HINTS",
+	"WM_PROTOCOLS",
+	"WM_SIZE_HINTS",
+	"WM_STATE",
+	"UTF8_STRING",
+
 };
 static xcb_atom_t atoms[ARRAY_SIZE(ATOM_NAMES)]; /** resolved ATOM_NAMES */
 
@@ -1362,7 +1364,7 @@ box_is_floating(Box const *const box)
 static uint16_t
 compute_num_columns(xcb_rectangle_t const *const rect, uint16_t const num_tiles)
 {
-	uint16_t ret = 1; /* Return non-zero. */
+	uint16_t ret = 1; /* Always return non-zero. */
 	uint16_t minimal_row = 0;
 	uint32_t minimal = UINT32_MAX;
 	for (uint16_t cols = 1; cols <= num_tiles; ++cols) {
@@ -1377,7 +1379,6 @@ compute_num_columns(xcb_rectangle_t const *const rect, uint16_t const num_tiles)
 			minimal = perimeter;
 		}
 	}
-#undef R
 	return ret;
 }
 
@@ -4490,7 +4491,7 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 {
 	/*MAN(Keybindings)
 	 * .TP
-	 * .BR Mod- { a-zA-Z }...
+	 * .BR Mod- { A-Za-z }...
 	 * Focus box. Run hook
 	 * .BR autostart " \fIname\fR"
 	 * if there is no such box.
@@ -5054,7 +5055,7 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .BR Mod-Ctrl-t "ake [ " Mod- { a-zA-Z "}... ]... \fIhow\fR"
+	 * .BR Mod-Ctrl-t "ake [ " Mod- { A-Za-z "}... ]... \fIhow\fR"
 	 * Take box to somewhere else.
 	 * .I how
 	 * can be:
@@ -5277,7 +5278,7 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .BR Mod-Ctrl-z enter
+	 * .BR Mod-Ctrl-z z
 	 * Center pointer inside box.
 	 */
 	case XKB_KEY_z:
