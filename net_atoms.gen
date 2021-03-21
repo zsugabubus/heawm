@@ -1,0 +1,3 @@
+#!./gen
+exec >net_atoms.in
+for_each_atom 'ATOM(\1),' | grep _NET

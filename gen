@@ -1,0 +1,6 @@
+#!/bin/sh
+source=${2?Missing source file}
+for_each_atom() {
+	sed -n '/ATOM_NAMES/,$ {/^\s*"/{s/.*"\([^"]*\)".*/'"$*"'/;p};/^}/q}' "$source"
+}
+. $1
