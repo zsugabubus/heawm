@@ -591,7 +591,7 @@ spawn(char const *argv[], void(*fork_cb)(void *), void *arg)
 		 * them before exec(). */
 		for (int sig = 1; sig < SIGRTMAX; ++sig)
 			sigaction(sig, &(struct sigaction const){
-					 .sa_handler = SIG_DFL
+					.sa_handler = SIG_DFL
 				}, NULL);
 
 		sigemptyset(&sigmask);
@@ -5316,8 +5316,10 @@ handle_input_key_press(xcb_input_key_press_event_t const *const event)
 	assert(hand == hands);
 	if (!device->keymap)
 		device->keymap = xkb_x11_keymap_new_from_device(xkb_context, conn, device->id, XKB_KEYMAP_COMPILE_NO_FLAGS);
-	if (!device->keymap)
+	if (!device->keymap) {
+		fprintf(stderr, "Could not load keymap\n");
 		goto out;
+	}
 
 	xkb_keysym_t const *syms;
 	int const n = xkb_keymap_key_get_syms_by_level(device->keymap, event->detail, 0,
@@ -5538,9 +5540,12 @@ handle_randr_event(xcb_generic_event_t const *const event)
 static void
 handle_keyboard_mapping(uint8_t const device_id)
 {
-	Device *device = devices;
-	while (device->id != device_id)
-		++device;
+	Device *device = get_device_by_id(device_id);
+	if (!device) {
+		/* It is currently unclear under what circumstances can it occur,
+		 * but it occurs. */
+		return;
+	}
 
 	xkb_keymap_unref(device->keymap), device->keymap = NULL;
 }
@@ -5557,7 +5562,7 @@ handle_xkb_new_keyboard_notify(xcb_xkb_new_keyboard_notify_event_t *const event)
 		? event->oldDeviceID
 		: event->deviceID;
 
-	 handle_keyboard_mapping(deviceid);
+	handle_keyboard_mapping(deviceid);
 }
 
 static void
