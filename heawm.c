@@ -90,14 +90,23 @@
 # define unreachable abort()
 #endif
 
-# define CHECK(request, ...) check_cookie(request##_checked(__VA_ARGS__), STRINGIFY(__LINE__) ": " #request)
-
-#ifndef HEAWM_NDEBUG
 # define STRINGIFY_(x) #x
 # define STRINGIFY(x) STRINGIFY_(x)
-# define DEBUG_CHECK(request, ...) check_cookie(request##_checked(__VA_ARGS__), STRINGIFY(__LINE__) ": " #request)
+
+# define CHECK(request, ...) \
+	check_cookie(request##_checked(__VA_ARGS__), STRINGIFY(__LINE__) ": " #request)
+
+#ifndef HEAWM_NDEBUG
+# define DEBUG_CHECK(request, ...) \
+	check_cookie(request##_checked(__VA_ARGS__), STRINGIFY(__LINE__) ": " #request)
 #else
-# define DEBUG_CHECK(request, ...) (request(__VA_ARGS__), true)
+# define printf(...) (0)
+# define DEBUG_CHECK(request, ...) do { \
+	_Pragma("GCC diagnostic push"); \
+	_Pragma("GCC diagnostic ignored \"-Wunused-value\""); \
+	((void)request(__VA_ARGS__), true); \
+	_Pragma("GCC diagnostic pop"); \
+} while (0)
 #endif
 
 #define GET_REPLY(x, request, ...) request##_reply_t *const x = \
@@ -219,6 +228,7 @@ static struct {
 	char const *terminal;
 	char const *shell;
 	char heawm_home[PATH_MAX];
+	size_t heawm_home_size;
 } config;
 
 typedef struct {
@@ -543,8 +553,6 @@ static char **argv;
 #define print_strerror(what) \
 	fprintf(stderr, "%s: %s: %s\n", __func__, what, strerror(errno));
 
-#define heawm_file(name) heawm_file_internal((char[PATH_MAX]){ 0 }, PATH_MAX, name)
-
 enum Orientation {
 	LEFT = -1,
 	TOP = -1,
@@ -558,12 +566,15 @@ enum Orientation {
 #define BODY_SPAWN(body, ...) spawn((char const *[]){ __VA_ARGS__, NULL }, (void(*)(void *))body_set_display, (body))
 
 static char const *
-heawm_file_internal(char *str, size_t size, char *name)
+resolve_path(char const *name)
 {
-	strncpy(str, config.heawm_home, size);
-	strncat(str, "/", size);
-	strncat(str, name, size);
-	return str;
+	size_t name_size = strlen(name) + 1 /* NUL */;
+	if (sizeof config.heawm_home < config.heawm_home_size + name_size)
+		abort();
+
+	strcpy(config.heawm_home + config.heawm_home_size, name);
+
+	return config.heawm_home;
 }
 
 static pid_t
@@ -876,6 +887,15 @@ label_repaint(Label const *const label, bool const shape)
 	cairo_destroy(cr);
 }
 
+static void *
+check_alloc(void *p) {
+	if (p)
+		return p;
+
+	fprintf(stderr, "Failed to allocate memory\n");
+	abort();
+}
+
 static Label *
 label_new_for(Box *const box)
 {
@@ -883,8 +903,8 @@ label_new_for(Box *const box)
 	Body *const body = &bodies[box->body];
 
 	if (body->num_labels_used == body->num_labels) {
-		size_t const new_size = (body->num_labels * 8 / 5 /* golden ratio */) + 1;
-		body->labels = realloc(body->labels, new_size * sizeof *label);
+		size_t const new_size = (body->num_labels * 8 / 5 /* Golden ratio. */) + 1;
+		body->labels = check_alloc(realloc(body->labels, new_size * sizeof *label));
 		body->num_labels = new_size;
 
 		memset(&body->labels[body->num_labels_used], 0,
@@ -1129,7 +1149,7 @@ handle_signal_quit(int signum)
 	 * .B exit
 	 * Run before exiting.
 	 */
-	SPAWN(heawm_file("exit"));
+	SPAWN(resolve_path("exit"));
 
 	exit(EXIT_SUCCESS);
 }
@@ -1562,14 +1582,6 @@ label_assign_all_hands(Label *const label)
 	label->hands |= -1;
 }
 
-#if 0
-static void
-label_assign_hand(Label *const label, Hand const *const hand)
-{
-	label->hands |= 1 << (hand - hands);
-}
-#endif
-
 static void
 box_delete_labels(Box const *const box)
 {
@@ -1769,11 +1781,11 @@ tile.width += (tile.x / error) != ((tile.x + tile.width + 1 /* Corrected pixel. 
 			 *   mod_{x,y} just because.
 			 */
 #define ADJUST_SIZE(num_rows, x, width) ( \
-1 == tiles || box->rect.width + 1 /* Pixel correction overrun. */ < tile.x + 2 * tile.width \
-? box->rect.width - tile.x \
-: tile.width + (1 == num_rows && 1 < tiles && 0 < child->mod_##x \
-? child->mod_##x / 2 - (tile.width + child->mod_##x / 2) % child->mod_##x \
-: 0))
+	1 == tiles || box->rect.width + 1 /* Pixel correction overrun. */ < tile.x + 2 * tile.width \
+	? box->rect.width - tile.x \
+	: tile.width + (1 == num_rows && 1 < tiles && 0 < child->mod_##x \
+	? child->mod_##x / 2 - (tile.width + child->mod_##x / 2) % child->mod_##x \
+	: 0))
 			/* TODO: Distribute error. */
 			tile.width = ADJUST_SIZE(num_rows, x, width);
 			tile.height = ADJUST_SIZE(num_columns, y, height);
@@ -1803,7 +1815,7 @@ tile.width += (tile.x / error) != ((tile.x + tile.width + 1 /* Corrected pixel. 
 static void
 box_update_net(Box const *const box)
 {
-	if (box->window == XCB_WINDOW_NONE)
+	if (XCB_WINDOW_NONE == box->window)
 		return;
 
 	xcb_atom_t list[1];
@@ -1824,11 +1836,6 @@ static void
 box_update(Box *const box)
 {
 	static int depth = 0;
-
-#define HEAWM_DEBUG_UPDATE
-#ifndef HEAWM_DEBUG_UPDATE
-#define printf(...) (0)
-#endif
 
 	if (box != root)
 		printf(
@@ -1892,7 +1899,7 @@ box_update(Box *const box)
 			box_update_layout(box);
 		} else {
 			box_delete_labels(box);
-			if (box->window != XCB_WINDOW_NONE) {
+			if (XCB_WINDOW_NONE != box->window) {
 				printf("%*.s unmap\n", depth, "");
 				xcb_icccm_set_wm_state(box->window, XCB_ICCCM_WM_STATE_ICONIC);
 				box_update_net(box);
@@ -1914,25 +1921,10 @@ box_update(Box *const box)
 		}
 	}
 
-	/* if (e->value_mask & XCB_CONFIG_WINDOW_SIBLING) */
-	/* if (e->value_mask & XCB_CONFIG_WINDOW_STACK_MODE) */
-
-# if 0
-					DEBUG_CHECK(xcb_change_window_attributes, conn, box->window,
-							XCB_CW_BORDER_PIXEL, &(uint32_t const){
-								hand->color
-							});
-			DEBUG_CHECK(xcb_change_window_attributes, conn, box->window,
-					XCB_CW_BORDER_PIXEL, &(uint32_t const){
-						0xff0000
-					});
-
-#endif
-
 	if (!box->rect.width)
 		goto out;
 
-	if (box->window != XCB_WINDOW_NONE && !box_is_container(box)) {
+	if (XCB_WINDOW_NONE != box->window && !box_is_container(box)) {
 		if (0 < i) {
 			mask |= XCB_CONFIG_WINDOW_STACK_MODE;
 			list[i++] = XCB_STACK_MODE_BELOW;
@@ -1978,10 +1970,6 @@ box_update(Box *const box)
 
 out:
 	depth -= 2;
-
-#ifndef HEAWM_DEBUG_UPDATE
-#undef printf
-#endif
 }
 
 static void
@@ -2075,6 +2063,7 @@ static void
 box_update_focus_seq(Box *box)
 {
 	assert(box_is_container(box));
+
 	uint32_t child_focus_seq = box->focus_seq;
 
 	box->layout_changed = true;
@@ -2426,7 +2415,7 @@ static void
 box_realloc(Box **const box, size_t const new_size)
 {
 	Box *const old = *box;
-	Box *const new = realloc(old, new_size);
+	Box *const new = check_alloc(realloc(old, new_size));
 
 	if (old == new)
 		return;
@@ -2520,7 +2509,7 @@ __attribute__((malloc))
 static Box *
 box_new(void)
 {
-	Box *box = calloc(1, sizeof *box + num_hands * sizeof(BoxPointer));
+	Box *box = check_alloc(calloc(1, sizeof *box + num_hands * sizeof(BoxPointer)));
 	box->focus_hand = NULL_HAND;
 	/* An initially zeroed out box->{x,y} does not mean box->window is
 	 * really at this position so marking it changed will force a
@@ -2623,33 +2612,6 @@ hand_grab_keyboard(Hand const *const hand)
 						EFFECTIVE_MASK(XCB_MOD_MASK_4 | XCB_MOD_MASK_CONTROL),
 						EFFECTIVE_MASK(XCB_MOD_MASK_4 | XCB_MOD_MASK_1),
 					});
-
-#if 0
-			if (hand->check_input || !hand->want_focus) {
-				xcb_keycode_t const *const keycodes = hand->check_input
-					? (xcb_keycode_t const[]){ XCB_GRAB_ANY, XCB_NO_SYMBOL }
-					: xcb_key_symbols_get_keycode(symbols, XKB_KEY_Return);
-
-				if (keycodes) {
-					xcb_keycode_t const *keycode = keycodes;
-
-					do {
-						XCB_INPUT_XI_PASSIVE_GRAB_DEVICE_WRAPPER(root_window,
-								XCB_INPUT_DEVICE_ALL_MASTER,
-								XCB_INPUT_GRAB_TYPE_KEYCODE, *keycode,
-								XCB_INPUT_GRAB_MODE_22_ASYNC,
-								/* process event only if client window would receive it */
-								XCB_INPUT_GRAB_OWNER_OWNER,
-								XCB_INPUT_XI_EVENT_MASK_KEY_PRESS |
-								XCB_INPUT_XI_EVENT_MASK_KEY_RELEASE,
-								NORMAL_GRAB_MASKS);
-					} while (XCB_NO_SYMBOL != *++keycode);
-
-					if (!hand->check_input)
-						free((void *)keycodes);
-				}
-			}
-#endif
 		} else {
 			XCB_INPUT_XI_PASSIVE_GRAB_DEVICE_WRAPPER(root_window,
 					hand->master_keyboard,
@@ -2809,11 +2771,14 @@ box_set_class(Box *const box, xcb_get_property_reply_t const *const reply)
 {
 	int const len = xcb_get_property_value_length(reply);
 	char const *const class = xcb_get_property_value(reply);
-	char const *delim_null;
+	char const *delim;
+
+	/* Shall be set only once. */
+	assert(!box->class);
 
 	if (len < (int)XCB_STRING_MAX &&
-	    (delim_null = memchr(class, '\0', len)) &&
-	    class + len - 1 == memchr(delim_null + 1, '\0', len - ((delim_null + 1) - class)))
+	    (delim = memchr(class, '\0', len)) &&
+	    class + len - 1 == memchr(delim + 1, '\0', len - ((delim + 1) - class)))
 		if ((box->class = malloc(len)))
 			memcpy(box->class, class, len);
 }
@@ -2825,6 +2790,8 @@ debug_print_atom_name(char const *const name, xcb_atom_t const atom)
 	xcb_get_atom_name_reply_t *const name_reply =
 		xcb_get_atom_name_reply(conn, xcb_get_atom_name_unchecked(conn, atom), NULL);
 	printf("%s %.*s\n", name, xcb_get_atom_name_name_length(name_reply), xcb_get_atom_name_name(name_reply));
+#else
+	(void)name, (void)atom;
 #endif
 }
 
@@ -2837,8 +2804,9 @@ static xcb_get_property_cookie_t
 box_update_property(BoxOrWindow box, xcb_atom_t const property, xcb_get_property_cookie_t cookie, bool const from_event)
 {
 	xcb_get_property_reply_t *reply;
-	void *data;
-	int len;
+	/* They are set just before we start the second loop. */
+	void *data = data;
+	int len = len;
 	xcb_atom_t type = XCB_ATOM_NONE;
 
 process_reply:
@@ -2850,7 +2818,7 @@ process_reply:
 		}
 
 		free(box.box->title);
-		if ((box.box->title = malloc(len + 1 /* NULL */))) {
+		if ((box.box->title = malloc(len + 1 /* NUL */))) {
 			memcpy(box.box->title, data, len);
 			box.box->title[len] = '\0';
 		}
@@ -3341,13 +3309,11 @@ body_setup_windows(Body *const body)
 	if (!reply)
 		return;
 
-	assert(!xcb_connection_has_error(conn));
-
 	xcb_window_t const *const children = xcb_query_tree_children(reply);
 	int const num_children = xcb_query_tree_children_length(reply);
 
 	xcb_get_window_attributes_cookie_t *const cookies =
-		malloc(num_children * sizeof *cookies);
+		check_alloc(malloc(num_children * sizeof *cookies));
 
 	for (int i = 0; i < num_children; ++i)
 		cookies[i] = xcb_get_window_attributes_unchecked(conn, children[i]);
@@ -3363,8 +3329,6 @@ body_setup_windows(Body *const body)
 		    /* Is mapped? */
 		    reply->map_state == XCB_MAP_STATE_VIEWABLE)
 			box_window(screen->root, children[i]);
-
-		assert(!xcb_connection_has_error(conn));
 
 		free(reply);
 	}
@@ -3590,7 +3554,8 @@ body_update_heads(Body *const body)
 		if (!num_monitors && !root->num_children)
 			goto screen_as_monitor;
 
-		xcb_get_atom_name_cookie_t *const cookies = malloc(num_monitors * sizeof *cookies);
+		xcb_get_atom_name_cookie_t *const cookies =
+			check_alloc(malloc(num_monitors * sizeof *cookies));
 
 		for (xcb_randr_monitor_info_iterator_t iter = xcb_randr_get_monitors_monitors_iterator(monitors);
 		     0 < iter.rem;
@@ -3611,7 +3576,7 @@ body_update_heads(Body *const body)
 				xcb_get_atom_name_reply(conn, cookies[iter.rem - 1], NULL);
 			if (name_reply) {
 				int const len = xcb_get_atom_name_name_length(name_reply);
-				name = malloc(sizeof MONITOR_CLASS + len + 1);
+				name = check_alloc(malloc(sizeof MONITOR_CLASS + len + 1 /* NUL */));
 				memcpy(name, MONITOR_CLASS, sizeof MONITOR_CLASS);
 				memcpy(name + sizeof MONITOR_CLASS, xcb_get_atom_name_name(name_reply), len);
 				name[sizeof MONITOR_CLASS + len] = '\0';
@@ -3677,7 +3642,7 @@ body_update_heads(Body *const body)
 	 * Run whenever display configuration changes, e.g. monitor
 	 * connected/disconnected, resolution changed. See xrandr(1).
 	 */
-	BODY_SPAWN(body, heawm_file("displaychange"));
+	BODY_SPAWN(body, resolve_path("displaychange"));
 }
 
 static void
@@ -3699,7 +3664,7 @@ setup_display(void)
 	xcb_setup_t const *const setup = xcb_get_setup(conn);
 
 	num_bodies = xcb_setup_roots_length(setup);
-	bodies = calloc(num_bodies, sizeof *bodies);
+	bodies = check_alloc(calloc(num_bodies, sizeof *bodies));
 
 	int i = 0;
 	for (xcb_screen_iterator_t iter = xcb_setup_roots_iterator(setup);
@@ -3762,18 +3727,19 @@ box_group(Box const *const box)
 	assert(!box_is_container(box));
 
 	uint16_t num_items = 0;
-	uint16_t pos;
+	/* pos is surely initialized since we iterate over box->parent */
+	uint16_t pos = pos;
 	bool ignore_leader = false;
 
 retry:
 	for (uint16_t i = 0; i < box->parent->num_children; ++i) {
 		Box *const child = box->parent->children[i];
-		num_items += child->flagged =
+		num_items += (child->flagged =
 			!child->user_concealed &&
 			(!ignore_leader && box->leader
 				? box->leader == child->leader
 				: box->class && child->class &&
-				  !strcmp(box_get_class_instance(box), box_get_class_instance(child)));
+				  !strcmp(box_get_class_instance(box), box_get_class_instance(child))));
 
 		if (box == child)
 			pos = i;
@@ -4055,7 +4021,7 @@ update_hands(void)
 		new_num_hands += XCB_INPUT_DEVICE_TYPE_MASTER_POINTER == input_device->type;
 	}
 
-	Hand *const new_hands = calloc(new_num_hands, sizeof *new_hands);
+	Hand *const new_hands = check_alloc(calloc(new_num_hands, sizeof *new_hands));
 	Hand *hand = new_hands;
 
 	for (uint8_t i = 0; i < num_devices; ++i) {
@@ -4064,7 +4030,7 @@ update_hands(void)
 	}
 
 	num_devices = xcb_input_xi_query_device_infos_length(reply);
-	devices = realloc(devices, num_devices * sizeof(*devices));
+	devices = check_alloc(realloc(devices, num_devices * sizeof(*devices)));
 	Device *device = devices;
 
 	for (xcb_input_xi_device_info_iterator_t iter = xcb_input_xi_query_device_infos_iterator(reply);
@@ -4209,17 +4175,6 @@ update_hands(void)
 			++device->hand;
 
 		device->keymap = NULL;
-
-#if 0
-		for_each_body {
-			DEBUG_CHECK(xcb_input_xi_select_events, conn, body->screen->root, 1,
-					XI_EVENT_MASK(device->id,
-							XCB_INPUT_XI_EVENT_MASK_KEY_PRESS |
-							XCB_INPUT_XI_EVENT_MASK_FOCUS_IN |
-							XCB_INPUT_XI_EVENT_MASK_ENTER));
-		}
-#endif
-
 		++device;
 	}
 	assert(device - devices == num_devices);
@@ -4261,7 +4216,7 @@ update_hands(void)
 	 * Run whenever input devices change, e.g. keyboard plugged/unplugged,
 	 * master device added. See xinput(1).
 	 */
-	SPAWN(heawm_file("inputchange"));
+	SPAWN(resolve_path("inputchange"));
 }
 
 static void
@@ -4298,102 +4253,12 @@ find_hand_by_master_pointer(xcb_input_device_id_t const master_pointer)
 ) & ~XCB_MOD_MASK_NUM_LOCK)
 
 static void
-handle_input_key_release(xcb_input_key_press_event_t const *const event)
-{
-	Device *const device = get_device_by_id(event->sourceid);
-	assert(device);
-	Hand *hand = device->hand;
-
-	printf("up\n");
-#if 1
-	xcb_test_fake_input(conn, XCB_INPUT_KEY_RELEASE, event->detail, 0,
-			event->root, event->root_x, event->root_y,
-			event->sourceid);
-	hand_grab_keyboard(hand);
-#endif
-#if 0
-	xcb_keysym_t const sym = xcb_key_symbols_get_keysym(symbols, event->detail, event->mods.effective & XCB_MOD_MASK_SHIFT);
-
-	printf("kep\n");
-	Hand *const hand = get_hand_by_master_keyboard(event->deviceid);
-#ifndef HEAWM_NDEBUG
-	/* FIXME: just under Xephyr but root key press reports slave device */
-	if (!hand)
-		goto out;
-#endif
-
-	if (XKB_KEY_Super_L == sym || XKB_KEY_Super_R == sym) {
-		hand_set_timeout(hand, -1);
-		if (mode_boxes == hand->mode)
-			hand->mode = mode_default;
-	}
-
-out:
-	xcb_input_xi_allow_events(conn, XCB_CURRENT_TIME, event->deviceid,
-			XCB_INPUT_EVENT_MODE_REPLAY_DEVICE,
-			0, 0);
-#endif
-}
-
-static void
 hand_handle_input_key_normal(xcb_input_key_press_event_t const *const event, Hand *const hand, xcb_keysym_t const sym, bool const repeating)
 {
 	(void)event;
-#if 0
-	uint32_t const grab_detail = XKB_KEY_Return == sym ? event->detail : XCB_GRAB_ANY;
-	/* one shot. but it is *required* before fake input, otherwise we will
-	 * get repeadetly fired */
-
-# if 1
-	DEBUG_CHECK(xcb_input_xi_allow_events, conn, XCB_CURRENT_TIME, event->deviceid,
-			XCB_INPUT_EVENT_MODE_SYNC_DEVICE,
-			0, 0);
-	DEBUG_CHECK(xcb_input_xi_allow_events, conn, XCB_CURRENT_TIME, event->deviceid,
-			XCB_INPUT_EVENT_MODE_SYNC_DEVICE,
-			0, 0);
-	DEBUG_CHECK(xcb_input_xi_allow_events, conn, XCB_CURRENT_TIME, event->deviceid,
-			XCB_INPUT_EVENT_MODE_SYNC_DEVICE,
-			0, 0);
-# endif
-# if 1
-	XCB_INPUT_XI_PASSIVE_UNGRAB_DEVICE_WRAPPER(event->root,
-			0,
-			XCB_INPUT_GRAB_TYPE_KEYCODE, grab_detail,
-			{ XCB_INPUT_MODIFIER_MASK_ANY });
-	XCB_INPUT_XI_PASSIVE_UNGRAB_DEVICE_WRAPPER(event->root,
-			hand->master_keyboard,
-			XCB_INPUT_GRAB_TYPE_KEYCODE, XCB_GRAB_ANY,
-			{ XCB_INPUT_MODIFIER_MASK_ANY });
-#endif
-#if 1
-	CHECK(xcb_test_fake_input, conn, XCB_INPUT_KEY_RELEASE, event->detail, 0,
-			event->root, event->root_x, event->root_y,
-			event->sourceid);
-	CHECK(xcb_test_fake_input, conn, XCB_INPUT_KEY_PRESS, event->detail, 0,
-			event->root, event->root_x, event->root_y,
-			event->sourceid);
-	xcb_flush(conn);
-#endif
-
-	printf("down\n");
-
-#endif
 
 	if (repeating)
 		return;
-
-#if 0
-	if (XKB_KEY_Return == sym) {
-		XCB_INPUT_XI_PASSIVE_GRAB_DEVICE_WRAPPER(bodies[0].screen->root,
-				XCB_INPUT_DEVICE_ALL,
-				XCB_INPUT_GRAB_TYPE_KEYCODE, event->detail,
-				XCB_INPUT_GRAB_MODE_22_ASYNC,
-				/* process event only if client window would receive it */
-				XCB_INPUT_GRAB_OWNER_OWNER,
-				XCB_INPUT_XI_EVENT_MASK_KEY_PRESS,
-				NORMAL_GRAB_MASKS);
-	}
-#endif
 
 	hand->want_focus |= XKB_KEY_Return == sym;
 	hand->check_input = false;
@@ -4435,7 +4300,7 @@ hand_input_try_jump(Hand *const hand)
 		 * Run whenever user has would like to jump to a non-existing
 		 * label. Can be useful to automagically start programs.
 		 */
-		if (SPAWN(heawm_file("autostart"), name))
+		if (SPAWN(resolve_path("autostart"), name))
 			hand->want_focus = true;
 		goto reset_input;
 	}
@@ -4525,7 +4390,7 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 			break;
 
 		hand->want_popup = true;
-		SPAWN(config.terminal, "-e", heawm_file("quickstart"));
+		SPAWN(config.terminal, "-e", resolve_path("quickstart"));
 	}
 		break;
 
@@ -4697,36 +4562,6 @@ box_explode(Box *const box, bool const vertical, bool const inner)
 	}
 }
 
-#if 0
-static Box *
-box_clone(Box const *const box)
-{
-	bool const is_container = box_is_container(box);
-	size_t const new_size = sizeof *box + (is_container
-			? box->num_children * sizeof *box->children
-			: num_hands * sizeof(BoxPointer));
-	Box *const new = malloc(new_size);
-	if (!new)
-		return NULL;
-
-	memcpy(new, box, is_container ? sizeof *box : new_size);
-	new->parent = NULL;
-
-	for (uint16_t i = 0; i < box->num_children; ++i) {
-		Box **const child = &new->children[i];
-		if (!(*child = box_clone(box->children[i]))) {
-			while (0 < i)
-				box_free(new->children[--i]);
-			box_free(new);
-			return NULL;
-		}
-		(*child)->parent = (Box *)box;
-	}
-
-	return new;
-}
-#endif
-
 static Box *
 box_get_parent_checked(Box const *const box)
 {
@@ -4890,13 +4725,6 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 			case XKB_KEY_L:
 				box_explode(hand->focus, false, true);
 				goto append;
-
-#if 0
-			case XKB_KEY_d:
-				if (!(hand->mode_box = box_clone(hand->mode_box)))
-					break;
-				goto append;
-#endif
 
 			default:
 				return;
@@ -5341,19 +5169,6 @@ handle_input_key_press(xcb_input_key_press_event_t const *const event)
 	switch (hand->mode) {
 	case HAND_MODE_NULL:
 	{
-		/* if (XKB_KEY_Super_L == sym || XKB_KEY_Super_R == sym) {
-			propagate = false; */
-			/* hand_set_timeout(hand, 70); */
-		/* 	goto out;
-		} */
-
-#if 0
-		/* hand_set_timeout(hand, -1); */
-		if (mode_boxes == hand->mode && 0) {
-			hand->mode = mode_default;
-			hand_grab_keyboard(event->root, event->deviceid);
-		}
-#endif
 		bool const repeating = XCB_INPUT_KEY_EVENT_FLAGS_KEY_REPEAT & event->flags;
 
 		switch (KEY_MOD_MASK & event->mods.base) {
@@ -5500,10 +5315,6 @@ handle_input_event(xcb_ge_generic_event_t const *const event)
 
 	case XCB_INPUT_KEY_PRESS:
 		handle_input_key_press((void const *)event);
-		break;
-
-	case XCB_INPUT_KEY_RELEASE:
-		handle_input_key_release((void const *)event);
 		break;
 
 	case XCB_INPUT_ENTER:
@@ -5692,6 +5503,8 @@ init_config(void)
 	/* Make sure environment variable set so can be used by scripts. */
 	setenv("HEAWM_HOME", config.heawm_home, false);
 
+	config.heawm_home_size = strlen(config.heawm_home);
+
 	if ((env = getenv("HOME")))
 		chdir(env);
 }
@@ -5738,7 +5551,7 @@ main(int _argc, char *_argv[])
 	 * .B startup
 	 * Run on program (re)start.
 	 */
-	SPAWN(heawm_file("startup"));
+	SPAWN(resolve_path("startup"));
 
 	return run();
 }

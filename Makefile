@@ -16,7 +16,7 @@ INSTALL_DATA ?= $(INSTALL)
 CFLAGS += -std=c11 -Wall -Wextra -Werror=vla -g -D_XOPEN_SOURCE=700 -fstrict-aliasing
 CFLAGS += $(shell pkg-config --libs --cflags xcb{,-cursor,-keysyms,-randr,-shape,-xinput,-xfixes,-xkb,-xrm,-xtest} cairo xkbcommon-x11)
 
-# release | debug
+# BUILD := release | debug
 BUILD ?= debug
 
 $(info BUILD=$(BUILD))
@@ -36,7 +36,7 @@ all : $(TARGET)
 	  true
 
 run : $(TARGET)
-	gdb ./$< -q -ex run
+	env -u MFLAGS -u MAKEFLAGS gdb ./$< -q -ex run
 
 run-cycle :
 	while make run || inotifywait -e close_write $(TARGET).c || true; do :; done
