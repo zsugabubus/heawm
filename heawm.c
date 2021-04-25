@@ -3206,7 +3206,7 @@ init_extensions(void)
 		if (!reply || !(XCB_XFIXES_MAJOR_VERSION == reply->major_version &&
 		                XCB_XFIXES_MINOR_VERSION == reply->minor_version))
 		{
-			fprintf(stderr, "Requested XFixes version %" PRIu32 ".%" PRIu32 " not supported by server; got %" PRIu32 ".%" PRIu32 "."
+			fprintf(stderr, "Requested XFixes version %"PRIu32".%"PRIu32" not supported by server; got %"PRIu32".%"PRIu32"."
 					" Pointer barricading may not work.\n",
 					XCB_XKB_MAJOR_VERSION, XCB_XKB_MINOR_VERSION,
 					reply ? reply->major_version : 0, reply ? reply->minor_version : 0);
@@ -3524,6 +3524,24 @@ body_head_cmp(void const *const p, void const *const q)
 	return x->rect.x <= y->rect.x && x->rect.y <= y->rect.y ? -1 : 1;
 }
 
+static char *
+head_get_name_reply(xcb_get_atom_name_reply_t *name_reply)
+{
+	if (!name_reply)
+		return NULL;
+
+	int const name_size = xcb_get_atom_name_name_length(name_reply);
+	char *name = check_alloc(malloc(sizeof MONITOR_CLASS + name_size + 1 /* NUL */));
+
+	memcpy(name, MONITOR_CLASS, sizeof MONITOR_CLASS);
+	memcpy(name + sizeof MONITOR_CLASS, xcb_get_atom_name_name(name_reply), name_size);
+	name[sizeof MONITOR_CLASS + name_size] = '\0';
+
+	free(name_reply);
+
+	return name;
+}
+
 static void
 body_update_heads(Body *const body)
 {
@@ -3571,18 +3589,7 @@ body_update_heads(Body *const body)
 		{
 			xcb_randr_monitor_info_t const *const monitor = iter.data;
 
-			char *name = NULL;
-			xcb_get_atom_name_reply_t *const name_reply =
-				xcb_get_atom_name_reply(conn, cookies[iter.rem - 1], NULL);
-			if (name_reply) {
-				int const len = xcb_get_atom_name_name_length(name_reply);
-				name = check_alloc(malloc(sizeof MONITOR_CLASS + len + 1 /* NUL */));
-				memcpy(name, MONITOR_CLASS, sizeof MONITOR_CLASS);
-				memcpy(name + sizeof MONITOR_CLASS, xcb_get_atom_name_name(name_reply), len);
-				name[sizeof MONITOR_CLASS + len] = '\0';
-
-				free(name_reply);
-			}
+			char *name = head_get_name_reply(xcb_get_atom_name_reply(conn, cookies[iter.rem - 1], NULL));
 
 			Box *head = body_find_head_by_name(body, name);
 			if (!head) {
@@ -3814,13 +3821,10 @@ hand_grab_pointer(Hand const *const hand)
 static Hand *
 get_hand_by_master_keyboard(xcb_input_device_id_t const master_keyboard)
 {
-	/* FIXME: if we can receive master devices, remove this check */
-	for_each_hand {
+	for_each_hand
 		if (master_keyboard == hand->master_keyboard)
 			return hand;
-	}
 
-	/* FIXME: ... and this */
 	return NULL;
 }
 
