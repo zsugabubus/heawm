@@ -102,7 +102,7 @@
 # define DEBUG_CHECK(request, ...) \
 	check_cookie(request##_checked(__VA_ARGS__), STRINGIFY(__LINE__) ": " #request)
 #else
-# define printf(...) (0)
+# define printf(...) ((void)0)
 # define DEBUG_CHECK(request, ...) do { \
 	_Pragma("GCC diagnostic push"); \
 	_Pragma("GCC diagnostic ignored \"-Wunused-value\""); \
