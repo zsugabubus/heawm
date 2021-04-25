@@ -68,6 +68,8 @@
 #define memberof(type, base, offset) ((type *)((uintptr_t)(base) + (offset)))
 #define membersizeof(type, member) (sizeof(((type *)0)->member))
 
+#define SCRIPT_SIZE_MAX 32
+
 #define SWAP(x, y) do { \
 	__typeof__(x) const tmp = x; \
 	x = y; \
@@ -566,11 +568,9 @@ enum Orientation {
 #define BODY_SPAWN(body, ...) spawn((char const *[]){ __VA_ARGS__, NULL }, (void(*)(void *))body_set_display, (body))
 
 static char const *
-resolve_path(char const *name)
+get_script_path(char const *name)
 {
-	size_t name_size = strlen(name) + 1 /* NUL */;
-	if (sizeof config.heawm_home < config.heawm_home_size + name_size)
-		abort();
+	assert(strlen(name) <= SCRIPT_SIZE_MAX);
 
 	strcpy(config.heawm_home + config.heawm_home_size, name);
 
@@ -1149,7 +1149,7 @@ handle_signal_quit(int signum)
 	 * .B exit
 	 * Run before exiting.
 	 */
-	SPAWN(resolve_path("exit"));
+	SPAWN(get_script_path("exit"));
 
 	exit(EXIT_SUCCESS);
 }
@@ -3642,7 +3642,7 @@ body_update_heads(Body *const body)
 	 * Run whenever display configuration changes, e.g. monitor
 	 * connected/disconnected, resolution changed. See xrandr(1).
 	 */
-	BODY_SPAWN(body, resolve_path("displaychange"));
+	BODY_SPAWN(body, get_script_path("displaychange"));
 }
 
 static void
@@ -4216,7 +4216,7 @@ update_hands(void)
 	 * Run whenever input devices change, e.g. keyboard plugged/unplugged,
 	 * master device added. See xinput(1).
 	 */
-	SPAWN(resolve_path("inputchange"));
+	SPAWN(get_script_path("inputchange"));
 }
 
 static void
@@ -4300,7 +4300,7 @@ hand_input_try_jump(Hand *const hand)
 		 * Run whenever user has would like to jump to a non-existing
 		 * label. Can be useful to automagically start programs.
 		 */
-		if (SPAWN(resolve_path("autostart"), name))
+		if (SPAWN(get_script_path("autostart"), name))
 			hand->want_focus = true;
 		goto reset_input;
 	}
@@ -4390,7 +4390,7 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 			break;
 
 		hand->want_popup = true;
-		SPAWN(config.terminal, "-e", resolve_path("quickstart"));
+		SPAWN(config.terminal, "-e", get_script_path("quickstart"));
 	}
 		break;
 
@@ -5504,6 +5504,11 @@ init_config(void)
 	setenv("HEAWM_HOME", config.heawm_home, false);
 
 	config.heawm_home_size = strlen(config.heawm_home);
+	if (sizeof config.heawm_home < config.heawm_home_size + 1 /* / */ + SCRIPT_SIZE_MAX + 1 /* NUL */) {
+		fprintf(stderr, "HEAWM_HOME is too long\n");
+		abort();
+	}
+	config.heawm_home[config.heawm_home_size++] = '/';
 
 	if ((env = getenv("HOME")))
 		chdir(env);
@@ -5551,7 +5556,7 @@ main(int _argc, char *_argv[])
 	 * .B startup
 	 * Run on program (re)start.
 	 */
-	SPAWN(resolve_path("startup"));
+	SPAWN(get_script_path("startup"));
 
 	return run();
 }
