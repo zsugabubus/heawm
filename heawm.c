@@ -3499,10 +3499,11 @@ body_head_cmp(void const *const p, void const *const q)
 	Box const *const y = *(Box **)q;
 
 	if (x->body != y->body)
-		return (int)x->body - (int)y->body;
+		return (int)y->body - (int)x->body;
 
-	/* x is less then y if x is placed in the left-top quadrant relative to y */
-	return x->rect.x <= y->rect.x && x->rect.y <= y->rect.y ? -1 : 1;
+	/* x is less then y if x is placed in the top-left quadrant relative to
+	 * y. Note that order is reversed since we walk heads backwards. */
+	return -(x->rect.x <= y->rect.x && x->rect.y <= y->rect.y ? -1 : 1);
 }
 
 static char *
