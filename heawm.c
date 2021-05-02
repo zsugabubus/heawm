@@ -2855,8 +2855,7 @@ process_reply:
 		}
 
 		if ((int)membersizeof(Box, name) < len) {
-			fprintf(stderr, "0x%x._HEAWM_NAME = \"%.*s\" is too long."
-					" Maximum allowed size is %zu.\n",
+			fprintf(stderr, "0x%x._HEAWM_NAME = \"%.*s\" is longer than %zu bytes\n",
 					box.box->window,
 					len, (char *)data,
 					membersizeof(Box, name));
@@ -3143,29 +3142,25 @@ init_extensions(void)
 
 	ext = xcb_get_extension_data(conn, &xcb_input_id);
 	if (!ext->present)
-		fprintf(stderr, "XInput extension missing."
-				" Input will not work.\n");
+		fprintf(stderr, "XInput extension missing; input will not work\n");
 	else
 		xi_opcode = ext->major_opcode;
 
 	ext = xcb_get_extension_data(conn, &xcb_randr_id);
 	if (!ext->present)
-		fprintf(stderr, "RandR extension missing."
-				" Multi-head display will not work properly.\n");
+		fprintf(stderr, "RandR extension missing; multi-head display will not work properly\n");
 	else
 		randr_base_event = ext->first_event;
 
 	ext = xcb_get_extension_data(conn, &xcb_shape_id);
 	if (!ext->present)
-		fprintf(stderr, "Shape extension missing. "
-				" Labels will look crappy.\n");
+		fprintf(stderr, "Shape extension missing; labels cannot be made transparent\n");
 	else
 		shape_base_event = ext->first_event;
 
 	ext = xcb_get_extension_data(conn, &xcb_xkb_id);
 	if (!ext->present) {
-		fprintf(stderr, "XKB extension missing."
-				" Keyboard input will not work.\n");
+		fprintf(stderr, "XKB extension missing; keyboard input will not work\n");
 	} else {
 		xkb_base_event = ext->first_event;
 
@@ -3174,8 +3169,7 @@ init_extensions(void)
 				xcb_xkb_use_extension_unchecked(conn, XCB_XKB_MAJOR_VERSION, XCB_XKB_MINOR_VERSION),
 				NULL);
 		if (!reply->supported) {
-			fprintf(stderr, "Requested XKB version %d.%d not supported by server; got %d.%d."
-					" Keyboard input may not work.\n",
+			fprintf(stderr, "Requested XKB version %d.%d not supported by server, got %d.%d; keyboard input may not work\n",
 					XCB_XKB_MAJOR_VERSION, XCB_XKB_MINOR_VERSION,
 					reply->serverMajor, reply->serverMinor);
 		}
@@ -3187,16 +3181,14 @@ init_extensions(void)
 
 	ext = xcb_get_extension_data(conn, &xcb_xfixes_id);
 	if (!ext->present) {
-		fprintf(stderr, "XFixes extension missing."
-				" Pointer barricading will not work.\n");
+		fprintf(stderr, "XFixes extension missing; pointer barricading will not work\n");
 	} else {
 		GET_REPLY(reply, xcb_xfixes_query_version, conn,
 				XCB_XFIXES_MAJOR_VERSION, XCB_XFIXES_MINOR_VERSION);
 		if (!reply || !(XCB_XFIXES_MAJOR_VERSION == reply->major_version &&
 		                XCB_XFIXES_MINOR_VERSION == reply->minor_version))
 		{
-			fprintf(stderr, "Requested XFixes version %"PRIu32".%"PRIu32" not supported by server; got %"PRIu32".%"PRIu32"."
-					" Pointer barricading may not work.\n",
+			fprintf(stderr, "Requested XFixes version %"PRIu32".%"PRIu32" not supported by server, got %"PRIu32".%"PRIu32"; pointer barricading may not work\n",
 					XCB_XKB_MAJOR_VERSION, XCB_XKB_MINOR_VERSION,
 					reply ? reply->major_version : 0, reply ? reply->minor_version : 0);
 		}
@@ -3232,7 +3224,7 @@ connect_display(void)
 			fprintf(stderr, "Could not open display %s: %s\n",
 					display, xcb_connection_strerror(error));
 		} else {
-			fprintf(stderr, "DISPLAY is not set; default to %s.\n",
+			fprintf(stderr, "DISPLAY is not set, default to %s\n",
 					DEFAULT_DISPLAY);
 
 			if (!setenv("DISPLAY", DEFAULT_DISPLAY, false))
@@ -3251,7 +3243,7 @@ connect_display(void)
 	init_extensions();
 
 	if (!(xrm = xcb_xrm_database_from_default(conn)))
-		fprintf(stderr, "Could not load X resources.\n");
+		fprintf(stderr, "Could not load X resources\n");
 
 	/* BROADCAST(connected, &(struct connected_args){ }); */
 }
@@ -3546,7 +3538,7 @@ body_update_heads(Body *const body)
 
 	GET_REPLY(monitors, xcb_randr_get_monitors, conn, body->screen->root, true);
 	if (!monitors) {
-		fprintf(stderr, "Failed to query RandR monitors.\n");
+		fprintf(stderr, "Failed to query RandR monitors\n");
 
 	screen_as_monitor:;
 		Box *const head = parent = box_new();
@@ -4125,7 +4117,7 @@ update_hands(void)
 		{
 			if (1 != sscanf(value, "0x%6x", &hand->color) &&
 			    1 != sscanf(value, "#%6x", &hand->color))
-				fprintf(stderr, "Invalid color resource value: %s.\n",
+				fprintf(stderr, "Invalid color resource value: %s\n",
 						value);
 			free(value);
 			break;
@@ -5562,7 +5554,7 @@ main(int _argc, char *_argv[])
 
 		case '?':
 		case ':':
-			fprintf(stderr, "Option -%c is invalid or requires an argument.\n",
+			fprintf(stderr, "Option -%c is invalid or requires an argument\n",
 					optopt);
 			exit(EXIT_FAILURE);
 
