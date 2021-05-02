@@ -1,6 +1,4 @@
-# generated
-atoms.h
-docs/*.1
-
-# binary
 heawm
+atoms.h
+*.in
+docs/*.1
