@@ -2457,7 +2457,8 @@ static void
 box_reparent(Box *into, uint16_t pos, Box *box)
 {
 	assert(box_is_container(into));
-	assert(root != box && "root cannot be reparented");
+	assert(into != box);
+	assert(root != box);
 
 	Box *const old_parent = box->parent;
 
@@ -3533,13 +3534,15 @@ head_get_name_reply(xcb_get_atom_name_reply_t *name_reply)
 static void
 body_update_heads(Body *const body)
 {
+	/* Kill body heads. */
 	for (uint16_t i = 0; i < root->num_children; ++i) {
 		Box *const head = root->children[i];
 		if ((body - bodies) == head->body)
-			box_set_placeholder_name(head);
+			head->user_rect.width = 0;
 	}
 
-	Box *parent = NULL;
+	/* Head that will be the new parent of disconnected monitors. */
+	Box *parent = NULL, *parent2 = NULL;
 
 	GET_REPLY(monitors, xcb_randr_get_monitors, conn, body->screen->root, true);
 	if (!monitors) {
@@ -3553,6 +3556,7 @@ body_update_heads(Body *const body)
 
 		head->user_rect.width = body->screen->width_in_millimeters;
 		head->user_rect.height = body->screen->height_in_millimeters;
+		assert(0 < head->user_rect.width);
 		box_set_size(head, body->screen->width_in_pixels, body->screen->height_in_pixels);
 		box_set_position(head, 0, 0);
 	} else {
@@ -3583,25 +3587,37 @@ body_update_heads(Body *const body)
 			if (!head) {
 				head = box_new();
 				head->body = body - bodies;
-				head->class = name, name = NULL;
+				head->class = name;
+				name = NULL;
+
+				/* Do not name it yet. */
+				box_set_placeholder_name(head);
 				box_reparent(root, monitor->primary ? 0 : root->num_children, head);
+
+				if (!parent2)
+					parent2 = head;
+			} else {
+				/* Allow renaming empty heads. */
+				if (!head->num_children)
+					box_set_placeholder_name(head);
+
+				/* First, try to reparent into a new monitor to
+				 * avoid touching layout of existing ones. */
+				if (!parent)
+					parent = head;
 			}
 
-			/* FIXME: swap values if rotated */
+			/* FIXME: Maybe swap values if rotated. */
 			head->user_rect.width = monitor->width_in_millimeters;
 			head->user_rect.height = monitor->height_in_millimeters;
+			assert(0 < head->user_rect.width);
 			box_set_size(head, monitor->width, monitor->height);
 			box_set_position(head, monitor->x, monitor->y);
 
-			/* Primary monitors named before others to get
-			 * stable names. */
-			if (monitor->primary) {
-				box_clear_name(head);
+			/* Primary monitor is named before others so to always get
+			 * the lowest available name. */
+			if (monitor->primary)
 				box_name(head);
-			}
-
-			if (!parent)
-				parent = head;
 
 			free(name);
 		}
@@ -3612,21 +3628,37 @@ body_update_heads(Body *const body)
 
 	qsort(root->children, root->num_children, sizeof *root->children, body_head_cmp);
 
+	if (!parent)
+		parent = parent2;
+
+	/* Monitors may be vacuumed. */
 	for (uint16_t i = root->num_children; 0 < i;) {
 		Box *const head = root->children[--i];
 
-		if (!box_has_placeholder_name(head))
-			continue;
+		if (box_has_placeholder_name(head))
+			box_clear_name(head);
 
-		box_clear_name(head);
-		if (parent) {
+		/* Make ex-monitor into a common box. Though we can do it only if
+		 * there are some connected monitors currently. Otherwise we keep
+		 * such monitors hanging and next time, when there will be some
+		 * mointors connected again, we can use the stored info to
+		 * restore them. */
+		if (!head->user_rect.width && parent)
+		{
 			free(head->class), head->class = NULL;
-			head->user_rect.width = 0;
 			head->user_rect.height = 0;
 
-			box_reparent(parent, 0, head), parent = head->parent;
+			box_reparent(parent, 0, head);
+			parent = head->parent;
+
 			box_vacuum(head);
 		} else {
+			if (!head->user_rect.width)
+				/* A little bit hacky since old value gone. But it
+				 * can occur only when there are no connected
+				 * monitors so user will not see anything about it.
+				 * */
+				head->user_rect.width = 1;
 			box_name(head);
 		}
 	}
@@ -3707,7 +3739,8 @@ box_flatten(Box *into, uint16_t pos, Box const *const box)
 		/* Can occur if box == into. */
 		if (into->num_children < pos)
 			pos = into->num_children;
-		box_reparent_checked(into, pos++, child), into = child->parent;
+		box_reparent_checked(into, pos++, child);
+		into = child->parent;
 
 		/* Last children will be vacuumed upwards automatically. */
 	} while (0 < --i);
@@ -3900,7 +3933,7 @@ handle_configure_request(xcb_configure_request_event_t const *const event)
 					.height = box->rect.height,
 
 					.border_width = 0,
-					/* surely not if request reached us */
+					/* Surely not if request reached us. */
 					.override_redirect = false,
 				));
 	}
@@ -4197,7 +4230,8 @@ update_hands(void)
 	 * hands alive. */
 	increase_focus_seq();
 
-	free(hands), hands = new_hands;
+	free(hands);
+	hands = new_hands;
 	num_hands = new_num_hands;
 
 	focus_all_hands(root->focus_seq);
