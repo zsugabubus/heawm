@@ -111,8 +111,9 @@
 } while (0)
 #endif
 
-#define GET_REPLY(x, request, ...) request##_reply_t *const x = \
-	request##_reply(conn, request##_unchecked(__VA_ARGS__), NULL)
+#define XCB_GET_REPLY(x, request, ...) \
+	request##_reply_t *const x = \
+			request##_reply(conn, request##_unchecked(conn, __VA_ARGS__), NULL)
 
 #define MAX(x, y) ((x) < (y) ? (y) : (x))
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
@@ -1422,7 +1423,7 @@ hand_get_wanted_focus(Hand const *const hand)
 static void
 box_save_pointer(Box *const box, Hand const *const hand)
 {
-	GET_REPLY(reply, xcb_input_xi_query_pointer, conn,
+	XCB_GET_REPLY(reply, xcb_input_xi_query_pointer,
 			bodies[box->body].screen->root, hand->master_pointer);
 	if (!reply)
 		return;
@@ -2776,9 +2777,8 @@ static void
 debug_print_atom_name(char const *const name, xcb_atom_t const atom)
 {
 #ifndef HEAWM_NDEBUG
-	xcb_get_atom_name_reply_t *const name_reply =
-		xcb_get_atom_name_reply(conn, xcb_get_atom_name_unchecked(conn, atom), NULL);
-	printf("%s %.*s\n", name, xcb_get_atom_name_name_length(name_reply), xcb_get_atom_name_name(name_reply));
+	XCB_GET_REPLY(reply, xcb_get_atom_name, atom);
+	printf("%s %.*s\n", name, xcb_get_atom_name_name_length(reply), xcb_get_atom_name_name(reply));
 #else
 	(void)name, (void)atom;
 #endif
@@ -3183,7 +3183,7 @@ init_extensions(void)
 	if (!ext->present) {
 		fprintf(stderr, "XFixes extension missing; pointer barricading will not work\n");
 	} else {
-		GET_REPLY(reply, xcb_xfixes_query_version, conn,
+		XCB_GET_REPLY(reply, xcb_xfixes_query_version,
 				XCB_XFIXES_MAJOR_VERSION, XCB_XFIXES_MINOR_VERSION);
 		if (!reply || !(XCB_XFIXES_MAJOR_VERSION == reply->major_version &&
 		                XCB_XFIXES_MINOR_VERSION == reply->minor_version))
@@ -3283,10 +3283,7 @@ static void
 body_setup_windows(Body *const body)
 {
 	xcb_screen_t const *const screen = body->screen;
-	xcb_query_tree_reply_t *const reply =
-		xcb_query_tree_reply(conn,
-				xcb_query_tree_unchecked(conn, screen->root),
-				NULL);
+	XCB_GET_REPLY(reply, xcb_query_tree, screen->root);
 	if (!reply)
 		return;
 
@@ -3536,13 +3533,13 @@ body_update_heads(Body *const body)
 
 	/* Force RROutputChange under Xephyr -resizeable, otherwise monitor
 	 * dimensions are not updated. */
-	GET_REPLY(resources, xcb_randr_get_screen_resources, conn, body->screen->root);
+	XCB_GET_REPLY(resources, xcb_randr_get_screen_resources, body->screen->root);
 	free(resources);
 
 	/* Head that will be the new parent of disconnected monitors. */
 	Box *parent = NULL, *parent2 = NULL;
 
-	GET_REPLY(monitors, xcb_randr_get_monitors, conn, body->screen->root, true);
+	XCB_GET_REPLY(monitors, xcb_randr_get_monitors, body->screen->root, true);
 	if (!monitors) {
 		fprintf(stderr, "Failed to query RandR monitors\n");
 
@@ -4022,8 +4019,7 @@ find_hand_by_master_pointer(xcb_input_device_id_t const pointer);
 static void
 update_hands(void)
 {
-	GET_REPLY(reply, xcb_input_xi_query_device, conn,
-			XCB_INPUT_DEVICE_ALL);
+	XCB_GET_REPLY(reply, xcb_input_xi_query_device, XCB_INPUT_DEVICE_ALL);
 	if (!reply)
 		return;
 
