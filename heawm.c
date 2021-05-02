@@ -2761,8 +2761,8 @@ box_set_class(Box *const box, xcb_get_property_reply_t const *const reply)
 	char const *const class = xcb_get_property_value(reply);
 	char const *delim;
 
-	/* Shall be set only once. */
-	assert(!box->class);
+	free(box->class);
+	box->class = NULL;
 
 	if (len < (int)XCB_STRING_MAX &&
 	    (delim = memchr(class, '\0', len)) &&
