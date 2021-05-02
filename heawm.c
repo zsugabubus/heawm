@@ -4880,8 +4880,9 @@ hand_center_pointer(Hand const *const hand, Box const *const box)
 			XCB_WINDOW_NONE,
 			bodies[box->body].screen->root,
 			0, 0, 0, 0,
-			(box->rect.x + box->rect.width  / 2) << 16,
-			(box->rect.y + box->rect.height / 2) << 16,
+			/* (x + width / 2) << 16 */
+			(box->rect.x << 16) + (box->rect.width  << 15),
+			(box->rect.y << 16) + (box->rect.height << 15),
 			hand->master_pointer);
 }
 
