@@ -609,7 +609,7 @@ spawn(char const *argv[], void(*fork_cb)(void *), void *arg)
 		pthread_sigmask(SIG_SETMASK, &sigmask, NULL);
 
 		/* Disconnect standard IO. */
-		int dev_null = open("/dev/null", O_RDONLY | O_CLOEXEC);
+		int dev_null = open("/dev/null", O_RDWR | O_CLOEXEC);
 		if (dup2(dev_null, STDIN_FILENO) < 0)
 			close(STDIN_FILENO);
 		if (dup2(dev_null, STDOUT_FILENO) < 0)
