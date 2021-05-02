@@ -1248,18 +1248,6 @@ box_has_placeholder_name(Box const *const box)
 	return EXTREMAL_NAME_CHAR == *box->name;
 }
 
-static char
-to_ascii_lower(char c)
-{
-	return 'A' <= c && c <= 'Z' ? c - 'A' + 'a' : c;
-}
-
-static char
-to_ascii_upper(char c)
-{
-	return 'a' <= c && c <= 'z' ? c - 'a' + 'A' : c;
-}
-
 static void
 box_name(Box *const box)
 {
@@ -1301,7 +1289,7 @@ box_name(Box *const box)
 		}
 	}
 
-	optimum = (box_is_container(box) ? to_ascii_upper : to_ascii_lower)(optimum);
+	optimum = (box_is_container(box) ? toupper : tolower)(optimum);
 
 #define NAME_MATCHES(test_box) \
 	(/* Prefix matches? */ \
