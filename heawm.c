@@ -3533,6 +3533,11 @@ body_update_heads(Body *const body)
 			head->user_rect.width = 0;
 	}
 
+	/* Force RROutputChange under Xephyr -resizeable, otherwise monitor
+	 * dimensions are not updated. */
+	GET_REPLY(resources, xcb_randr_get_screen_resources, conn, body->screen->root);
+	free(resources);
+
 	/* Head that will be the new parent of disconnected monitors. */
 	Box *parent = NULL, *parent2 = NULL;
 
