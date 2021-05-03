@@ -3406,13 +3406,15 @@ body_setup_hands(Body *const body);
 static void
 body_setup(Body *const body)
 {
-	for (int error; (error =
+	int error;
+
+	if ((error =
 		CHECK(xcb_change_window_attributes, conn, body->screen->root,
 				XCB_CW_EVENT_MASK,
 				(uint32_t const[]){
 					CLIENT_WINDOW_EVENT_MASK |
 					XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT
-				}));)
+				})))
 	{
 		fprintf(stderr, "Unable to manage windows on screen %d: %s\n",
 				body->screen_index,
@@ -3431,7 +3433,6 @@ body_setup(Body *const body)
 	body_setup_hands(body);
 	body_setup_net(body);
 	body_setup_windows(body);
-	assert(!xcb_connection_has_error(conn));
 }
 
 static xcb_visualtype_t *
