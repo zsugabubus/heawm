@@ -2666,6 +2666,7 @@ box_new(void)
 	 * really at this position so marking it changed will force a
 	 * reconfiguration. */
 	box->position_changed = true;
+	box->vertical = true;
 	return box;
 }
 
