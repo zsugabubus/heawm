@@ -4372,6 +4372,129 @@ hand_update_mode(Hand *const hand)
 	}
 }
 
+static void
+hand_start_name(Hand *const hand)
+{
+	if (!hand->focus)
+		return;
+
+	hand->mode = HAND_MODE_NAME;
+	hand->mode_box = hand->focus;
+}
+
+static void
+hand_start_move(Hand *const hand)
+{
+	if (!hand->focus)
+		return;
+
+	hand->mode = HAND_MODE_MOVE;
+	hand->mode_box = hand->focus;
+
+	Box *const box = hand_get_latest_input(hand);
+	if (box && !box_is_descendant(hand->mode_box, box))
+		hand_focus_box(hand, box);
+}
+
+static Box *
+box_get_parent_checked(Box const *const box)
+{
+	if (box->parent &&
+	    /* Is addressable by user. */
+	    *box->parent->name)
+		return box->parent;
+
+	return NULL;
+}
+
+static void
+hand_focus_parent(Hand *const hand)
+{
+	if (hand->focus && box_get_parent_checked(hand->focus))
+		hand_focus_box(hand, hand->focus->parent);
+}
+
+static void
+box_maximize(Box *const box, bool const recursive)
+{
+	enum State {
+		STATE_DISCOVER,
+		STATE_FIRST = STATE_DISCOVER,
+		STATE_PREPARE,
+		STATE_COMMIT,
+		STATE_LAST = STATE_COMMIT,
+	};
+
+	assert(box_is_container(box));
+
+	if (box == root)
+		return;
+
+	bool conceal = false;
+
+	uint16_t max_conceal_seq = 0;
+
+	++root->conceal_seq;
+
+	/* when user requested unconcealing, first check for any box that is
+	 * not concealed, this way user can hide any newly appearing box */
+	for (enum State state = STATE_FIRST;
+	     state <= STATE_LAST;
+	     ++state)
+	{
+		Box *parent = box;
+
+		if (state == STATE_COMMIT)
+			/* propagate changes once, from the most inner box */
+			box_propagate_change(parent);
+
+		do {
+			uint16_t curr_conceal_seq = parent->conceal_seq;
+
+			for (uint16_t i = 0; i < parent->num_children; ++i) {
+				Box *const child = parent->children[i];
+				/* do not even touch user stuff */
+				if (child->user_concealed)
+					continue;
+
+				switch (state) {
+				case STATE_DISCOVER:
+					if (!child->concealed)
+						conceal = true;
+					break;
+
+				case STATE_PREPARE:
+					if (conceal != child->concealed)
+						if (max_conceal_seq < curr_conceal_seq)
+							max_conceal_seq = curr_conceal_seq;
+					break;
+
+				case STATE_COMMIT:
+					if (conceal != child->concealed &&
+					   (conceal || max_conceal_seq == curr_conceal_seq))
+					{
+						child->concealed = conceal,
+						parent->layout_changed = true;
+						parent->conceal_seq = root->conceal_seq;
+					}
+					break;
+				}
+			}
+		} while ((recursive && !box_is_floating(parent)) && (parent = parent->parent, true));
+	}
+}
+
+static void
+hand_focus_child(Hand *const hand)
+{
+	if (hand->focus && hand->input_focus && hand->focus != hand->input_focus) {
+		Box *box = hand->input_focus;
+		while (box->parent != hand->focus)
+			box = box->parent;
+		hand_focus_box(hand, box);
+	}
+}
+
 static bool
 hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const repeating)
 {
@@ -4478,7 +4601,6 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 	 * Open up all boxes.
 	 */
 	case XKB_KEY_parenleft:
-	{
 		if (!hand->focus)
 			break;
 
@@ -4493,8 +4615,6 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 		}
 
 		box_open(hand->mode_box, true);
-		hand_update_mode(hand);
-	}
 		break;
 
 	/*MAN(Keybindings)
@@ -4503,17 +4623,45 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 	 * Escape from wherever you are.
 	 */
 	case XKB_KEY_Escape:
-	{
 		if (!hand->input_focus)
 			break;
 
 		hand_focus_box(hand, hand->input_focus);
-	}
+		break;
+
+	case XKB_KEY_exclam:
+		hand_start_move(hand);
+		break;
+
+	case XKB_KEY_period:
+		if (!hand->focus)
+			break;
+
+		box_maximize(hand->focus->parent, true);
+		break;
+
+	case XKB_KEY_dollar:
+		hand_start_name(hand);
+		break;
+
+	case XKB_KEY_semicolon:
+		hand_focus_parent(hand);
+		break;
+
+	case XKB_KEY_comma:
+		hand_focus_child(hand);
+		break;
+
+	case XKB_KEY_numbersign:
+		if (hand->focus)
+			hand_focus_box(hand, box_get_head(hand->focus));
 		break;
 
 	default:
 		return true;
 	}
+
+	hand_update_mode(hand);
 
 	return false;
 }
@@ -4583,35 +4731,6 @@ box_explode(Box *const box, bool const vertical, bool const inner)
 	}
 }
 
-static Box *
-box_get_parent_checked(Box const *const box)
-{
-	if (box->parent &&
-	    /* Is addressable by user. */
-	    *box->parent->name)
-		return box->parent;
-
-	return NULL;
-}
-
-static void
-hand_focus_parent(Hand *const hand)
-{
-	if (hand->focus && box_get_parent_checked(hand->focus))
-		hand_focus_box(hand, hand->focus->parent);
-}
-
-static void
-hand_focus_child(Hand *const hand)
-{
-	if (hand->focus && hand->input_focus && hand->focus != hand->input_focus) {
-		Box *box = hand->input_focus;
-		while (box->parent != hand->focus)
-			box = box->parent;
-		hand_focus_box(hand, box);
-	}
-}
-
 static void
 hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand *const hand, xcb_keysym_t const sym)
 {
@@ -4677,6 +4796,22 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 
 		case 0:
 			switch (sym) {
+			case XKB_KEY_minus:
+				hand_focus_box(hand, box_get_head(hand->focus));
+				goto append;
+
+			case XKB_KEY_numbersign:
+				hand_focus_box(hand, box_get_head(hand->focus));
+				return;
+
+			case XKB_KEY_semicolon:
+				hand_focus_parent(hand);
+				return;
+
+			case XKB_KEY_colon:
+				hand_focus_child(hand);
+				return;
+
 			case XKB_KEY_F:
 				if (!box_is_container(hand->mode_box))
 					hand->mode_box = hand->mode_box->parent;
@@ -4801,76 +4936,6 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 }
 
 static void
-box_maximize(Box *const box, bool const recursive)
-{
-	enum State {
-		STATE_DISCOVER,
-		STATE_FIRST = STATE_DISCOVER,
-		STATE_PREPARE,
-		STATE_COMMIT,
-		STATE_LAST = STATE_COMMIT,
-	};
-
-	assert(box_is_container(box));
-
-	if (box == root)
-		return;
-
-	bool conceal = false;
-
-	uint16_t max_conceal_seq = 0;
-
-	++root->conceal_seq;
-
-	/* when user requested unconcealing, first check for any box that is
-	 * not concealed, this way user can hide any newly appearing box */
-	for (enum State state = STATE_FIRST;
-	     state <= STATE_LAST;
-	     ++state)
-	{
-		Box *parent = box;
-
-		if (state == STATE_COMMIT)
-			/* propagate changes once, from the most inner box */
-			box_propagate_change(parent);
-
-		do {
-			uint16_t curr_conceal_seq = parent->conceal_seq;
-
-			for (uint16_t i = 0; i < parent->num_children; ++i) {
-				Box *const child = parent->children[i];
-				/* do not even touch user stuff */
-				if (child->user_concealed)
-					continue;
-
-				switch (state) {
-				case STATE_DISCOVER:
-					if (!child->concealed)
-						conceal = true;
-					break;
-
-				case STATE_PREPARE:
-					if (conceal != child->concealed)
-						if (max_conceal_seq < curr_conceal_seq)
-							max_conceal_seq = curr_conceal_seq;
-					break;
-
-				case STATE_COMMIT:
-					if (conceal != child->concealed &&
-					   (conceal || max_conceal_seq == curr_conceal_seq))
-					{
-						child->concealed = conceal,
-						parent->layout_changed = true;
-						parent->conceal_seq = root->conceal_seq;
-					}
-					break;
-				}
-			}
-		} while ((recursive && !box_is_floating(parent)) && (parent = parent->parent, true));
-	}
-}
-
-static void
 hand_center_pointer(Hand const *const hand, Box const *const box)
 {
 	DEBUG_CHECK(xcb_input_xi_warp_pointer, conn,
@@ -4949,17 +5014,7 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 	 * .RE
 	 */
 	case XKB_KEY_t:
-	{
-		if (!hand->focus)
-			break;
-
-		hand->mode = HAND_MODE_MOVE;
-		hand->mode_box = hand->focus;
-
-		Box *const box = hand_get_latest_input(hand);
-		if (box && !box_is_descendant(hand->mode_box, box))
-			hand_focus_box(hand, box);
-	}
+		hand_start_move(hand);
 		break;
 
 	/*MAN(Keybindings)
@@ -5052,7 +5107,7 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 		if (!hand->focus)
 			break;
 
-		box_maximize(hand->focus->parent, sym == XKB_KEY_f);
+		box_maximize(hand->focus->parent, XKB_KEY_f == sym);
 		break;
 
 	/*MAN(Keybindings)
@@ -5111,11 +5166,7 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 		if (repeating)
 			break;
 
-		if (!hand->focus)
-			break;
-
-		hand->mode = HAND_MODE_NAME;
-		hand->mode_box = hand->focus;
+		hand_start_name(hand);
 		break;
 
 	/* wlose/xlose */
