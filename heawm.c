@@ -2552,10 +2552,10 @@ box_swap(Box *const x, Box *const y)
 	    box_is_descendant(y, x))
 		return;
 
-	if (box_is_monitor(x) != box_is_monitor(y))
+	/* Heads may only be swapped with containers. */
+	if ((box_is_monitor(x) && !box_is_container(y)) ||
+	    (box_is_monitor(y) && !box_is_container(x)))
 		return;
-
-	printf("swap: %s <-> %s\n", x->name, y->name);
 
 	Box **px, **py;
 	for (px = x->parent->children; *px != x; ++px);
@@ -2576,6 +2576,12 @@ box_swap(Box *const x, Box *const y)
 
 	box_update_focus_seq(x->parent);
 	box_update_focus_seq(y->parent);
+
+	/* E.g. Empty monitor has been swapped. */
+	if (box_is_container(x))
+		box_vacuum(x);
+	if (box_is_container(y))
+		box_vacuum(y);
 }
 
 static void
