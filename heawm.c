@@ -3525,9 +3525,10 @@ head_get_name_reply(xcb_get_atom_name_reply_t *name_reply)
 static void
 body_update_heads(Body *const body)
 {
-	/* Kill body heads. */
+	/* Mark heads of this body as unneeded. */
 	for (uint16_t i = 0; i < root->num_children; ++i) {
 		Box *const head = root->children[i];
+		head->flagged = 0;
 		if ((body - bodies) == head->body)
 			head->user_rect.width = 0;
 	}
@@ -3537,17 +3538,16 @@ body_update_heads(Body *const body)
 	XCB_GET_REPLY(resources, xcb_randr_get_screen_resources, body->screen->root);
 	free(resources);
 
-	/* Head that will be the new parent of disconnected monitors. */
-	Box *parent = NULL, *parent2 = NULL;
-
 	XCB_GET_REPLY(monitors, xcb_randr_get_monitors, body->screen->root, true);
 	if (!monitors) {
 		fprintf(stderr, "Failed to query RandR monitors\n");
 
 	screen_as_monitor:;
-		Box *const head = parent = box_new();
+		Box *const head = box_new();
 		head->body = body - bodies;
 		head->class = NULL;
+		head->flagged = 1; /* Primary. */
+		box_set_placeholder_name(head);
 		box_reparent(root, 0, head);
 
 		head->user_rect.width = body->screen->width_in_millimeters;
@@ -3589,31 +3589,22 @@ body_update_heads(Body *const body)
 				/* Do not name it yet. */
 				box_set_placeholder_name(head);
 				box_reparent(root, monitor->primary ? 0 : root->num_children, head);
-
-				if (!parent2)
-					parent2 = head;
 			} else {
 				/* Allow renaming empty heads. */
 				if (!head->num_children)
 					box_set_placeholder_name(head);
-
-				/* First, try to reparent into a new monitor to
-				 * avoid touching layout of existing ones. */
-				if (!parent)
-					parent = head;
 			}
 
 			/* FIXME: Maybe swap values if rotated. */
 			head->user_rect.width = monitor->width_in_millimeters;
 			head->user_rect.height = monitor->height_in_millimeters;
-			assert(0 < head->user_rect.width);
+			assert(head->user_rect.width && head->user_rect.height);
 			box_set_size(head, monitor->width, monitor->height);
 			box_set_position(head, monitor->x, monitor->y);
 
 			/* Primary monitor is named before others so to always get
 			 * the lowest available name. */
-			if (monitor->primary)
-				box_name(head);
+			head->flagged = !!monitor->primary;
 
 			free(name);
 		}
@@ -3624,39 +3615,81 @@ body_update_heads(Body *const body)
 
 	qsort(root->children, root->num_children, sizeof *root->children, body_head_cmp);
 
-	if (!parent)
-		parent = parent2;
+	/* Whether 1-to-1 mapping is possible among gone and empty monitors. */
+	uint16_t gone_with_children = 0,
+	         existing_without_children = 0;
+	/* Otherwise try to find a good parent for gone monitors. */
+	Box *parent = NULL;
 
-	/* Monitors may be vacuumed. */
-	for (uint16_t i = root->num_children; 0 < i;) {
-		Box *const head = root->children[--i];
+	for (uint16_t i = 0; i < root->num_children; ++i) {
+		Box *const head = root->children[i];
+		if (!head->user_rect.width)
+			gone_with_children += !!head->num_children;
 
-		if (box_has_placeholder_name(head))
+		if (!head->user_rect.width ||
+		    (body - bodies) != head->body)
+			continue;
+
+		if (!parent ||
+		    head->num_children < parent->num_children ||
+		    parent->flagged < head->flagged)
+			parent = head;
+
+		existing_without_children += !head->num_children;
+	}
+
+	/* And just after this we can start name primary monitors. */
+	for (uint16_t i = 0; i < root->num_children; ++i) {
+		Box *const head = root->children[i];
+		if (head->flagged && box_has_placeholder_name(head)) {
 			box_clear_name(head);
-
-		/* Make ex-monitor into a common box. Though we can do it only if
-		 * there are some connected monitors currently. Otherwise we keep
-		 * such monitors hanging and next time, when there will be some
-		 * mointors connected again, we can use the stored info to
-		 * restore them. */
-		if (!head->user_rect.width && parent)
-		{
-			free(head->class), head->class = NULL;
-			head->user_rect.height = 0;
-
-			box_reparent(parent, 0, head);
-			parent = head->parent;
-
-			box_vacuum(head);
-		} else {
-			if (!head->user_rect.width)
-				/* A little bit hacky since old value gone. But it
-				 * can occur only when there are no connected
-				 * monitors so user will not see anything about it.
-				 * */
-				head->user_rect.width = 1;
 			box_name(head);
 		}
+	}
+
+	/* And then name remaining boxes. (Mostly means new monitors.) */
+	for (uint16_t i = 0; i < root->num_children; ++i) {
+		Box *const head = root->children[i];
+		if (box_has_placeholder_name(head)) {
+			box_clear_name(head);
+			box_name(head);
+		}
+	}
+
+	/* Reparent contents of gone monitors into some visible space. Note that
+	 * we must walk backwards since unused heads get cleaned up. */
+	for (uint16_t i = root->num_children; 0 < i;) {
+		Box *const head = root->children[--i];
+		if (!head->user_rect.width && parent) {
+			free(head->class), head->class = NULL;
+
+			if (0 < gone_with_children &&
+			    gone_with_children == existing_without_children)
+			{
+				/* Find first kept head. */
+				for (uint16_t j = 0;; ++j) {
+					Box *const into_head = root->children[j];
+					if (into_head->user_rect.width &&
+					    (body - bodies) == into_head->body &&
+					    !into_head->num_children)
+					{
+						box_swap(into_head, head);
+						box_delete(into_head);
+						break;
+					}
+				}
+			} else {
+				head->user_rect.height = 0;
+				box_reparent(parent, 0, head);
+				parent = head->parent;
+				box_vacuum(head);
+			}
+		} else if (!head->user_rect.width)
+			/* A little bit hacky since old value gone. But it
+			 * can occur only when there are no connected
+			 * monitors so user will perceive nothing from it
+			 * anyway. */
+			head->user_rect.width = 1;
 	}
 
 	/*MAN(HOOKS)
