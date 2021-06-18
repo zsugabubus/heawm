@@ -333,6 +333,7 @@ struct Box {
 	     focus_lock: 1, /**< Fix focus position on screen by always swapping
 	                      newly focused window with previously focused
 	                      window */
+	     shaped: 1, /**< Client has shaped bounding box. */
 	     vertical: 1;
 
 	char *title;
@@ -496,6 +497,11 @@ typedef struct {
 static uint16_t const MONITOR_GAP = 0;
 static uint16_t const CONTAINER_GAP = 4;
 static uint16_t const WINDOW_GAP = 1;
+static uint16_t const BORDER_RADIUS = 0;
+/**
+ * Do not apply border radius for shaped windows.
+ */
+static bool const BORDER_RADIUS_FOR_SHAPED = true;
 
 static char const *label_font = "monospace";
 static Point label_rect = { .x = 30, .y = 60 }; /* In pts */
@@ -1883,6 +1889,72 @@ box_update_net(Box const *const box)
 			i, list);
 }
 
+static bool
+box_update_shape(Box const *const box)
+{
+	if (!BORDER_RADIUS ||
+	    (!BORDER_RADIUS_FOR_SHAPED && box->shaped))
+		return false;
+
+	xcb_pixmap_t const pid = xcb_generate_id(conn);
+	xcb_gcontext_t const cid = xcb_generate_id(conn);
+
+	DEBUG_CHECK(xcb_create_pixmap, conn,
+		1, /* Mask is on or off thus 1 bit. */
+		pid,
+		box->frame,
+		box->rect.width, box->rect.height);
+	DEBUG_CHECK(xcb_create_gc, conn, cid, pid, XCB_GC_FOREGROUND,
+			(uint32_t const[]){ true });
+
+	uint16_t r = BORDER_RADIUS;
+	r = MIN(r, box->rect.width / 2);
+	r = MIN(r, box->rect.height / 2);
+
+	/* Cross between quarter arcs. */
+	DEBUG_CHECK(xcb_poly_fill_rectangle, conn, pid, cid, 2,
+			(xcb_rectangle_t const[]){
+				{
+					.x = 0,
+					.y = r,
+					.width = box->rect.width,
+					.height = 2 * r < box->rect.height ? box->rect.height - 2 * r : 0,
+				},
+				{
+					.x = r,
+					.y = 0,
+					.width = 2 * r < box->rect.width ? box->rect.width - 2 * r : 0,
+					.height = box->rect.height,
+				}
+			});
+
+	/* Corners. */
+	DEBUG_CHECK(xcb_poly_fill_arc, conn, pid, cid, 4,
+			(xcb_arc_t const[]){
+				{ 0,                       0,                        2 * r, 2 * r, 1 * 90 * 64, 90 * 64 },
+				{ box->rect.width - 2 * r, 0,                        2 * r, 2 * r, 0 * 90 * 64, 90 * 64 },
+				{ box->rect.width - 2 * r, box->rect.height - 2 * r, 2 * r, 2 * r, 3 * 90 * 64, 90 * 64 },
+				{ 0,                       box->rect.height - 2 * r, 2 * r, 2 * r, 2 * 90 * 64, 90 * 64 },
+			});
+	DEBUG_CHECK(xcb_shape_mask, conn,
+			XCB_SHAPE_SK_BOUNDING, XCB_SHAPE_SK_BOUNDING,
+			box->frame,
+			0, 0, /* Offset. */
+			pid);
+	DEBUG_CHECK(xcb_free_pixmap, conn, pid);
+	DEBUG_CHECK(xcb_free_gc, conn, cid);
+
+	if (box->shaped)
+		/* Frame = client bounds /\ radius. */
+		DEBUG_CHECK(xcb_shape_combine, conn, XCB_SHAPE_SO_INTERSECT,
+				XCB_SHAPE_SK_BOUNDING, XCB_SHAPE_SK_BOUNDING,
+				box->frame,
+				0, 0, /* Offset. */
+				box->window);
+
+	return true;
+}
+
 static void
 box_update(Box *const box)
 {
@@ -1984,6 +2056,8 @@ box_update(Box *const box)
 			DEBUG_CHECK(xcb_configure_window, conn, box->frame, mask, list);
 
 			if ((XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT) & mask) {
+				box_update_shape(box);
+
 				mask = XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT;
 				list[0] = box->rect.width;
 				list[1] = box->rect.height;
@@ -5358,21 +5432,26 @@ static void
 handle_shape_notify(xcb_shape_notify_event_t const *const event)
 {
 	Box *const box = box_find_by_window(root, offsetof(Box, window), event->affected_window);
-	if (!box)
-		return;
+	if (box) {
+		if (XCB_SHAPE_SK_BOUNDING == event->shape_kind)
+			box->shaped = event->shaped;
 
-	if (event->shaped)
-		DEBUG_CHECK(xcb_shape_combine, conn, XCB_SHAPE_SO_SET,
-				event->shape_kind, event->shape_kind,
-				box->frame,
-				0, 0, /* offset */
-				box->window);
-	else
-		DEBUG_CHECK(xcb_shape_mask, conn,
-				event->shape_kind, event->shape_kind,
-				box->frame,
-				0, 0, /* offset */
-				XCB_PIXMAP_NONE);
+		if (box_update_shape(box)) {
+			/* Nothing, already done. */
+		} else if (event->shaped) {
+			DEBUG_CHECK(xcb_shape_combine, conn, XCB_SHAPE_SO_SET,
+					event->shape_kind, event->shape_kind,
+					box->frame,
+					0, 0, /* Offset. */
+					box->window);
+		} else {
+			DEBUG_CHECK(xcb_shape_mask, conn,
+					event->shape_kind, event->shape_kind,
+					box->frame,
+					0, 0, /* Offset. */
+					XCB_PIXMAP_NONE);
+		}
+	}
 }
 
 static bool
