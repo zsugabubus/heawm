@@ -2055,7 +2055,7 @@ box_update(Box *const box)
 			/* printf("%*.s configure n=%d\n", depth, "", i); */
 			DEBUG_CHECK(xcb_configure_window, conn, box->frame, mask, list);
 
-			if ((XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT) & mask) {
+			if (layout_changed) {
 				box_update_shape(box);
 
 				mask = XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT;
@@ -2169,9 +2169,8 @@ body_update_net(Body *const body)
 static void
 do_update(void)
 {
-	do
+	while (root->content_changed)
 		box_update(root);
-	while (root->content_changed);
 
 	for_each_body {
 		assert(body->num_labels_used <= body->num_labels_mapped);
@@ -2673,15 +2672,14 @@ box_swap(Box *const x, Box *const y)
 
 	SWAP(x->parent, y->parent);
 	SWAP(x->user_rect, y->user_rect);
-	SWAP(x->rect, y->rect);
-	SWAP(x->weight, y->weight);
 
-	x->position_changed = true;
-	y->position_changed = true;
-	x->layout_changed = true;
-	y->layout_changed = true;
-	x->should_map = true;
-	y->should_map = true;
+	xcb_rectangle_t xrect = x->rect, yrect = y->rect;
+	box_set_size(x, yrect.width, yrect.height);
+	box_set_position(x, yrect.x, yrect.y);
+	box_set_size(y, xrect.width, xrect.height);
+	box_set_position(y, xrect.x, xrect.y);
+
+	SWAP(x->weight, y->weight);
 
 	box_update_children(x->parent);
 	box_update_children(y->parent);
@@ -2776,7 +2774,7 @@ hand_focus_box_internal(Hand *const hand, Box *const box)
 
 	if (hand->focus) {
 		box_propagate_labels_change(hand->focus);
-		hand->focus->layout_changed = true;
+		hand->focus->layout_changed |= box_is_container(hand->focus);
 	}
 
 	/* Find most upper locked box. */
@@ -2821,7 +2819,7 @@ hand_focus_box_internal(Hand *const hand, Box *const box)
 		hand->input_focus->should_focus = true;
 
 	box->label_changed = true;
-	box->layout_changed = true;
+	box->layout_changed |= box_is_container(box);
 	hands_update_focus();
 
 	box_swap(box, recents[1]);
