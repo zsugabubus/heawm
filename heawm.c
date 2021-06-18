@@ -270,6 +270,12 @@ struct Box {
 
 	uint16_t num_children,
 	/**
+	 * Show only last N focused children. (Not counting user_concealed.)
+	 *
+	 * Default: 0. n=1: maximize.
+	 */
+	         num_visible,
+	/**
 	 * Internal variable used to track progress of recursive searching
 	 *
 	 * - it does not occupy too much space and we do not have to
@@ -379,7 +385,6 @@ enum HandMode {
 	HAND_MODE_NULL,
 	HAND_MODE_MOVE,
 	HAND_MODE_NAME,
-	HAND_MODE_OPEN,
 };
 
 typedef struct {
@@ -631,7 +636,7 @@ spawn(char const *argv[], void(*fork_cb)(void *), void *arg)
 }
 
 static Box *
-find_box_by_window(Box *const root, unsigned const offset, xcb_window_t const window)
+box_find_by_window(Box *const root, unsigned const offset, xcb_window_t const window)
 {
 	if (XCB_WINDOW_NONE == window)
 		return NULL;
@@ -653,7 +658,7 @@ find_box_in_body_by_window(Body *const body, unsigned const offset, xcb_window_t
 		if (body_pos != head->body)
 			continue;
 
-		Box *const box = find_box_by_window(head, offset, window);
+		Box *const box = box_find_by_window(head, offset, window);
 		if (box)
 			return box;
 	}
@@ -1181,7 +1186,7 @@ init_atoms(void)
  * @return whether search finished
  */
 static bool
-find_box_by_name(Box **const optimum, char name[static membersizeof(Box, name)])
+box_find_by_name(Box **const optimum, char name[static membersizeof(Box, name)])
 {
 	uint8_t const n = strnlen(name, membersizeof(Box, name));
 	if (!n)
@@ -1428,7 +1433,7 @@ box_save_pointer(Box *const box, Hand const *const hand)
 	if (!reply)
 		return;
 
-	Box const *const base = find_box_by_window(root, offsetof(Box, frame), reply->child);
+	Box const *const base = box_find_by_window(root, offsetof(Box, frame), reply->child);
 	Box_pointers(box)[hand - hands] = base
 		? (BoxPointer){
 			.window = reply->child,
@@ -1542,11 +1547,12 @@ hand_focus(Hand *const hand)
 }
 
 static bool
-box_has_hand_focus(Box const *const box)
+box_has_any_hand_focus(Box const *const box)
 {
 	for_each_hand
 		if (box == hand->focus)
 			return true;
+
 	return false;
 }
 
@@ -1555,7 +1561,7 @@ box_is_visible(Box const *const box)
 {
 	bool const ret = !box->concealed || box->parent->focus_seq == box->focus_seq;
 	if (!ret && box->parent->focus_seq == root->focus_seq)
-		return box_has_hand_focus(box->parent);
+		return box_has_any_hand_focus(box->parent);
 	return ret;
 }
 
@@ -1593,7 +1599,7 @@ box_label_is_visible(Box const *const box)
 		case HAND_MODE_NULL:
 			if (box->hide_label &&
 			    /* Show labels for focused containers. */
-			    !(box_is_container(box) && box_has_hand_focus(box)))
+			    !(box_is_container(box) && box_has_any_hand_focus(box)))
 				return false;
 			break;
 
@@ -1682,8 +1688,64 @@ static void
 box_update(Box *const box);
 
 static void
+box_do_layout(Box const *const box)
+{
+	uint16_t n = box->num_visible;
+	if (!n) {
+		for (uint16_t i = 0; i < box->num_children; ++i) {
+			Box *const child = box->children[i];
+			if (!child->user_concealed)
+				child->concealed = false;
+		}
+		return;
+	}
+
+	uint32_t min_focus_seq = UINT32_MAX;
+
+	for (uint16_t i = 0; i < box->num_children; ++i) {
+		Box *const child = box->children[i];
+		if (child->user_concealed && child->concealed)
+			continue;
+
+		if (!n) {
+			/* May be equal only if never focused (= 0). */
+			if (child->focus_seq <= min_focus_seq)
+				continue;
+
+			uint32_t new_min_focus_seq = child->focus_seq;
+
+			/* Find second least. */
+			for (uint16_t j = 0; j < i; ++j) {
+				Box *const child = box->children[j];
+				if ((!child->user_concealed ||
+				     !child->concealed) &&
+				    min_focus_seq < child->focus_seq &&
+				    child->focus_seq < new_min_focus_seq)
+					new_min_focus_seq = child->focus_seq;
+			}
+
+			min_focus_seq = new_min_focus_seq;
+		} else {
+			if (child->focus_seq < min_focus_seq)
+				min_focus_seq = child->focus_seq;
+			--n;
+		}
+	}
+
+	for (uint16_t i = 0; i < box->num_children; ++i) {
+		Box *const child = box->children[i];
+		if (!child->user_concealed) {
+			bool b = child->focus_seq < min_focus_seq;
+			child->concealed = b;
+		}
+	}
+}
+
+static void
 box_update_layout(Box const *const box)
 {
+	box_do_layout(box);
+
 	uint32_t total_weight = 0;
 	uint16_t tiles = 0;
 
@@ -1828,9 +1890,9 @@ box_update(Box *const box)
 
 	if (box != root)
 		printf(
-				"%*.sbox 0x%p (%.*s) win=0x%x frame=0x%x %ux%u+%d+%d u%ux%u+%d+%d leader=%x"
-				" title=\"%s\""
-				" class=\"%s\", \"%s\" focus#=%d/%d hand=%d conceal#=%d %c%c%c%c\n",
+				"%*.sbox 0x%p (%.*s) win=0x%x fr=0x%x %ux%u+%d+%d u%ux%u+%d+%d leader=%x"
+				" title=\"%.15s\""
+				" class=\"%s\", \"%s\" focus#=%d/%d hand=%d conceal#=%d nvis=%d %c%c%c%c\n",
 				depth, "",
 				(void *)box,
 				(int)sizeof box->name, box->name,
@@ -1844,6 +1906,7 @@ box_update(Box *const box)
 				box->focus_seq, root->focus_seq,
 				box->focus_hand,
 				box->conceal_seq,
+				box->num_visible,
 				box_is_floating(box) ? 'F' : '-',
 				box->focus_lock ? 'L' : '-',
 				box->user_concealed ? 'U' : '-',
@@ -2047,9 +2110,11 @@ do_update(void)
 	}
 }
 
-/* called after box children have been changed */
+/**
+ * Must be called after box children have been changed.
+ */
 static void
-box_update_focus_seq(Box *box)
+box_update_children(Box *box)
 {
 	assert(box_is_container(box));
 
@@ -2101,7 +2166,7 @@ box_unparent(Box *const box)
 		(--parent->num_children - pos) * sizeof *child
 	);
 
-	box_update_focus_seq(parent);
+	box_update_children(parent);
 	box->parent = NULL;
 
 	return pos;
@@ -2154,7 +2219,7 @@ hand_find_recents(Hand const *const hand, Box *root, uint32_t const focus_seq, B
  * Make sure all hand has focused window.
  */
 static void
-focus_all_hands(uint32_t focus_seq)
+hands_try_focus_all(uint32_t focus_seq)
 {
 	for_each_hand {
 		if (hand->input_focus)
@@ -2177,7 +2242,7 @@ focus_all_hands(uint32_t focus_seq)
  * Increment highest focus number after any of the hands focus changed.
  */
 static void
-increase_focus_seq(void)
+hands_update_focus(void)
 {
 	uint32_t const old_focus_seq = root->focus_seq++;
 
@@ -2232,23 +2297,6 @@ hand_input_reset(Hand *const hand)
 }
 
 static void
-box_open(Box *const box, bool open) {
-	box_propagate_change(box);
-
-	Box *b;
-	for_each_box(b, box) {
-		b->layout_changed = true;
-		b->content_changed = true;
-		if (open) {
-			b->saved_concealed = b->concealed;
-			b->concealed = false;
-		} else {
-			b->concealed = b->saved_concealed;
-		}
-	}
-}
-
-static void
 hand_leave_mode(Hand *const hand)
 {
 	hand_do_mode_changes(hand);
@@ -2257,10 +2305,6 @@ hand_leave_mode(Hand *const hand)
 	switch (hand->mode) {
 	case HAND_MODE_MOVE:
 		hand_focus_box(hand, hand->mode_box);
-		break;
-
-	case HAND_MODE_OPEN:
-		box_open(hand->mode_box, false);
 		break;
 
 	default:
@@ -2328,8 +2372,8 @@ box_delete(Box *box)
 		 * focus_seq is not focused in any hand. and when we try to
 		 * focus that box it seems like it has been already focused.
 		 * since root->focus_seq == that_box->focus_seq. */
-		increase_focus_seq();
-		focus_all_hands(real_focus_seq);
+		hands_update_focus();
+		hands_try_focus_all(real_focus_seq);
 	}
 
 	if (!box_is_container(box)) {
@@ -2449,12 +2493,6 @@ box_realloc(Box **const box, size_t const new_size)
 }
 
 static void
-box_setup_leg(Box *const box)
-{
-	box->concealed = true;
-}
-
-static void
 box_reparent(Box *into, uint16_t pos, Box *box)
 {
 	assert(box_is_container(into));
@@ -2488,11 +2526,8 @@ box_reparent(Box *into, uint16_t pos, Box *box)
 	if (old_parent)
 		box_vacuum(old_parent);
 
-	box_update_focus_seq(into);
+	box_update_children(into);
 	box_name(box);
-
-	if (into->parent && box_is_monitor(into))
-		box_setup_leg(box);
 }
 
 __attribute__((malloc))
@@ -2574,8 +2609,8 @@ box_swap(Box *const x, Box *const y)
 	x->should_map = true;
 	y->should_map = true;
 
-	box_update_focus_seq(x->parent);
-	box_update_focus_seq(y->parent);
+	box_update_children(x->parent);
+	box_update_children(y->parent);
 
 	/* E.g. Empty monitor has been swapped. */
 	if (box_is_container(x))
@@ -2713,7 +2748,7 @@ hand_focus_box_internal(Hand *const hand, Box *const box)
 
 	box->label_changed = true;
 	box->layout_changed = true;
-	increase_focus_seq();
+	hands_update_focus();
 
 	box_swap(box, recents[1]);
 
@@ -2726,6 +2761,7 @@ hand_focus_box_internal(Hand *const hand, Box *const box)
 static void
 hand_focus_box(Hand *const hand, Box *const box)
 {
+	/* Focus same-named legs. */
 	Box *neck = box;
 	if (!box_is_monitor(neck) && 1 < root->num_children) {
 		while (!box_is_monitor(neck->parent))
@@ -2880,7 +2916,7 @@ process_reply:
 	return (xcb_get_property_cookie_t){ 0 };
 
 send_request:
-	if (from_event && !(box.box = find_box_by_window(root, offsetof(Box, window), box.window)))
+	if (from_event && !(box.box = box_find_by_window(root, offsetof(Box, window), box.window)))
 		return (xcb_get_property_cookie_t){ 0 };
 
 	if (!cookie.sequence) {
@@ -2908,12 +2944,9 @@ box_reparent_into(Box *const parent, Box *const child)
 		box_reparent_checked(parent->parent, box_get_pos(parent), container);
 
 		box_reparent_checked(container, 0, parent), container = parent->parent;
-		parent->user_concealed = false;
-		parent->concealed = true;
-
 		box_reparent_checked(container, 1, child);
-		child->user_concealed = false;
-		child->concealed = true;
+
+		container->num_visible = 1;
 	} else {
 		box_reparent_checked(parent, 0, child);
 	}
@@ -2960,7 +2993,7 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 
 	if (0 < num_hands) {
 		Box *origin;
-		origin = find_box_by_window(root, offsetof(Box, leader), box->leader);
+		origin = box_find_by_window(root, offsetof(Box, leader), box->leader);
 
 		/* Find the hand that could possibly create this window. */
 		if (origin) {
@@ -3132,7 +3165,7 @@ setup_signals(void)
 }
 
 static void
-update_hands(void);
+hands_update(void);
 
 static void
 init_extensions(void)
@@ -3552,6 +3585,7 @@ body_update_heads(Body *const body)
 		Box *const head = box_new();
 		head->body = body - bodies;
 		head->class = NULL;
+		head->num_visible = 1;
 		head->flagged = 1; /* Primary. */
 		box_set_placeholder_name(head);
 		box_reparent(root, 0, head);
@@ -3590,6 +3624,7 @@ body_update_heads(Body *const body)
 				head = box_new();
 				head->body = body - bodies;
 				head->class = name;
+				head->num_visible = 1;
 				name = NULL;
 
 				/* Do not name it yet. */
@@ -3745,7 +3780,7 @@ setup_display(void)
 
 	DEBUG_CHECK(xcb_ungrab_server, conn);
 
-	update_hands();
+	hands_update();
 }
 
 static void
@@ -3918,7 +3953,7 @@ handle_unmap_notify(xcb_unmap_notify_event_t const *const event)
 		return;
 
 	/* printf("unmap notify %x event=%x, from_configure=%d\n", event->window, event->event, event->from_configure); */
-	Box *const box = find_box_by_window(root, offsetof(Box, window), event->window);
+	Box *const box = box_find_by_window(root, offsetof(Box, window), event->window);
 	if (box)
 		box_delete(box);
 }
@@ -3927,7 +3962,7 @@ static void
 handle_map_request(xcb_map_request_event_t const *const event)
 {
 	/* printf("map request %x\n", event->window); */
-	Box *const box = find_box_by_window(root, offsetof(Box, window), event->window);
+	Box *const box = box_find_by_window(root, offsetof(Box, window), event->window);
 	if (!box)
 		box_window(event->parent, event->window);
 }
@@ -3952,7 +3987,7 @@ static void
 handle_configure_request(xcb_configure_request_event_t const *const event)
 {
 	Box *box;
-	if ((box = find_box_by_window(root, offsetof(Box, window), event->window))) {
+	if ((box = box_find_by_window(root, offsetof(Box, window), event->window))) {
 		/* GPLv3 Annex 1: DO NOT FUCKING TOUCH IT. PLEASE. */
 		DEBUG_CHECK(xcb_send_event, conn, false, box->window,
 				XCB_EVENT_MASK_STRUCTURE_NOTIFY,
@@ -4032,7 +4067,7 @@ static void
 handle_client_message(xcb_client_message_event_t const *const event)
 {
 	if (ATOM(_NET_CLOSE_WINDOW) == event->type) {
-		Box *const box = find_box_by_window(root, offsetof(Box, window), event->window);
+		Box *const box = box_find_by_window(root, offsetof(Box, window), event->window);
 		if (box)
 			box_close(box);
 	} else if (ATOM(_NET_ACTIVE_WINDOW) == event->type) {
@@ -4041,7 +4076,7 @@ handle_client_message(xcb_client_message_event_t const *const event)
 		if (PAGER != event->data.data32[0])
 			return;
 
-		Box *const box = find_box_by_window(root, offsetof(Box, window), event->window);
+		Box *const box = box_find_by_window(root, offsetof(Box, window), event->window);
 		if (box) {
 			Hand *hand = NULL_HAND == box->focus_hand
 				? &hands[0]
@@ -4054,10 +4089,10 @@ handle_client_message(xcb_client_message_event_t const *const event)
 }
 
 static Hand *
-find_hand_by_master_pointer(xcb_input_device_id_t const pointer);
+hand_find_by_master_pointer(xcb_input_device_id_t const pointer);
 
 static void
-update_hands(void)
+hands_update(void)
 {
 	XCB_GET_REPLY(reply, xcb_input_xi_query_device, XCB_INPUT_DEVICE_ALL);
 	if (!reply)
@@ -4106,7 +4141,7 @@ update_hands(void)
 		int const master_name_len = xcb_input_xi_device_info_name_length(input_device) - strlen(" pointer");
 		char const *const master_name = xcb_input_xi_device_info_name(input_device);
 
-		Hand *const old_hand = find_hand_by_master_pointer(input_device->deviceid);
+		Hand *const old_hand = hand_find_by_master_pointer(input_device->deviceid);
 
 		/*MAN(RESOURCES)
 		 * .SS "Hand Resources"
@@ -4262,13 +4297,13 @@ update_hands(void)
 
 	/* Forget deattached hands' focus by incrementing focus number of
 	 * hands alive. */
-	increase_focus_seq();
+	hands_update_focus();
 
 	free(hands);
 	hands = new_hands;
 	num_hands = new_num_hands;
 
-	focus_all_hands(root->focus_seq);
+	hands_try_focus_all(root->focus_seq);
 
 	/*MAN(HOOKS)
 	 * .TP
@@ -4288,16 +4323,15 @@ handle_input_hierarchy_change(xcb_input_hierarchy_event_t const *const event)
 	                    XCB_INPUT_HIERARCHY_MASK_SLAVE_REMOVED |
 	                    XCB_INPUT_HIERARCHY_MASK_SLAVE_ATTACHED |
 	                    XCB_INPUT_HIERARCHY_MASK_SLAVE_DETACHED))
-		update_hands();
+		hands_update();
 }
 
 static Hand *
-find_hand_by_master_pointer(xcb_input_device_id_t const master_pointer)
+hand_find_by_master_pointer(xcb_input_device_id_t const master_pointer)
 {
-	for_each_hand {
+	for_each_hand
 		if (master_pointer == hand->master_pointer)
 			return hand;
-	}
 
 	return NULL;
 }
@@ -4343,7 +4377,7 @@ hand_input_try_jump(Hand *const hand)
 	Box *box = hand->focus
 		? (box_is_container(hand->focus) ? hand->focus : hand->focus->parent)
 		: NULL;
-	bool const complete = find_box_by_name(&box, hand->user_input);
+	bool const complete = box_find_by_name(&box, hand->user_input);
 	bool ret = false;
 
 	assert(box != root);
@@ -4454,73 +4488,30 @@ hand_focus_parent(Hand *const hand)
 }
 
 static void
-box_maximize(Box *const box, bool const recursive)
+box_maximize(Box *box, bool const recursive)
 {
-	enum State {
-		STATE_DISCOVER,
-		STATE_FIRST = STATE_DISCOVER,
-		STATE_PREPARE,
-		STATE_COMMIT,
-		STATE_LAST = STATE_COMMIT,
-	};
-
 	assert(box_is_container(box));
 
 	if (box == root)
 		return;
 
-	bool conceal = false;
-
-	uint16_t max_conceal_seq = 0;
+	box_propagate_change(box);
 
 	++root->conceal_seq;
 
-	/* when user requested unconcealing, first check for any box that is
-	 * not concealed, this way user can hide any newly appearing box */
-	for (enum State state = STATE_FIRST;
-	     state <= STATE_LAST;
-	     ++state)
-	{
-		Box *parent = box;
-
-		if (state == STATE_COMMIT)
-			/* propagate changes once, from the most inner box */
-			box_propagate_change(parent);
-
-		do {
-			uint16_t curr_conceal_seq = parent->conceal_seq;
-
-			for (uint16_t i = 0; i < parent->num_children; ++i) {
-				Box *const child = parent->children[i];
-				/* do not even touch user stuff */
-				if (child->user_concealed)
-					continue;
-
-				switch (state) {
-				case STATE_DISCOVER:
-					if (!child->concealed)
-						conceal = true;
-					break;
-
-				case STATE_PREPARE:
-					if (conceal != child->concealed)
-						if (max_conceal_seq < curr_conceal_seq)
-							max_conceal_seq = curr_conceal_seq;
-					break;
-
-				case STATE_COMMIT:
-					if (conceal != child->concealed &&
-					   (conceal || max_conceal_seq == curr_conceal_seq))
-					{
-						child->concealed = conceal,
-						parent->layout_changed = true;
-						parent->conceal_seq = root->conceal_seq;
-					}
-					break;
-				}
-			}
-		} while ((recursive && !box_is_floating(parent)) && (parent = parent->parent, true));
-	}
+	uint16_t conceal_seq = box->conceal_seq;
+	int zoom = 1 != box->num_visible;
+	do {
+		if (!zoom) {
+			if (box->conceal_seq != conceal_seq)
+				break;
+			box->num_visible = 0;
+		} else if (1 != box->num_visible) {
+			box->conceal_seq = root->conceal_seq;
+			box->num_visible = 1;
+		}
+		box->layout_changed = true;
+	} while ((recursive && !box_is_floating(box)) && (box = box->parent, true));
 }
 
 static void
@@ -4532,6 +4523,24 @@ hand_focus_child(Hand *const hand)
 			box = box->parent;
 		hand_focus_box(hand, box);
 	}
+}
+
+static void
+box_step_num_visible(Box *box, int const dir)
+{
+	box = box_is_container(box) ? box : box->parent;
+
+	if (0 < dir)
+		++box->num_visible;
+
+	if (box->num_children < box->num_visible)
+		box->num_visible = box->num_children;
+
+	if (dir < 0 && 0 < box->num_visible)
+		--box->num_visible;
+
+	box->label_changed = true;
+	box_propagate_change(box)->layout_changed = true;
 }
 
 static bool
@@ -4636,28 +4645,6 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .B Mod-(
-	 * Open up all boxes.
-	 */
-	case XKB_KEY_parenleft:
-		if (!hand->focus)
-			break;
-
-		hand->mode = HAND_MODE_OPEN;
-		hand->mode_box = hand->focus;
-		if (!box_is_container(hand->mode_box)) {
-			while ((!hand->mode_box->concealed ||
-			        1 == hand->mode_box->parent->num_children) &&
-			       !box_is_floating(hand->mode_box->parent))
-				hand->mode_box = hand->mode_box->parent;
-			hand->mode_box = hand->mode_box->parent;
-		}
-
-		box_open(hand->mode_box, true);
-		break;
-
-	/*MAN(Keybindings)
-	 * .TP
 	 * .BR Mod-Esc
 	 * Escape from wherever you are.
 	 */
@@ -4689,6 +4676,17 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 
 	case XKB_KEY_comma:
 		hand_focus_child(hand);
+		break;
+
+	case XKB_KEY_braceleft:
+	case XKB_KEY_braceright:
+		if (repeating)
+			break;
+
+		if (!hand->focus)
+			break;
+
+		box_step_num_visible(hand->focus, sym == XKB_KEY_braceright ? 1 : -1);
 		break;
 
 	case XKB_KEY_numbersign:
@@ -4777,33 +4775,6 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 	case HAND_MODE_NULL:
 		unreachable;
 		return;
-
-	case HAND_MODE_OPEN:
-		switch (KEY_MOD_MASK & event->mods.base) {
-		case 0:
-		case XCB_MOD_MASK_4:
-			if (hand_handle_input(hand, sym)) {
-				if (hand_input_try_jump(hand))
-					break;
-			} else if (XKB_KEY_parenleft == sym) {
-				Box *const parent = hand->mode_box->parent;
-				if (!parent)
-					return;
-
-				parent->layout_changed = true;
-				for (uint16_t i = 0; i < parent->num_children; ++i) {
-					Box *const child = parent->children[i];
-					if (hand->mode_box != child)
-						box_open(child, true);
-				}
-
-				hand->mode_box = parent;
-			}
-			return;
-		default:
-			return;
-		}
-		break;
 
 	case HAND_MODE_MOVE:
 		switch (KEY_MOD_MASK & event->mods.base) {
@@ -5121,8 +5092,21 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 		hand->focus->concealed = sym == XKB_KEY_s || sym == XKB_KEY_plus
 			? false
 			: hand->focus->user_concealed;
+
+		hand->focus->label_changed = true;
 		hand->focus->parent->layout_changed = true;
-		box_propagate_change(hand->focus)->label_changed = true;
+		box_propagate_change(hand->focus);
+		break;
+
+	case XKB_KEY_a:
+	case XKB_KEY_x:
+		if (repeating)
+			break;
+
+		if (!hand->focus)
+			break;
+
+		box_step_num_visible(hand->focus, sym == XKB_KEY_a ? 1 : -1);
 		break;
 
 	/*MAN(Keybindings)
@@ -5361,8 +5345,8 @@ handle_input_enter(xcb_input_enter_event_t const *const event)
 		return;
 
 	if (0 && XCB_MOD_MASK_4 == event->mods.base) {
-		Hand *const hand = find_hand_by_master_pointer(event->deviceid);
-		Box *const box = find_box_by_window(root, offsetof(Box, window), event->event);
+		Hand *const hand = hand_find_by_master_pointer(event->deviceid);
+		Box *const box = box_find_by_window(root, offsetof(Box, window), event->event);
 		printf("mod enter\n");
 		hand_focus_box(hand, box);
 	} else {
@@ -5373,7 +5357,7 @@ handle_input_enter(xcb_input_enter_event_t const *const event)
 static void
 handle_shape_notify(xcb_shape_notify_event_t const *const event)
 {
-	Box *const box = find_box_by_window(root, offsetof(Box, window), event->affected_window);
+	Box *const box = box_find_by_window(root, offsetof(Box, window), event->affected_window);
 	if (!box)
 		return;
 
