@@ -359,8 +359,7 @@ typedef struct {
 	xcb_pixmap_t shape;
 	int16_t x, y;
 	enum LabelType type: 2;
-	bool position_changed: 1,
-	     content_changed: 1;
+	bool position_changed: 1;
 	char name[membersizeof(Box, name)];
 } Label;
 
@@ -371,6 +370,7 @@ typedef struct {
 
 	uint32_t num_labels_used,
 	/* <= */ num_labels_mapped,
+	/* <= */ num_labels_created,
 	/* <= */ num_labels;
 	Label *labels;
 
@@ -915,8 +915,12 @@ label_new_for(Box *const box)
 	Body *const body = &bodies[box->body];
 
 	if (body->num_labels_used == body->num_labels) {
-		size_t const new_size = (body->num_labels * 8 / 5 /* Golden ratio. */) + 1;
-		body->labels = check_alloc(realloc(body->labels, new_size * sizeof *label));
+		size_t const new_size = (body->num_labels + 1) * 8 / 5 /* Golden ratio. */;
+		void *const p = realloc(body->labels, new_size * sizeof *body->labels);
+		if (!p)
+			return NULL;
+
+		body->labels = p;
 		body->num_labels = new_size;
 
 		memset(&body->labels[body->num_labels_used], 0,
@@ -972,7 +976,6 @@ check_cookie(xcb_void_cookie_t const cookie, char const *const request)
 static void
 label_set_name(Label *label, char name[static membersizeof(Label, name)])
 {
-	label->content_changed |= !!memcmp(label->name, name, sizeof label->name);
 	memcpy(label->name, name, sizeof label->name);
 }
 
@@ -1012,13 +1015,21 @@ box_compute_position(Box const *const box, enum Orientation const ox, enum Orien
 }
 
 static void
-label_create_window(Label *const label)
+label_destroy(Label *const label)
+{
+	DEBUG_CHECK(xcb_destroy_window, conn, label->window);
+	DEBUG_CHECK(xcb_free_pixmap, conn, label->shape);
+}
+
+static void
+label_create(Label *const label)
 {
 	assert(label->base);
 	Body const *const body = &bodies[label->base->body];
 	xcb_screen_t const *const screen = body->screen;
 
-	label->window = xcb_generate_id(conn);
+	if (XCB_WINDOW_NONE == label->window)
+		label->window = xcb_generate_id(conn);
 
 	Box const *const monitor = box_get_head(label->base);
 	Point const size = monitor_convert_pt2px(monitor, label_rect);
@@ -1048,13 +1059,14 @@ label_create_window(Label *const label)
 
 	/* TODO: search for labels with the same name and type and copy shape from there */
 	/* setup its shape */
-	label->shape = xcb_generate_id(conn);
+	if (XCB_PIXMAP_NONE == label->shape)
+		label->shape = xcb_generate_id(conn);
 
 	DEBUG_CHECK(xcb_create_pixmap, conn,
-		/* mask is on or off */ 1,
-		label->shape,
-		label->window,
-		size.x, size.y);
+			1, /* Mask is on or off thus 1 bit. */
+			label->shape,
+			label->window,
+			size.x, size.y);
 
 	/* We need a valid pixmap so we use the bounding mask but we
 	 * use offsets to move it outside of the area making effective
@@ -1070,10 +1082,13 @@ static void
 label_update(Label *const label)
 {
 	Body *const body = &bodies[label->base->body];
-	bool const should_map = body->num_labels_mapped <= (label - body->labels);
 
-	if (XCB_WINDOW_NONE == label->window)
-		label_create_window(label);
+	bool const should_create = body->num_labels_created <= (label - body->labels);
+	if (should_create) {
+		assert(body->num_labels_created + 1 == body->num_labels_used);
+		body->num_labels_created = body->num_labels_used;
+		label_create(label);
+	}
 
 	if (label->position_changed) {
 		label->position_changed = false;
@@ -1090,17 +1105,15 @@ label_update(Label *const label)
 				});
 	}
 
-	if (1 || label->content_changed) {
-		label->content_changed = false;
-		label_repaint(label, true);
+	label_repaint(label, true);
 
-		DEBUG_CHECK(xcb_shape_mask, conn,
-				XCB_SHAPE_SO_SET, XCB_SHAPE_SK_BOUNDING,
-				label->window,
-				0, 0,
-				label->shape);
-	}
+	DEBUG_CHECK(xcb_shape_mask, conn,
+			XCB_SHAPE_SO_SET, XCB_SHAPE_SK_BOUNDING,
+			label->window,
+			0, 0,
+			label->shape);
 
+	bool const should_map = body->num_labels_mapped <= (label - body->labels);
 	if (should_map) {
 		assert(body->num_labels_mapped + 1 == body->num_labels_used);
 		body->num_labels_mapped = body->num_labels_used;
@@ -1624,12 +1637,14 @@ box_update_label(Box *const box)
 		return;
 
 	box_delete_labels(box);
+
 	if (!box_label_is_visible(box))
 		return;
 
-	char name[membersizeof(Box, name)];
-
 	Label *label = label_new_for(box);
+	if (!label)
+		return;
+
 	Hand const *naming = NULL;
 	for_each_hand
 		if (hand->mode_box == box &&
@@ -1640,7 +1655,7 @@ box_update_label(Box *const box)
 		}
 
 	if (naming) {
-		char display_name[sizeof name + 1];
+		char display_name[membersizeof(Box, name) + 1];
 		memcpy(display_name, naming->user_input, sizeof display_name);
 		display_name[strnlen(display_name, sizeof display_name)] = '?';
 		label_set_name(label, display_name);
@@ -1900,10 +1915,10 @@ box_update_shape(Box const *const box)
 	xcb_gcontext_t const cid = xcb_generate_id(conn);
 
 	DEBUG_CHECK(xcb_create_pixmap, conn,
-		1, /* Mask is on or off thus 1 bit. */
-		pid,
-		box->frame,
-		box->rect.width, box->rect.height);
+			1, /* Mask is on or off thus 1 bit. */
+			pid,
+			box->frame,
+			box->rect.width, box->rect.height);
 	DEBUG_CHECK(xcb_create_gc, conn, cid, pid, XCB_GC_FOREGROUND,
 			(uint32_t const[]){ true });
 
@@ -2177,6 +2192,26 @@ do_update(void)
 		while (body->num_labels_used < body->num_labels_mapped) {
 			Label *label = &body->labels[--body->num_labels_mapped];
 			DEBUG_CHECK(xcb_unmap_window, conn, label->window);
+		}
+
+		/* Allow equality so zero elements will get cleaned up. */
+		uint32_t half = body->num_labels_created / 2;
+		if (body->num_labels_mapped <= half) {
+			while (half < body->num_labels_created) {
+				Label *label = &body->labels[--body->num_labels_created];
+				label_destroy(label);
+			}
+
+			/* Labels above created, contain no data to be cleaned up
+			 * so we can simply shrink the memory. */
+			half = body->num_labels / 2;
+			if (body->num_labels_created <= half) {
+				void *const p = realloc(body->labels, half * sizeof *body->labels);
+				if (p) {
+					body->labels = p;
+					body->num_labels = half;
+				}
+			}
 		}
 
 		body_update_net(body);
@@ -4088,7 +4123,7 @@ handle_expose(xcb_expose_event_t const *const event)
 	if (0 < event->count)
 		return;
 
-	for_each_body {
+	for_each_body
 		for (uint32_t j = 0; j < body->num_labels_used; ++j) {
 			Label const *const label = &body->labels[j];
 			if (label->window == event->window) {
@@ -4096,7 +4131,6 @@ handle_expose(xcb_expose_event_t const *const event)
 				return;
 			}
 		}
-	}
 }
 
 static void
