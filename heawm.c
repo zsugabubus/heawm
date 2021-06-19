@@ -503,7 +503,8 @@ static uint16_t const BORDER_RADIUS = 0;
  */
 static bool const BORDER_RADIUS_FOR_SHAPED = true;
 
-static char const *label_font = "monospace";
+static char const LABEL_FONT_DEFAULT[] = "monospace";
+static char *label_font;
 static Point label_rect = { .x = 30, .y = 60 }; /* In pts */
 static int label_stroke = 2;
 static int label_font_size = 17;
@@ -742,7 +743,7 @@ label_repaint(Label const *const label, bool const shape)
 	if (/* No compositor? */true)
 		cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
 
-	cairo_select_font_face(cr, label_font,
+	cairo_select_font_face(cr, label_font ? label_font : LABEL_FONT_DEFAULT,
 			CAIRO_FONT_SLANT_NORMAL,
 			CAIRO_FONT_WEIGHT_BOLD);
 	cairo_set_font_size(cr, font_size);
@@ -3358,6 +3359,55 @@ xcb_connection_strerror(int const error)
 	}
 }
 
+static bool
+load_resource(char **const out, char const *const format, ...)
+{
+	if (!xrm)
+		return false;
+
+	va_list ap;
+	char name[128];
+
+	va_start(ap, format);
+	memcpy(name, "heawm.", 6);
+	vsnprintf(name + 6, sizeof(name) - 6, format, ap);
+	va_end(ap);
+
+	return 0 == xcb_xrm_resource_get_string(xrm, name, NULL, out);
+}
+
+static void
+xrm_update(void)
+{
+	char *value;
+
+	if (load_resource(&value, "label.fontFamily")) {
+		free(label_font);
+		label_font = value;
+	}
+
+	if (load_resource(&value, "label.fontSize")) {
+		label_font_size = strtol(value, NULL, 10);
+		free(value);
+	}
+
+	if (load_resource(&value, "label.strokeWidth")) {
+		label_stroke = strtol(value, NULL, 10);
+		free(value);
+	}
+}
+
+static void
+xrm_open(void)
+{
+	if (xrm)
+		xcb_xrm_database_free(xrm);
+	if (!(xrm = xcb_xrm_database_from_default(conn)))
+		fprintf(stderr, "Could not load X resource manager\n");
+
+	xrm_update();
+}
+
 static void
 connect_display(void)
 {
@@ -3388,41 +3438,9 @@ connect_display(void)
 
 	init_extensions();
 
-	if (!(xrm = xcb_xrm_database_from_default(conn)))
-		fprintf(stderr, "Could not load X resources\n");
 
 	/* BROADCAST(connected, &(struct connected_args){ }); */
-}
-
-static bool
-load_resource(char **const out, char const *const format, ...)
-{
-	if (!xrm)
-		return false;
-
-	va_list argp;
-	char name[128];
-
-	va_start(argp, format);
-	vsnprintf(name, sizeof(name), format, argp);
-	va_end(argp);
-
-	return 0 == xcb_xrm_resource_get_string(xrm, name, NULL, out);
-}
-
-static void
-xrm_setup(void)
-{
-	char *value;
-
-	if (load_resource(&value, "heawm.label.fontFamily"))
-		label_font = value;
-
-	if (load_resource(&value, "heawm.label.fontSize"))
-		label_font_size = strtol(value, NULL, 10);
-
-	if (load_resource(&value, "heawm.label.strokeWidth"))
-		label_stroke = strtol(value, NULL, 10);
+	xrm_open();
 }
 
 static void
@@ -4294,9 +4312,9 @@ hands_update(void)
 		 */
 		hand->color = 0xfe0202 /*, 0xffaf5f*/;
 		for (char *value;
-		     load_resource(&value, "heawm.hand.%.*s.color", master_name_len, master_name) ||
-		     load_resource(&value, "heawm.hand.%u.color", new_num_hands) ||
-		     load_resource(&value, "heawm.hand.color", new_num_hands);)
+		     load_resource(&value, "hand.%.*s.color", master_name_len, master_name) ||
+		     load_resource(&value, "hand.%u.color", new_num_hands) ||
+		     load_resource(&value, "hand.color", new_num_hands);)
 		{
 			if (1 != sscanf(value, "0x%6x", &hand->color) &&
 			    1 != sscanf(value, "#%6x", &hand->color))
@@ -5755,7 +5773,7 @@ main(int _argc, char *_argv[])
 	init_config();
 
 	connect_display();
-	xrm_setup();
+	xrm_update();
 	setup_display();
 
 	/*MAN(HOOKS)
