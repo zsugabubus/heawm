@@ -904,8 +904,6 @@ static void *
 check_alloc(void *p) {
 	if (p)
 		return p;
-
-	fprintf(stderr, "Failed to allocate memory\n");
 	abort();
 }
 
@@ -1145,8 +1143,6 @@ restart(void)
 static void
 quit(void)
 {
-	/* BROADCAST(quit, &(struct quit_args){0}); */
-
 	if (conn) {
 		if (xrm)
 			xcb_xrm_database_free(xrm);
@@ -2340,9 +2336,6 @@ hands_try_focus_all(uint32_t focus_seq)
 		if (optimum) {
 			hand_focus_box(hand, optimum);
 			focus_seq = root->focus_seq;
-		} else {
-			hand->focus = NULL;
-			hand->input_focus = NULL;
 		}
 	}
 }
@@ -3166,6 +3159,7 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 		/* Attach to the first (probably primary) monitor of body. */
 		Body *body = body_get_by_root(root_window);
 		Box **head = root->children;
+		/* FIXME: Cause issues if body does not have any monitors. */
 		while ((body - bodies) != (*head)->body)
 			++head;
 
@@ -3438,8 +3432,6 @@ connect_display(void)
 
 	init_extensions();
 
-
-	/* BROADCAST(connected, &(struct connected_args){ }); */
 	xrm_open();
 }
 
@@ -4898,7 +4890,6 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 	switch (hand->mode) {
 	case HAND_MODE_NULL:
 		unreachable;
-		return;
 
 	case HAND_MODE_MOVE:
 		switch (KEY_MOD_MASK & event->mods.base) {
@@ -5063,7 +5054,7 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 		return;
 
 	default:
-		abort();
+		unreachable;
 	}
 
 	hand_leave_mode(hand);
