@@ -2204,7 +2204,7 @@ labels_do_gc(void)
 			half = body->num_labels / 2;
 			if (body->num_labels_created <= half) {
 				void *const p = realloc(body->labels, half * sizeof *body->labels);
-				if (p) {
+				if (p || !half) {
 					body->labels = p;
 					body->num_labels = half;
 				}
