@@ -3400,16 +3400,32 @@ xrm_update(void)
 {
 	char *value;
 
+	/*MAN(RESOURCES)
+	 * .SS "Label Resources"
+	 */
+
+	/*MAN(RESOURCES)
+	 * .IP \(bu
+	 * .B heawm.label.fontFamily
+	 */
 	if (load_resource(&value, "label.fontFamily")) {
 		free(label_font);
 		label_font = value;
 	}
 
+	/*MAN(RESOURCES)
+	 * .IP \(bu
+	 * .B heawm.label.fontSize
+	 */
 	if (load_resource(&value, "label.fontSize")) {
 		label_font_size = strtol(value, NULL, 10);
 		free(value);
 	}
 
+	/*MAN(RESOURCES)
+	 * .IP \(bu
+	 * .B heawm.label.strokeWidth
+	 */
 	if (load_resource(&value, "label.strokeWidth")) {
 		label_stroke = strtol(value, NULL, 10);
 		free(value);
@@ -4291,7 +4307,7 @@ hands_update(void)
 		 * and checked in order:
 		 * .
 		 * .IP \(bu
-		 * \fB\(lqheawm.hand.\fINAME\fB.*\(rq\fR: Match hand by
+		 * \fBheawm.hand.\fINAME\fB.*\fR: Match hand by
 		 * its \fINAME\fR, e.g. \(lqVirtual core\(rq. \fINAME\fR
 		 * is coming from
 		 * .B XInput
@@ -4299,17 +4315,17 @@ hands_update(void)
 		 * \(lq\fINAME\fR keyboard\(rq master device pair.
 		 * .
 		 * .IP \(bu
-		 * \fB\(lqheawm.hand.\fIINDEX\fB.*\(rq\fR: Match hand by its 1-based \fIINDEX\fR.
+		 * \fBheawm.hand.\fIINDEX\fB.*\fR: Match hand by its 1-based \fIINDEX\fR.
 		 * .
 		 * .IP \(bu
-		 * \fB\(lqheawm.hand.*\(rq\fR: Match all hands. Can be useful for specifying default settings.
+		 * \fBheawm.hand.*\fR: Match all hands. Can be useful for specifying default settings.
 		 * .
 		 * .TP
 		 * .B color
 		 * Specifies focus color in
-		 * .B \(lq0xRRGGBB\(rq
+		 * .B 0xRRGGBB
 		 * or
-		 * .B \(lq#RRGGBB\(rq
+		 * .B #RRGGBB
 		 * format.
 		 * .RE
 		 * .
@@ -4796,10 +4812,20 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 		hand_focus_box(hand, hand->input_focus);
 		break;
 
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B Mod-!
+	 * .RB "Refer to " Mod-Ctrl-t
+	 */
 	case XKB_KEY_exclam:
 		hand_start_move(hand);
 		break;
 
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B Mod-.
+	 * .RB "Refer to " Mod-Ctrl-f
+	 */
 	case XKB_KEY_period:
 		if (!hand->focus)
 			break;
@@ -4807,19 +4833,45 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 		box_maximize(hand->focus->parent, true);
 		break;
 
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B Mod-$
+	 * .RB "Refer to " Mod-Ctrl-n
+	 */
 	case XKB_KEY_dollar:
 		hand_start_name(hand);
 		break;
 
+
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B Mod-;
+	 * .RB "Refer to " Mod-Ctrl-k
+	 */
 	case XKB_KEY_semicolon:
 		hand_focus_parent(hand);
 		break;
 
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B Mod-,
+	 * .RB "Refer to " Mod-Ctrl-j
+	 */
 	case XKB_KEY_comma:
 		hand_focus_child(hand);
 		break;
 
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B Mod-{
+	 * .RB "Refer to " Mod-Ctrl-x
+	 */
 	case XKB_KEY_braceleft:
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B Mod-}
+	 * .RB "Refer to " Mod-Ctrl-a
+	 */
 	case XKB_KEY_braceright:
 		if (repeating)
 			break;
@@ -4830,6 +4882,11 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 		box_step_num_visible(hand->focus, sym == XKB_KEY_braceright ? 1 : -1);
 		break;
 
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B Mod-#
+	 * Focus monitor.
+	 */
 	case XKB_KEY_numbersign:
 		if (hand->focus)
 			hand_focus_box(hand, box_get_head(hand->focus));
@@ -5238,7 +5295,17 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 		box_propagate_change(hand->focus);
 		break;
 
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B Mod-Ctrl-a
+	 * Decrease number of visible children.
+	 */
 	case XKB_KEY_a:
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B Mod-Ctrl-x
+	 * Increase number of visible children.
+	 */
 	case XKB_KEY_x:
 		if (repeating)
 			break;
@@ -5252,8 +5319,7 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 	/*MAN(Keybindings)
 	 * .TP
 	 * .BR Mod-Ctrl-m aximize
-	 * Implicitly conceal box and its siblings. Unconceal when there are nothing
-	 * to conceal.
+	 * Toggle between all and one visible children.
 	 */
 	case XKB_KEY_m:
 	/*MAN(Keybindings)
@@ -5313,8 +5379,8 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 	 * .BR Mod-Ctrl-n "ame {" A-Za-z "}... Return"
 	 * Name focused box. When left empty, an automatic name will be assigned
 	 * for the box.
-	 *
-	 * Some special keys also recogzined, namely:
+	 * .IP
+	 * Some special keys are also recogzined, namely:
 	 * .RS
 	 * .TP
 	 * .BR space
@@ -5337,7 +5403,7 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 	 * .TP
 	 * .BR Mod-Ctrl-w indow
 	 * Close box just like user would click
-	 * \*(lqX\*(rq in the title bar. Kill by force second time.
+	 * \*(lqX\*(rq in the title bar. Kill by force for the second time.
 	 */
 	case XKB_KEY_w:
 		if (repeating)

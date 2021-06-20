@@ -9,45 +9,33 @@ heawm \- X11 window manager from the angels
 .SH DESCRIPTION
 .B heawm
 is a keyboard\(hycentric, semidynamic tiling window manager for the X Window
-System, aiming to provide amortized O(1) navigation\(emin the number of
-screens, monitors, windows and users.
+System, aiming to provide efficient window navigation and management.
 .
+.SS Layout
+.B heawm
+uses box as the building block to express hierarchy and layout of
+windows. A box may contain further boxes or a client window, so that they form
+a tree of boxes.
 .PP
-For multihead and multihand support display server must have the
-.B XRandR
-and the
-.B XInput2
-extensions.
+Children of a container box are dynamically tiled inside an automatic grid. The
+dimensions of the grid (number of columns and rows) are automatically chosen to
+provide a best-fit arrangement.
+.PP
+The maximum number of tiles appearing inside a grid can be limited, excluding
+least recently used children. A box can be optionally cherry-picked and be
+explicitly hidden or shown in the layout.
+.PP
+Boxes can be addressed by their name that is shown at their label.
 .
-.SS Layouts
-There can be two basic arrangements of windows.
-.TP
-.B Grid
-Windows are dynamically tiled in a rectangular area so they are fully cover the
-available space. Grids can contain another grids, though user do not have to
-create or care about them in particular.
-.IP
-Grids can be configured to have a specified number of columns. Therefore if a
-grid has only a single column, it can be called a stack/card/horizontal split;
-and if all its children are layed out in a single row, it can be called a
-vertical split. In these special cases, the splits between windows can be
-repositioned, giving a bit more space for one window while taking away some
-from its neightbors.
-.
-.TP
-.B Floating
-Windows are manually positioned, sized by the user and kept above of
-tiles\(emseems like they are \(lqfloating\(rq. Currently such stuff is not
-implemented.
-.IP
-When such a window obscures large area of a focused window, it temporarily gets
-repositioned to get out of the way.
+.SS "Session management"
+Whenever a child of a monitor is focused, same named children of other monitors
+gets focused, thus providing an easy mechanism to switch between related
+windows across multiple monitors.
 .
 .SH OPTIONS
 INCLUDE(OPTIONS)
 .SH USAGE
-.B
-Escape
+.BR Escape
 Whenever you feel stucked.
 .
 .SS Keybindings
