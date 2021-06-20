@@ -227,6 +227,8 @@ enum { XCB_MOD_MASK_NUM_LOCK = XCB_MOD_MASK_2, };
 			(x) = (x)->children[x->iter++]; \
 	}))
 
+static int const GC_INTERVAL = 120;
+
 static struct {
 	char const *terminal;
 	char const *shell;
@@ -2178,19 +2180,17 @@ body_update_net(Body *const body)
 	body_update_net_client_list(body);
 }
 
+/**
+ * Free resources associated with unused labels.
+ *
+ * Do cleanup of labels in a separater step instead of after do_update()
+ * because this way it provides a little debounce in case number of labels
+ * changes frequently, e.g. toggling maximization.
+ */
 static void
-do_update(void)
+labels_do_gc(void)
 {
-	while (root->content_changed)
-		box_update(root);
-
 	for_each_body {
-		assert(body->num_labels_used <= body->num_labels_mapped);
-		while (body->num_labels_used < body->num_labels_mapped) {
-			Label *label = &body->labels[--body->num_labels_mapped];
-			DEBUG_CHECK(xcb_unmap_window, conn, label->window);
-		}
-
 		/* Allow equality so zero elements will get cleaned up. */
 		uint32_t half = body->num_labels_created / 2;
 		if (body->num_labels_mapped <= half) {
@@ -2210,14 +2210,39 @@ do_update(void)
 				}
 			}
 		}
+	}
+}
+
+/**
+ * Free unused resources on X server.
+ */
+static void
+do_gc(void)
+{
+	labels_do_gc();
+}
+
+/**
+ * Send changes to X server.
+ */
+static void
+do_update(void)
+{
+	while (root->content_changed)
+		box_update(root);
+
+	for_each_body {
+		assert(body->num_labels_used <= body->num_labels_mapped);
+		while (body->num_labels_used < body->num_labels_mapped) {
+			Label *label = &body->labels[--body->num_labels_mapped];
+			DEBUG_CHECK(xcb_unmap_window, conn, label->window);
+		}
 
 		body_update_net(body);
 	}
 }
 
-/**
- * Must be called after box children have been changed.
- */
+/* Must be called after box children have changed. */
 static void
 box_update_children(Box *box)
 {
@@ -2262,19 +2287,18 @@ box_unparent(Box *const box)
 	while (box != *child)
 		++child;
 
-	/* pos of box in its parent */
-	uint16_t const pos = child - parent->children;
+	uint16_t const child_pos = child - parent->children;
 
 	memmove(
 		child,
 		child + 1,
-		(--parent->num_children - pos) * sizeof *child
+		(--parent->num_children - child_pos) * sizeof *child
 	);
 
 	box_update_children(parent);
 	box->parent = NULL;
 
-	return pos;
+	return child_pos;
 }
 
 static void box_vacuum(Box *box);
@@ -5657,9 +5681,13 @@ run(void)
 		         * should be level-triggered so not sure why it
 		         * is needed... */
 		        !(event = xcb_poll_for_event(conn))))
-			if (poll(&pfd, 1, -1) <= 0 ||
-			    (pfd.revents & ~POLLIN))
+		{
+			int res = poll(&pfd, 1, GC_INTERVAL);
+			if (!res)
+				do_gc();
+			else if (res < 0 || (pfd.revents & ~POLLIN))
 				return EXIT_FAILURE;
+		}
 
 		/* printf("event = (%d)%s\n", event->response_type, xcb_event_get_label(event->response_type)); */
 
