@@ -25,6 +25,14 @@ The maximum number of tiles appearing inside a grid can be limited, excluding
 least recently used children. A box can be optionally cherry-picked and be
 explicitly hidden or shown in the layout.
 .PP
+Floating boxes can be freely sized and always appear above tiled boxes.
+.PP
+When a floating box conceals more than one third of a just now focused tiled box it
+is placed to an alternative position if possible.
+.PP
+Monitors are also floating boxes with a restriction that they cannot be
+explicitly moved or resized by the user for obvious reasons.
+.PP
 Boxes can be addressed by their name that is shown at their label.
 .
 .SS "Session management"
