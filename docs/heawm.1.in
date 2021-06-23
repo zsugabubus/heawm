@@ -11,7 +11,7 @@ heawm \- X11 window manager from the angels
 is a keyboard\(hycentric, semidynamic tiling window manager for the X Window
 System, aiming to provide efficient window navigation and management.
 .
-.SS Layout
+.SS Window management
 .B heawm
 uses box as the building block to express hierarchy and layout of
 windows. A box may contain further boxes or a client window, so that they form
@@ -33,12 +33,27 @@ is placed to an alternative position if possible.
 Monitors are also floating boxes with a restriction that they cannot be
 explicitly moved or resized by the user for obvious reasons.
 .PP
-Boxes can be addressed by their name that is shown at their label.
+Boxes can be addressed by their name that is shown at their label. Box labels
+are circled with the color(s) of focusing hands.
 .
 .SS "Session management"
-Whenever a child of a monitor is focused, same named children of other monitors
-gets focused, thus providing an easy mechanism to switch between related
-windows across multiple monitors.
+Whenever a child of a monitor is focused, same-named children of other
+monitors gets focused, providing an convenient mechanism to switch between
+related windows across multiple monitors.
+.
+.SS "Technical details"
+.B heawm
+is reparenting.
+.
+.PP
+.B heawm
+provides no window decorators.
+.
+.PP
+.B heawm
+announces itself EWMH compliant, however only a minimal subset of these
+standards are implemented\(emmainly because they are useless and/or inapplicable
+to the concepts.
 .
 .SH OPTIONS
 INCLUDE(OPTIONS)

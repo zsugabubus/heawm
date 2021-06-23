@@ -8,24 +8,8 @@ multihead‌footnote:[Here be dragons.],
 multihand‌footnote:[Stuff that requires at least three limbs:
 multi-pointer and friends. Not for introverts. You have been warned.],
 multileg‌footnote:[This program is so much crap you will surely use both
-of your legs.] support, aiming to provide amortized O(1) navigation, painless
-window and flexible session management‌footnote:[You may know this as workspaces (separate different kind of work on one monitor) and workspaces across multiple monitors.].
-
-It is a reparenting window manager without providing any window frames. Every
-container (windows, sub-grids, monitors) are built upon a uniform layout that
-dynamically arranges its children to ensure that you see the largest portion of
-every window and makes window management possible even with multiple master
-devices. Such containers can be freely moved to anywhere using a few
-keystrokes. Every container has a label that can be used to focus it. Labels
-are sitting in the top-right corner of windows and the top-center of other kind
-of containers.
-
-It announces itself NetWM compliant, in reality, however, only minimal ICCCM
-and NetWM support provided--mainly because they are useless and/or
-inapplicable.
-
-Configuration happens primarily in C but some basic X resources provided for
-convenience.
+of your legs.] support, aiming to provide efficient window navigation and
+management.
 
 == Installation
 
