@@ -22,6 +22,7 @@
 #include <cairo/cairo-xcb.h>
 #include <cairo/cairo.h>
 #include <xcb/bigreq.h>
+#include <xcb/composite.h>
 #include <xcb/randr.h>
 #include <xcb/shape.h>
 #include <xcb/xcb.h>
@@ -390,7 +391,8 @@ typedef struct {
 	};
 	xcb_window_t float_layer;
 
-	bool net_client_list_changed: 1;
+	bool net_client_list_changed: 1,
+	     composited: 1;
 } Body;
 
 static uint8_t num_bodies;
@@ -763,7 +765,7 @@ label_repaint(Label const *const label, bool const shape)
 		: cairo_xcb_surface_create(conn, label->window, body->visual_type, size.x, size.y);
 	cairo_t *const cr = cairo_create(surface);
 
-	if (/* No compositor? */true)
+	if (!bodies[label->base->body].composited)
 		cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
 
 	cairo_select_font_face(cr, label_font ? label_font : LABEL_FONT_DEFAULT,
@@ -3868,6 +3870,15 @@ body_create_layer(Body *const body, xcb_window_t *const layer)
 }
 
 static void
+body_detect_compositor(Body *const body)
+{
+	if (!(body->composited = !!XCHECK(xcb_composite_redirect_subwindows, conn,
+			body->screen->root, XCB_COMPOSITE_REDIRECT_MANUAL)))
+		XDO(xcb_composite_unredirect_subwindows, conn,
+			body->screen->root, XCB_COMPOSITE_REDIRECT_MANUAL);
+}
+
+static void
 body_setup(Body *const body)
 {
 	int error;
@@ -3899,6 +3910,7 @@ body_setup(Body *const body)
 	body_setup_hands(body);
 	body_setup_net(body);
 	body_setup_windows(body);
+	body_detect_compositor(body);
 }
 
 static xcb_visualtype_t *
