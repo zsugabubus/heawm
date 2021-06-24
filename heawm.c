@@ -3300,6 +3300,7 @@ enum FloatResize {
 	FLOAT_TILE0,
 	FLOAT_TILE1 = FLOAT_TILE0 + 1,
 	FLOAT_TILE9 = FLOAT_TILE0 + 9,
+	FLOAT_RECT,
 };
 
 static void
@@ -3340,6 +3341,10 @@ box_resize_float(Box *const box, enum FloatResize how)
 			.width = parent->rect.width / 3,
 			.height = parent->rect.height / 3,
 		};
+	else if (FLOAT_RECT == how)
+		rect = box->rect;
+	else
+		abort();
 
 	box_set_urect(box, rect);
 	box_set_floating(box, true);
@@ -6050,34 +6055,44 @@ handle_input_button_press(xcb_input_button_press_event_t const *const event)
 		 * .B Mod-SecondaryButtonPress
 		 * Resize floating box.
 		 */
-		Box *const foot = hand->focus ? box_get_foot(hand->focus) : NULL;
-		if (foot) {
-			int16_t x = event->root_x >> 16,
-			        y = event->root_y >> 16;
-			xcb_rectangle_t rect = foot->urect;
+		if (!hand->focus)
+			return;
+
+		Box *foot = box_get_foot(hand->focus);
+
+		if (!foot) {
+			box_resize_float(hand->focus, FLOAT_RECT);
+			foot = box_get_foot(hand->focus);
+		}
+
+		if (!foot)
+			return;
+
+		int16_t x = event->root_x >> 16,
+			y = event->root_y >> 16;
+		xcb_rectangle_t rect = foot->urect;
 
 #define EXTEND(x, width) \
-	if (x < rect.x + rect.width / 2) \
-		rect.width += rect.x - x, \
-		rect.x = x; \
-	else \
-		rect.width = x - rect.x;
-			EXTEND(x, width);
-			EXTEND(y, height);
+if (x < rect.x + rect.width / 2) \
+	rect.width += rect.x - x, \
+	rect.x = x; \
+else \
+	rect.width = x - rect.x;
+		EXTEND(x, width);
+		EXTEND(y, height);
 #undef EXTEND
 
-			int16_t xw = rect.x + rect.width,
-			        yh = rect.y + rect.height;
+		int16_t xw = rect.x + rect.width,
+			yh = rect.y + rect.height;
 
-			static xcb_rectangle_t const NULL_RECT = { 0 };
-			box_snap(foot, &rect.x, &rect.y, &NULL_RECT);
-			box_snap(foot, &xw, &yh, &NULL_RECT);
+		static xcb_rectangle_t const NULL_RECT = { 0 };
+		box_snap(foot, &rect.x, &rect.y, &NULL_RECT);
+		box_snap(foot, &xw, &yh, &NULL_RECT);
 
-			box_set_uposition(foot, rect.x, rect.y);
-			box_set_usize(foot, xw - rect.x, yh - rect.y);
+		box_set_uposition(foot, rect.x, rect.y);
+		box_set_usize(foot, xw - rect.x, yh - rect.y);
 
-			box_propagate_change(foot);
-		}
+		box_propagate_change(foot);
 	}
 
 	/* XDO(xcb_input_xi_allow_events, conn, XCB_CURRENT_TIME, event->deviceid,
