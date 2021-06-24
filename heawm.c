@@ -4443,24 +4443,8 @@ handle_configure_notify(xcb_configure_notify_event_t const *const event)
 }
 
 static void
-handle_configure_request(xcb_configure_request_event_t const *const event)
+box_send_configure_notify(Box const *const box)
 {
-	Box *box;
-	if (!(box = box_find_by_window(root, offsetof(Box, window), event->window)))
-		return;
-
-	if ((XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y) ==
-	    ((XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y) & event->value_mask))
-		box_set_uposition(box, event->x, event->y);
-
-	if ((XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT) ==
-	    ((XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT) & event->value_mask))
-		box_set_usize(box, event->width, event->height);
-
-	/* Save boundaries but only care about them when floating. */
-	if (box->floating)
-		box_propagate_change(box);
-
 	DEBUG_CHECK(xcb_send_event, conn, false, box->window,
 			XCB_EVENT_MASK_STRUCTURE_NOTIFY,
 			XCB_SEND_EVENT_EVENT(xcb_configure_notify_event_t,
@@ -4478,6 +4462,28 @@ handle_configure_request(xcb_configure_request_event_t const *const event)
 				/* Surely not if request reached us. */
 				.override_redirect = false,
 			));
+}
+
+static void
+handle_configure_request(xcb_configure_request_event_t const *const event)
+{
+	Box *box;
+	if (!(box = box_find_by_window(root, offsetof(Box, window), event->window)))
+		return;
+
+	/* Save boundaries but only care about them when floating. */
+	if ((XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y) ==
+	    ((XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y) & event->value_mask))
+		box_set_uposition(box, event->x, event->y);
+
+	if ((XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT) ==
+	    ((XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT) & event->value_mask))
+		box_set_usize(box, event->width, event->height);
+
+	if (box->floating)
+		box_propagate_change(box);
+
+	box_send_configure_notify(box);
 }
 
 static void
@@ -4536,25 +4542,27 @@ box_close(Box *const root)
 static void
 handle_client_message(xcb_client_message_event_t const *const event)
 {
+	Box *const box = box_find_by_window(root, offsetof(Box, window), event->window);
+	debug_print_atom_name("client message", event->type);
+	if (!box)
+		return;
+
 	if (ATOM(_NET_CLOSE_WINDOW) == event->type) {
-		Box *const box = box_find_by_window(root, offsetof(Box, window), event->window);
-		if (box)
-			box_close(box);
+		box_close(box);
 	} else if (ATOM(_NET_ACTIVE_WINDOW) == event->type) {
 		enum { PAGER = 2, };
 
 		if (PAGER != event->data.data32[0])
 			return;
 
-		Box *const box = box_find_by_window(root, offsetof(Box, window), event->window);
-		if (box) {
-			Hand *hand = NULL_HAND == box->focus_hand
-				? &hands[0]
-				: &hands[box->focus_hand];
-			hand_focus_box(hand, box);
-		}
-	} else {
-		debug_print_atom_name("client message", event->type);
+		Hand *hand = &hands[NULL_HAND == box->focus_hand ? 0 : box->focus_hand];
+		hand_focus_box(hand, box);
+	} else if (ATOM(_NET_WM_STATE) == event->type) {
+		/* Same brainfucked programs like Chromium thinks it stands above
+		 * window manager so without an sane reasons it internally
+		 * resizes itself on entering fullscreen. To teach respect, give
+		 * a slap for such programs (solely for educational purposes). */
+		box_send_configure_notify(box);
 	}
 }
 
