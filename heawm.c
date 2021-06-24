@@ -420,7 +420,8 @@ typedef struct {
 	      * Ideally we should get this window through X Startup Notification
 	      * however many applications does not support it we cannot rely on
 	      * it. */
-	     want_popup: 1;
+	     want_popup: 1,
+	     focus_changed: 1;
 
 	xcb_xfixes_barrier_t barriers[4]; /**< Pointer barrier (around) */
 
@@ -489,6 +490,7 @@ typedef struct {
 	unsigned int color; /* 0xrrggbb */
 } Hand;
 
+static bool hands_changed;
 static uint8_t num_hands;
 static Hand *hands;
 
@@ -2393,8 +2395,22 @@ box_chase_pointer(xcb_input_enter_event_t const *const event)
 static void
 do_update(void)
 {
-	while (root->content_changed)
-		box_update(root);
+	do {
+		while (root->content_changed)
+			box_update(root);
+
+		if (!hands_changed)
+			break;
+		hands_changed = false;
+
+		for_each_hand {
+			if (hand->focus_changed) {
+				hand->focus_changed = false;
+				if (hand->input_focus)
+					box_chase_box(hand->input_focus, 1024 / 15);
+			}
+		}
+	} while (root->content_changed);
 
 	for_each_body {
 		assert(body->num_labels_used <= body->num_labels_mapped);
@@ -3063,8 +3079,8 @@ hand_focus_box_internal(Hand *const hand, Box *const box)
 
 	box_propagate_labels_change(hand->focus);
 
-	if (hand->input_focus)
-		box_chase_box(hand->input_focus, 1024 / 15);
+	hands_changed = true;
+	hand->focus_changed = true;
 }
 
 static void
