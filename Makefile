@@ -21,9 +21,9 @@ BUILD ?= debug
 
 $(info BUILD=$(BUILD))
 ifeq ($(BUILD),release)
-CFLAGS += -DHEAWM_NDEBUG -DNDEBUG -O2
+CFLAGS += -DHEAWM_VERBOSE=0 -DNDEBUG -O2
 else ifeq ($(BUILD),debug)
-CFLAGS += $(shell pkg-config --libs --cflags xcb-util) -O0
+CFLAGS += -DHEAWM_VERBOSE=3 $(shell pkg-config --libs --cflags xcb-util) -O0
 else
 $(error unknown BUILD mode)
 endif

@@ -47,10 +47,6 @@
 /* https://specifications.freedesktop.org/wm-spec/wm-spec-latest.html#idm46035372536800 */
 /* https://people.gnome.org/~tthurman/docs/metacity/xprops_8h-source.html */
 
-#ifdef HEAWM_NDEBUG
-/** Suppress debug output. */
-#endif
-
 #ifndef M_PHI
 # define M_PHI 1.6180339887 /** Golden Ratio */
 #endif
@@ -82,33 +78,22 @@
 # define maybe_unused
 #endif
 
-#ifndef HEAWM_NDEBUG
-# if defined(__GNUC__) || defined(clang)
-#  define unreachable __builtin_unreachable()
-# else
-#  define unreachable
-# endif
+#if defined(__GNUC__) || defined(clang)
+# define unreachable __builtin_unreachable()
 #else
-# define unreachable abort()
+# define unreachable (*(int *)0 = 0)
 #endif
 
 # define STRINGIFY_(x) #x
 # define STRINGIFY(x) STRINGIFY_(x)
 
-# define CHECK(request, ...) \
+# define XCHECK(request, ...) \
 	check_cookie(request##_checked(__VA_ARGS__), STRINGIFY(__LINE__) ": " #request)
 
-#ifndef HEAWM_NDEBUG
-# define DEBUG_CHECK(request, ...) \
-	check_cookie(request##_checked(__VA_ARGS__), STRINGIFY(__LINE__) ": " #request)
+#if 1 <= HEAWM_VERBOSE
+# define XDO(request, ...) (void)XCHECK(request, __VA_ARGS__)
 #else
-# define printf(...) ((void)0)
-# define DEBUG_CHECK(request, ...) do { \
-	_Pragma("GCC diagnostic push"); \
-	_Pragma("GCC diagnostic ignored \"-Wunused-value\""); \
-	((void)request(__VA_ARGS__), true); \
-	_Pragma("GCC diagnostic pop"); \
-} while (0)
+# define XDO(request, ...) (void)request(__VA_ARGS__)
 #endif
 
 #define XCB_GET_REPLY(x, request, ...) \
@@ -976,14 +961,14 @@ static void
 print_error(xcb_generic_error_t const *const error, char const *const message)
 {
 	fprintf(stderr, "%s:%s: X error: "
-#ifndef HEAWM_NDEBUG
+#if 1 <= HEAWM_VERBOSE
 			"%s"
 #else
 			"%d"
 #endif
 			" (seq=%d, opcode=%d:%d, value=%d=0x%x)\n",
 			__FILE__, message,
-#ifndef HEAWM_NDEBUG
+#if 1 <= HEAWM_VERBOSE
 			xcb_event_get_error_label(error->error_code),
 #else
 			error->error_code,
@@ -1054,8 +1039,8 @@ box_compute_position(Box const *const box, enum Orientation const ox, enum Orien
 static void
 label_destroy(Label *const label)
 {
-	DEBUG_CHECK(xcb_destroy_window, conn, label->window);
-	DEBUG_CHECK(xcb_free_pixmap, conn, label->shape);
+	XDO(xcb_destroy_window, conn, label->window);
+	XDO(xcb_free_pixmap, conn, label->shape);
 }
 
 static void
@@ -1071,7 +1056,7 @@ label_create(Label *const label)
 	Box const *const monitor = box_get_head(label->base);
 	Point const size = monitor_convert_pt2px(monitor, label_rect);
 
-	DEBUG_CHECK(xcb_create_window, conn, XCB_COPY_FROM_PARENT,
+	XDO(xcb_create_window, conn, XCB_COPY_FROM_PARENT,
 			label->window,
 			screen->root,
 			label->x, label->y,
@@ -1088,7 +1073,7 @@ label_create(Label *const label)
 				XCB_EVENT_MASK_EXPOSURE
 			});
 
-	DEBUG_CHECK(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
+	XDO(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
 			label->window, XCB_ATOM_WM_CLASS,
 			XCB_ATOM_STRING, 8,
 			sizeof LABEL_INSTANCE "\0" LABEL_CLASS,
@@ -1099,7 +1084,7 @@ label_create(Label *const label)
 	if (XCB_PIXMAP_NONE == label->shape)
 		label->shape = xcb_generate_id(conn);
 
-	DEBUG_CHECK(xcb_create_pixmap, conn,
+	XDO(xcb_create_pixmap, conn,
 			1, /* Mask is on or off thus 1 bit. */
 			label->shape,
 			label->window,
@@ -1108,7 +1093,7 @@ label_create(Label *const label)
 	/* We need a valid pixmap so we use the bounding mask but we
 	 * use offsets to move it outside of the area making effective
 	 * input region empty. */
-	DEBUG_CHECK(xcb_shape_mask, conn,
+	XDO(xcb_shape_mask, conn,
 			XCB_SHAPE_SO_SET, XCB_SHAPE_SK_INPUT,
 			label->window,
 			size.x, size.y,
@@ -1130,7 +1115,7 @@ label_update(Label *const label)
 	if (label->position_changed) {
 		label->position_changed = false;
 		/* move label to its place and make sure its above base window */
-		DEBUG_CHECK(xcb_configure_window, conn, label->window,
+		XDO(xcb_configure_window, conn, label->window,
 				XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
 				XCB_CONFIG_WINDOW_SIBLING |
 				XCB_CONFIG_WINDOW_STACK_MODE,
@@ -1143,7 +1128,7 @@ label_update(Label *const label)
 
 	label_repaint(label, true);
 
-	DEBUG_CHECK(xcb_shape_mask, conn,
+	XDO(xcb_shape_mask, conn,
 			XCB_SHAPE_SO_SET, XCB_SHAPE_SK_BOUNDING,
 			label->window,
 			0, 0,
@@ -1153,7 +1138,7 @@ label_update(Label *const label)
 	if (should_map) {
 		assert(body->num_labels_mapped + 1 == body->num_labels_used);
 		body->num_labels_mapped = body->num_labels_used;
-		DEBUG_CHECK(xcb_map_window, conn, label->window);
+		XDO(xcb_map_window, conn, label->window);
 		/* Will be repainted at exposure. */
 	} else {
 		label_repaint(label, false);
@@ -1414,7 +1399,7 @@ box_name(Box *const box)
 	memset(box->name + n, 0, sizeof box->name - n);
 
 	if (!box_is_container(box))
-		DEBUG_CHECK(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
+		XDO(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
 				box->window, ATOM(_HEAWM_NAME),
 				XCB_ATOM_STRING, 8,
 				n, box->name);
@@ -1533,7 +1518,7 @@ box_restore_pointer(Box const *const box, Hand const *const hand)
 		pointer.y = (xcb_input_fp1616_t)(box->rect.y + box->rect.height / M_PHI) << 16;
 	}
 
-	if (CHECK(xcb_input_xi_warp_pointer, conn,
+	if (XCHECK(xcb_input_xi_warp_pointer, conn,
 			XCB_WINDOW_NONE,
 			pointer.window,
 			0, 0, 0, 0,
@@ -1546,7 +1531,7 @@ static void
 hand_unbarricade(Hand *const hand)
 {
 	for (uint8_t i = 0; i < ARRAY_SIZE(hand->barriers); ++i)
-		DEBUG_CHECK(xcb_xfixes_delete_pointer_barrier, conn, hand->barriers[i]);
+		XDO(xcb_xfixes_delete_pointer_barrier, conn, hand->barriers[i]);
 }
 
 static void
@@ -1560,7 +1545,7 @@ hand_barricade(Hand *const hand, Box const *const box)
 		 * 1 2
 		 * %3
 		 */
-		DEBUG_CHECK(xcb_xfixes_create_pointer_barrier, conn,
+		XDO(xcb_xfixes_create_pointer_barrier, conn,
 				hand->barriers[i],
 				box->window,
 				box->rect.x + (i < 2 ? (i == 0 ? -1 : 0) : box->rect.width + (i == 3 ? 1 : 0)),
@@ -1587,10 +1572,10 @@ hand_refocus(Hand *const hand)
 	assert(!focus || !box_is_container(focus));
 	assert(!focus || box_is_focused(focus));
 
-	DEBUG_CHECK(xcb_input_xi_set_focus, conn,
+	XDO(xcb_input_xi_set_focus, conn,
 			hand_get_wanted_focus(hand),
 			XCB_CURRENT_TIME, hand->master_keyboard);
-	DEBUG_CHECK(xcb_input_xi_set_client_pointer, conn,
+	XDO(xcb_input_xi_set_client_pointer, conn,
 			focus ? focus->frame : XCB_WINDOW_NONE,
 			hand->master_pointer);
 
@@ -1741,9 +1726,9 @@ xcb_icccm_set_wm_state(xcb_window_t const window, xcb_icccm_wm_state_t const sta
 	} xcb_icccm_wm_state_data_t;
 
 	if (XCB_ICCCM_WM_STATE_WITHDRAWN == state)
-		DEBUG_CHECK(xcb_delete_property, conn, window, ATOM(WM_STATE));
+		XDO(xcb_delete_property, conn, window, ATOM(WM_STATE));
 	else
-		DEBUG_CHECK(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
+		XDO(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
 				window, ATOM(WM_STATE),
 				ATOM(WM_STATE), 32, sizeof(xcb_icccm_wm_state_data_t) / sizeof(uint32_t),
 				&(xcb_icccm_wm_state_data_t){
@@ -1963,7 +1948,7 @@ box_update_net(Box const *const box)
 	else if (box->focus_seq == root->focus_seq)
 		list[i++] = ATOM(_NET_WM_STATE_FOCUSED);
 
-	DEBUG_CHECK(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
+	XDO(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
 			box->window, ATOM(_NET_WM_STATE),
 			XCB_ATOM_ATOM, 32,
 			i, list);
@@ -1979,12 +1964,12 @@ box_update_shape(Box const *const box)
 	xcb_pixmap_t const pid = xcb_generate_id(conn);
 	xcb_gcontext_t const cid = xcb_generate_id(conn);
 
-	DEBUG_CHECK(xcb_create_pixmap, conn,
+	XDO(xcb_create_pixmap, conn,
 			1, /* Mask is on or off thus 1 bit. */
 			pid,
 			box->frame,
 			box->rect.width, box->rect.height);
-	DEBUG_CHECK(xcb_create_gc, conn, cid, pid, XCB_GC_FOREGROUND,
+	XDO(xcb_create_gc, conn, cid, pid, XCB_GC_FOREGROUND,
 			(uint32_t const[]){ true });
 
 	uint16_t r = BORDER_RADIUS;
@@ -1992,7 +1977,7 @@ box_update_shape(Box const *const box)
 	r = MIN(r, box->rect.height / 2);
 
 	/* Cross between quarter arcs. */
-	DEBUG_CHECK(xcb_poly_fill_rectangle, conn, pid, cid, 2,
+	XDO(xcb_poly_fill_rectangle, conn, pid, cid, 2,
 			(xcb_rectangle_t const[]){
 				{
 					.x = 0,
@@ -2009,24 +1994,24 @@ box_update_shape(Box const *const box)
 			});
 
 	/* Corners. */
-	DEBUG_CHECK(xcb_poly_fill_arc, conn, pid, cid, 4,
+	XDO(xcb_poly_fill_arc, conn, pid, cid, 4,
 			(xcb_arc_t const[]){
 				{ 0,                       0,                        2 * r, 2 * r, 1 * 90 * 64, 90 * 64 },
 				{ box->rect.width - 2 * r, 0,                        2 * r, 2 * r, 0 * 90 * 64, 90 * 64 },
 				{ box->rect.width - 2 * r, box->rect.height - 2 * r, 2 * r, 2 * r, 3 * 90 * 64, 90 * 64 },
 				{ 0,                       box->rect.height - 2 * r, 2 * r, 2 * r, 2 * 90 * 64, 90 * 64 },
 			});
-	DEBUG_CHECK(xcb_shape_mask, conn,
+	XDO(xcb_shape_mask, conn,
 			XCB_SHAPE_SK_BOUNDING, XCB_SHAPE_SK_BOUNDING,
 			box->frame,
 			0, 0, /* Offset. */
 			pid);
-	DEBUG_CHECK(xcb_free_pixmap, conn, pid);
-	DEBUG_CHECK(xcb_free_gc, conn, cid);
+	XDO(xcb_free_pixmap, conn, pid);
+	XDO(xcb_free_gc, conn, cid);
 
 	if (box->shaped)
 		/* Frame = client bounds /\ radius. */
-		DEBUG_CHECK(xcb_shape_combine, conn, XCB_SHAPE_SO_INTERSECT,
+		XDO(xcb_shape_combine, conn, XCB_SHAPE_SO_INTERSECT,
 				XCB_SHAPE_SK_BOUNDING, XCB_SHAPE_SK_BOUNDING,
 				box->frame,
 				0, 0, /* Offset. */
@@ -2054,7 +2039,7 @@ box_update(Box *const box)
 {
 	static int depth = 0;
 
-	if (box != root)
+	if (box != root && 3 <= HEAWM_VERBOSE)
 		printf(
 				"%*.sbox 0x%p (%.*s) win=0x%x fr=0x%x %ux%u+%d+%d u%ux%u+%d+%d leader=%x"
 				" title=\"%.15s\""
@@ -2120,7 +2105,7 @@ box_update(Box *const box)
 			if (XCB_WINDOW_NONE != box->window) {
 				xcb_icccm_set_wm_state(box->window, XCB_ICCCM_WM_STATE_ICONIC);
 				box_update_net(box);
-				DEBUG_CHECK(xcb_unmap_window, conn, box->frame);
+				XDO(xcb_unmap_window, conn, box->frame);
 			}
 
 			for (uint16_t i = 0; i < box->num_children; ++i) {
@@ -2154,7 +2139,7 @@ box_update(Box *const box)
 
 			mask |= XCB_CONFIG_WINDOW_STACK_MODE;
 			list[i++] = XCB_STACK_MODE_BELOW;
-			DEBUG_CHECK(xcb_configure_window, conn, box->frame, mask, list);
+			XDO(xcb_configure_window, conn, box->frame, mask, list);
 
 			if (layout_changed) {
 				box_update_shape(box);
@@ -2163,7 +2148,7 @@ box_update(Box *const box)
 				mask = XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT;
 				list[0] = box->rect.width;
 				list[1] = box->rect.height;
-				DEBUG_CHECK(xcb_configure_window, conn, box->window, mask, list);
+				XDO(xcb_configure_window, conn, box->window, mask, list);
 			}
 		}
 
@@ -2171,7 +2156,7 @@ box_update(Box *const box)
 		if (should_map) {
 			xcb_icccm_set_wm_state(box->window, XCB_ICCCM_WM_STATE_NORMAL);
 			box_update_net(box);
-			DEBUG_CHECK(xcb_map_window, conn, box->frame);
+			XDO(xcb_map_window, conn, box->frame);
 		}
 
 		if ((layout_changed || position_changed || should_focus) && box_is_focused(box) && !box_is_container(box)) {
@@ -2207,7 +2192,7 @@ box_update_net_client_list(Box const *const box)
 	if (body->net_client_list_changed)
 		return;
 
-	DEBUG_CHECK(xcb_change_property, conn, XCB_PROP_MODE_APPEND,
+	XDO(xcb_change_property, conn, XCB_PROP_MODE_APPEND,
 			body->screen->root, ATOM(_NET_CLIENT_LIST),
 			XCB_ATOM_WINDOW, 32,
 			1, &box->window);
@@ -2216,7 +2201,7 @@ box_update_net_client_list(Box const *const box)
 static void
 body_clear_net_client_list(Body const *const body)
 {
-	DEBUG_CHECK(xcb_delete_property, conn, body->screen->root, ATOM(_NET_CLIENT_LIST));
+	XDO(xcb_delete_property, conn, body->screen->root, ATOM(_NET_CLIENT_LIST));
 }
 
 static void
@@ -2241,7 +2226,7 @@ body_update_net_client_list(Body *const body)
 		if ((body - bodies) == box->body && !box_is_container(box)) {
 			list[i++] = box->window;
 			if (max_num_windows == i) {
-				DEBUG_CHECK(xcb_change_property, conn, mode,
+				XDO(xcb_change_property, conn, mode,
 						body->screen->root, ATOM(_NET_CLIENT_LIST),
 						XCB_ATOM_WINDOW, 32,
 						i, list);
@@ -2251,7 +2236,7 @@ body_update_net_client_list(Body *const body)
 		}
 
 	if (0 < i)
-		DEBUG_CHECK(xcb_change_property, conn, mode,
+		XDO(xcb_change_property, conn, mode,
 				body->screen->root, ATOM(_NET_CLIENT_LIST),
 				XCB_ATOM_WINDOW, 32,
 				i, list);
@@ -2413,7 +2398,7 @@ do_update(void)
 		assert(body->num_labels_used <= body->num_labels_mapped);
 		while (body->num_labels_used < body->num_labels_mapped) {
 			Label *label = &body->labels[--body->num_labels_mapped];
-			DEBUG_CHECK(xcb_unmap_window, conn, label->window);
+			XDO(xcb_unmap_window, conn, label->window);
 		}
 
 		body_update_net(body);
@@ -2680,16 +2665,16 @@ box_delete(Box *box)
 	}
 
 	if (!box_is_container(box)) {
-		DEBUG_CHECK(xcb_shape_select_input, conn, box->window, false);
-		DEBUG_CHECK(xcb_change_window_attributes, conn, box->window,
+		XDO(xcb_shape_select_input, conn, box->window, false);
+		XDO(xcb_change_window_attributes, conn, box->window,
 				XCB_CW_EVENT_MASK,
 				(uint32_t const[]){
 					XCB_NONE
 				});
 		xcb_icccm_set_wm_state(box->window, XCB_ICCCM_WM_STATE_WITHDRAWN);
-		DEBUG_CHECK(xcb_reparent_window, conn, box->window, bodies[box->body].screen->root, 0, 0);
-		DEBUG_CHECK(xcb_destroy_window, conn, box->frame);
-		DEBUG_CHECK(xcb_change_save_set, conn, XCB_SET_MODE_DELETE, box->window);
+		XDO(xcb_reparent_window, conn, box->window, bodies[box->body].screen->root, 0, 0);
+		XDO(xcb_destroy_window, conn, box->frame);
+		XDO(xcb_change_save_set, conn, XCB_SET_MODE_DELETE, box->window);
 
 		bodies[box->body].net_client_list_changed = true;
 	}
@@ -3029,13 +3014,12 @@ hand_focus_box_internal(Hand *const hand, Box *const box)
 
 	Box *recents[2];
 	hand_find_recents(hand, locked, root->focus_seq, recents, ARRAY_SIZE(recents));
-#if 0
-	printf("recents: %s <-> %s  new: %s  locked: %s\n",
-			recents[0] ? recents[0]->name : "?",
-			recents[1] ? recents[1]->name : "?",
-			box->name,
-			locked ? locked->name : "?");
-#endif
+	if (4 <= HEAWM_VERBOSE)
+		printf("recents: %s <-> %s  new: %s  locked: %s\n",
+				recents[0] ? recents[0]->name : "?",
+				recents[1] ? recents[1]->name : "?",
+				box->name,
+				locked ? locked->name : "?");
 	if (locked == box ||
 	    recents[0] == box)
 		recents[1] = NULL;
@@ -3141,12 +3125,10 @@ box_set_class(Box *const box, xcb_get_property_reply_t const *const reply)
 static void
 debug_print_atom_name(char const *const name, xcb_atom_t const atom)
 {
-#ifndef HEAWM_NDEBUG
-	XCB_GET_REPLY(reply, xcb_get_atom_name, atom);
-	printf("%s %.*s\n", name, xcb_get_atom_name_name_length(reply), xcb_get_atom_name_name(reply));
-#else
-	(void)name, (void)atom;
-#endif
+	if (2 <= HEAWM_VERBOSE) {
+		XCB_GET_REPLY(reply, xcb_get_atom_name, atom);
+		printf("%s %.*s\n", name, xcb_get_atom_name_name_length(reply), xcb_get_atom_name_name(reply));
+	}
 }
 
 typedef union {
@@ -3254,9 +3236,6 @@ send_request:
 	data = xcb_get_property_value(reply);
 	len = xcb_get_property_value_length(reply);
 	goto process_reply;
-
-#undef FIND_BOX
-#undef REQUEST_PROPERTY
 }
 
 static void
@@ -3500,7 +3479,7 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 	}
 
 	Body *const body = &bodies[parent->body];
-	DEBUG_CHECK(xcb_create_window, conn, XCB_COPY_FROM_PARENT,
+	XDO(xcb_create_window, conn, XCB_COPY_FROM_PARENT,
 			box->frame,
 			body->screen->root,
 			-1, -1, 1, 1, /* Rect. */
@@ -3514,27 +3493,27 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 				FRAME_WINDOW_EVENT_MASK
 			});
 
-	DEBUG_CHECK(xcb_change_save_set, conn, XCB_SET_MODE_INSERT, window);
+	XDO(xcb_change_save_set, conn, XCB_SET_MODE_INSERT, window);
 
-	if (CHECK(xcb_reparent_window, conn, window, box->frame, 0, 0))
+	if (XCHECK(xcb_reparent_window, conn, window, box->frame, 0, 0))
 		goto fail;
 
-	if (CHECK(xcb_map_window, conn, window))
+	if (XCHECK(xcb_map_window, conn, window))
 		goto fail;
 
-	if (CHECK(xcb_change_window_attributes, conn, window,
+	if (XCHECK(xcb_change_window_attributes, conn, window,
 				XCB_CW_EVENT_MASK,
 				(uint32_t const[]){
 					CLIENT_WINDOW_EVENT_MASK
 				}))
 		goto fail;
 
-	DEBUG_CHECK(xcb_input_xi_select_events, conn, window, 1,
+	XDO(xcb_input_xi_select_events, conn, window, 1,
 			XI_EVENT_MASK(XCB_INPUT_DEVICE_ALL,
 					XCB_INPUT_XI_EVENT_MASK_FOCUS_IN |
 					XCB_INPUT_XI_EVENT_MASK_ENTER));
 
-	DEBUG_CHECK(xcb_shape_select_input, conn, window, true);
+	XDO(xcb_shape_select_input, conn, window, true);
 
 	box_update_net_client_list(box);
 
@@ -3812,7 +3791,7 @@ body_setup_cursor(Body const *const body, char const *const cursor_name)
 
 	xcb_cursor_t const cursor = xcb_cursor_load_cursor(ctx, cursor_name);
 
-	DEBUG_CHECK(xcb_change_window_attributes, conn, screen->root,
+	XDO(xcb_change_window_attributes, conn, screen->root,
 			XCB_CW_CURSOR, &cursor);
 
 	xcb_free_cursor(conn, cursor);
@@ -3822,15 +3801,15 @@ body_setup_cursor(Body const *const body, char const *const cursor_name)
 static void
 body_setup_net_name(Body const *const body, char const *const name)
 {
-	DEBUG_CHECK(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
+	XDO(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
 			body->net_window, ATOM(_NET_WM_NAME),
 			ATOM(UTF8_STRING), 8,
 			strlen(name), name);
-	DEBUG_CHECK(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
+	XDO(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
 			body->net_window, ATOM(_NET_SUPPORTING_WM_CHECK),
 			XCB_ATOM_WINDOW, 32,
 			1, &body->net_window);
-	DEBUG_CHECK(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
+	XDO(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
 			body->screen->root, ATOM(_NET_SUPPORTING_WM_CHECK),
 			XCB_ATOM_WINDOW, 32,
 			1, &body->net_window);
@@ -3842,7 +3821,7 @@ body_setup_net_supported(Body *const body)
 	xcb_atom_t list[] = {
 #include "net_atoms.in"
 	};
-	DEBUG_CHECK(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
+	XDO(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
 			body->screen->root, ATOM(_NET_SUPPORTED),
 			XCB_ATOM_ATOM, 32,
 			ARRAY_SIZE(list), (xcb_atom_t const *)list);
@@ -3862,7 +3841,7 @@ body_update_heads(Body *const body);
 static void
 body_setup_heads(Body *const body)
 {
-	DEBUG_CHECK(xcb_randr_select_input, conn, body->screen->root,
+	XDO(xcb_randr_select_input, conn, body->screen->root,
 			XCB_RANDR_NOTIFY_MASK_SCREEN_CHANGE);
 
 	body_update_heads(body);
@@ -3875,7 +3854,7 @@ static void
 body_create_layer(Body *const body, xcb_window_t *const layer)
 {
 	*layer = xcb_generate_id(conn);
-	DEBUG_CHECK(xcb_create_window, conn, XCB_COPY_FROM_PARENT,
+	XDO(xcb_create_window, conn, XCB_COPY_FROM_PARENT,
 			*layer,
 			body->screen->root,
 			-1, -1, 1, 1, /* Rect. */
@@ -3894,7 +3873,7 @@ body_setup(Body *const body)
 	int error;
 
 	if ((error =
-		CHECK(xcb_change_window_attributes, conn, body->screen->root,
+		XCHECK(xcb_change_window_attributes, conn, body->screen->root,
 				XCB_CW_EVENT_MASK,
 				(uint32_t const[]){
 					CLIENT_WINDOW_EVENT_MASK |
@@ -4193,7 +4172,7 @@ body_update_heads(Body *const body)
 static void
 body_setup_hands(Body *const body)
 {
-	DEBUG_CHECK(xcb_input_xi_select_events, conn, body->screen->root, 1,
+	XDO(xcb_input_xi_select_events, conn, body->screen->root, 1,
 			XI_EVENT_MASK(XCB_INPUT_DEVICE_ALL,
 					XCB_INPUT_XI_EVENT_MASK_HIERARCHY |
 					XCB_INPUT_XI_EVENT_MASK_FOCUS_IN |
@@ -4204,7 +4183,7 @@ static void
 setup_display(void)
 {
 	/* Prevent windows from changing. */
-	DEBUG_CHECK(xcb_grab_server, conn);
+	XDO(xcb_grab_server, conn);
 
 	xcb_setup_t const *const setup = xcb_get_setup(conn);
 
@@ -4226,7 +4205,7 @@ setup_display(void)
 		body_setup(body);
 	}
 
-	DEBUG_CHECK(xcb_ungrab_server, conn);
+	XDO(xcb_ungrab_server, conn);
 
 	hands_update();
 }
@@ -4407,11 +4386,13 @@ handle_input_focus_in(xcb_input_focus_in_event_t const *const event)
 static void
 handle_unmap_notify(xcb_unmap_notify_event_t const *const event)
 {
+	if (5 <= HEAWM_VERBOSE)
+		printf("unmap notify %x event=%x, from_configure=%d\n", event->window, event->event, event->from_configure);
+
 	/* Ignore reparenting related events. */
 	if (event->event != event->window)
 		return;
 
-	/* printf("unmap notify %x event=%x, from_configure=%d\n", event->window, event->event, event->from_configure); */
 	Box *const box = box_find_by_window(root, offsetof(Box, window), event->window);
 	if (box)
 		box_delete(box);
@@ -4420,7 +4401,9 @@ handle_unmap_notify(xcb_unmap_notify_event_t const *const event)
 static void
 handle_map_request(xcb_map_request_event_t const *const event)
 {
-	/* printf("map request %x\n", event->window); */
+	if (5 <= HEAWM_VERBOSE)
+		printf("map request %x\n", event->window);
+
 	Box *const box = box_find_by_window(root, offsetof(Box, window), event->window);
 	if (!box)
 		box_window(event->parent, event->window);
@@ -4445,7 +4428,7 @@ handle_configure_notify(xcb_configure_notify_event_t const *const event)
 static void
 box_send_configure_notify(Box const *const box)
 {
-	DEBUG_CHECK(xcb_send_event, conn, false, box->window,
+	XDO(xcb_send_event, conn, false, box->window,
 			XCB_EVENT_MASK_STRUCTURE_NOTIFY,
 			XCB_SEND_EVENT_EVENT(xcb_configure_notify_event_t,
 				.response_type = XCB_CONFIGURE_NOTIFY,
@@ -4506,7 +4489,7 @@ handle_expose(xcb_expose_event_t const *const event)
 static void
 wm_close_window(xcb_window_t const window)
 {
-	DEBUG_CHECK(xcb_send_event, conn, false, window,
+	XDO(xcb_send_event, conn, false, window,
 			XCB_EVENT_MASK_NO_EVENT/* Client messages cannot be masked. */,
 			(char const *)&(xcb_client_message_event_t){
 				.response_type = XCB_CLIENT_MESSAGE,
@@ -4533,7 +4516,7 @@ box_close(Box *const root)
 			box->close_by_force = true;
 			wm_close_window(box->window);
 		} else {
-			DEBUG_CHECK(xcb_kill_client, conn, box->window);
+			XDO(xcb_kill_client, conn, box->window);
 		}
 
 	}
@@ -4668,7 +4651,7 @@ hand_setup(Hand *const hand)
 		XCB_XKB_MAP_PART_VIRTUAL_MODS |
 		XCB_XKB_MAP_PART_VIRTUAL_MOD_MAP;
 
-	DEBUG_CHECK(xcb_xkb_select_events, conn, hand->master_keyboard,
+	XDO(xcb_xkb_select_events, conn, hand->master_keyboard,
 			REQUIRED_EVENTS,
 			0,
 			REQUIRED_EVENTS,
@@ -5528,7 +5511,7 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 static void
 hand_center_pointer(Hand const *const hand, Box const *const box)
 {
-	DEBUG_CHECK(xcb_input_xi_warp_pointer, conn,
+	XDO(xcb_input_xi_warp_pointer, conn,
 			XCB_WINDOW_NONE,
 			bodies[box->body].screen->root,
 			0, 0, 0, 0,
@@ -5855,14 +5838,13 @@ handle_input_key_press(xcb_input_key_press_event_t const *const event)
 		goto out;
 
 	xkb_keysym_t const sym = syms[0];
-#if 0
-	printf("key=0x%x mods=%d,%d,%d,%d deviceid=%d sourceid=%d (root=%x)\n", sym,
-	       event->mods.effective,
-	       event->mods.base,
-	       event->mods.latched,
-	       event->mods.locked,
-	       event->deviceid, event->sourceid, event->root);
-#endif
+	if (5 <= HEAWM_VERBOSE)
+		printf("key=0x%x mods=%d,%d,%d,%d deviceid=%d sourceid=%d (root=%x)\n", sym,
+				event->mods.effective,
+				event->mods.base,
+				event->mods.latched,
+				event->mods.locked,
+				event->deviceid, event->sourceid, event->root);
 
 	enum HandMode const old_mode = hand->mode;
 
@@ -5913,7 +5895,7 @@ out:
 
 	/* if (propagate)
 		xcb_test_fake_input(conn, XCB_INPUT_KEY_PRESS, event->detail, XCB_CURRENT_TIME, event->root, event->root_x, event->root_y, event->sourceid); */
-	DEBUG_CHECK(xcb_input_xi_allow_events, conn, XCB_CURRENT_TIME, event->deviceid,
+	XDO(xcb_input_xi_allow_events, conn, XCB_CURRENT_TIME, event->deviceid,
 			propagate
 				? XCB_INPUT_EVENT_MODE_REPLAY_DEVICE
 				: XCB_INPUT_EVENT_MODE_SYNC_DEVICE,
@@ -6059,7 +6041,7 @@ handle_input_button_press(xcb_input_button_press_event_t const *const event)
 		}
 	}
 
-	/* DEBUG_CHECK(xcb_input_xi_allow_events, conn, XCB_CURRENT_TIME, event->deviceid,
+	/* XDO(xcb_input_xi_allow_events, conn, XCB_CURRENT_TIME, event->deviceid,
 			XCB_INPUT_EVENT_MODE_REPLAY_DEVICE, 0, 0); */
 }
 
@@ -6082,7 +6064,7 @@ handle_input_enter(xcb_input_enter_event_t const *const event)
 	 * or buttons are pressed.
 	 */
 	if (!box_chase_pointer(event))
-		DEBUG_CHECK(xcb_input_xi_set_client_pointer, conn, event->child, event->deviceid);
+		XDO(xcb_input_xi_set_client_pointer, conn, event->child, event->deviceid);
 }
 
 static void
@@ -6098,13 +6080,13 @@ handle_shape_notify(xcb_shape_notify_event_t const *const event)
 	if (box_update_shape(box))
 		/* Nothing, already done. */;
 	else if (event->shaped)
-		DEBUG_CHECK(xcb_shape_combine, conn, XCB_SHAPE_SO_SET,
+		XDO(xcb_shape_combine, conn, XCB_SHAPE_SO_SET,
 				event->shape_kind, event->shape_kind,
 				box->frame,
 				0, 0, /* Offset. */
 				box->window);
 	else
-		DEBUG_CHECK(xcb_shape_mask, conn,
+		XDO(xcb_shape_mask, conn,
 				event->shape_kind, event->shape_kind,
 				box->frame,
 				0, 0, /* Offset. */
@@ -6289,7 +6271,8 @@ run(void)
 				return EXIT_FAILURE;
 		}
 
-		/* printf("event = (%d)%s\n", event->response_type, xcb_event_get_label(event->response_type)); */
+		if (5 <= HEAWM_VERBOSE)
+			printf("event = (%d)%s\n", event->response_type, xcb_event_get_label(event->response_type));
 
 		switch (XCB_EVENT_RESPONSE_TYPE(event)) {
 #define EVENT(type, handler) case type: handler((void *)event); break;
@@ -6375,7 +6358,7 @@ main(int _argc, char *_argv[])
 		 * Show Git commit (version) and exit.
 		 */
 		case 'v':
-			printf(VERSION "\n");
+			printf(VERSION"\n");
 			exit(EXIT_SUCCESS);
 
 		case '?':
