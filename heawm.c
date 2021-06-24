@@ -720,7 +720,6 @@ static bool
 box_is_container(Box const *const box)
 {
 	return XCB_WINDOW_NONE == box->frame;
-	return !(box->name[0] & 0x20);
 }
 
 static bool
@@ -5872,7 +5871,7 @@ handle_input_key_press(xcb_input_key_press_event_t const *const event)
 
 	xkb_keysym_t const *syms;
 	int const n = xkb_keymap_key_get_syms_by_level(device->keymap, event->detail, 0,
-			/* onyl care about Shift when user really presses */
+			/* Only care about Shift when user really presses. */
 			(XCB_MOD_MASK_SHIFT & event->mods.base ? 1 : 0), &syms);
 	if (!n)
 		goto out;
