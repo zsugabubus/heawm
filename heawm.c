@@ -4461,7 +4461,12 @@ handle_configure_request(xcb_configure_request_event_t const *const event)
 
 	if ((XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT) ==
 	    ((XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT) & event->value_mask))
-		box_set_usize(box, event->width, event->height);
+		box_set_urect(box, (xcb_rectangle_t){
+			.x = box->urect.x + (box->urect.width - event->width) / 2,
+			.y = box->urect.y + (box->urect.height - event->height) / 2,
+			.width = event->width,
+			.height = event->height,
+		});
 
 	if (box->floating)
 		box_propagate_change(box);
