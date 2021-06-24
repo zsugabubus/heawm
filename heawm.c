@@ -125,14 +125,14 @@
 			(grab_type), \
 			(uint32_t const[])__VA_ARGS__)
 
-#define XCB_INPUT_XI_PASSIVE_GRAB_DEVICE_WRAPPER(grab_window, deviceid, grab_type, detail, grab_mode, owner_events, mask, ...) \
-	xcb_input_xi_passive_grab_device_unchecked(conn, XCB_CURRENT_TIME, (grab_window), \
-			XCB_CURSOR_NONE, (detail), (deviceid), \
+#define XCB_INPUT_XI_PASSIVE_GRAB_DEVICE_WRAPPER(grab_window, cursor, deviceid, grab_type, detail, grab_mode, owner_events, mask, ...) \
+	xcb_input_xi_passive_grab_device_unchecked(conn, XCB_CURRENT_TIME, grab_window, \
+			cursor, detail, deviceid, \
 			ARRAY_SIZE((uint32_t const[])__VA_ARGS__), 1, \
-			(grab_type), \
-			(grab_mode), XCB_INPUT_GRAB_MODE_22_ASYNC, \
-			(owner_events), \
-			(uint32_t const[]){ (mask) }, (uint32_t const[])__VA_ARGS__)
+			grab_type, \
+			grab_mode, XCB_INPUT_GRAB_MODE_22_ASYNC, \
+			owner_events, \
+			(uint32_t const[]){ mask }, (uint32_t const[])__VA_ARGS__)
 
 #define XI_EVENT_MASK(deviceid, mask) \
 	(xcb_input_event_mask_t const *)&(struct xcb_input_event_mask1 { \
@@ -393,6 +393,8 @@ typedef struct {
 
 	bool net_client_list_changed: 1,
 	     composited: 1;
+
+	xcb_cursor_t move_cursor;
 } Body;
 
 static uint8_t num_bodies;
@@ -2951,6 +2953,7 @@ hand_grab_keyboard(Hand const *const hand)
 					{ XCB_INPUT_MODIFIER_MASK_ANY });
 
 			XCB_INPUT_XI_PASSIVE_GRAB_DEVICE_WRAPPER(root_window,
+					XCB_CURSOR_NONE,
 					hand->master_keyboard,
 					XCB_INPUT_GRAB_TYPE_KEYCODE, XCB_GRAB_ANY,
 					XCB_INPUT_GRAB_MODE_22_SYNC,
@@ -2964,6 +2967,7 @@ hand_grab_keyboard(Hand const *const hand)
 					});
 		} else {
 			XCB_INPUT_XI_PASSIVE_GRAB_DEVICE_WRAPPER(root_window,
+					XCB_CURSOR_NONE,
 					hand->master_keyboard,
 					XCB_INPUT_GRAB_TYPE_KEYCODE, XCB_GRAB_ANY,
 					XCB_INPUT_GRAB_MODE_22_SYNC,
@@ -3799,7 +3803,7 @@ body_setup_windows(Body *const body)
 }
 
 static void
-body_setup_cursor(Body const *const body, char const *const cursor_name)
+body_setup_cursor(Body *const body)
 {
 	xcb_cursor_context_t *ctx;
 	xcb_screen_t *const screen = body->screen;
@@ -3807,12 +3811,14 @@ body_setup_cursor(Body const *const body, char const *const cursor_name)
 	if (xcb_cursor_context_new(conn, screen, &ctx) < 0)
 		return;
 
-	xcb_cursor_t const cursor = xcb_cursor_load_cursor(ctx, cursor_name);
+	body->move_cursor = xcb_cursor_load_cursor(ctx, "move");
 
+	xcb_cursor_t const cursor = xcb_cursor_load_cursor(ctx, "default");
 	XDO(xcb_change_window_attributes, conn, screen->root,
 			XCB_CW_CURSOR, &cursor);
-
 	xcb_free_cursor(conn, cursor);
+
+	/* Note: It does not free created cursors. */
 	xcb_cursor_context_free(ctx);
 }
 
@@ -3921,7 +3927,7 @@ body_setup(Body *const body)
 
 	body_create_layer(body, &body->float_layer);
 	body_create_layer(body, &body->label_layer);
-	body_setup_cursor(body, "default");
+	body_setup_cursor(body);
 	body_setup_heads(body);
 	body_setup_hands(body);
 	body_setup_net(body);
@@ -4360,6 +4366,7 @@ hand_grab_pointer(Hand const *const hand)
 				{ XCB_INPUT_MODIFIER_MASK_ANY });
 
 		XCB_INPUT_XI_PASSIVE_GRAB_DEVICE_WRAPPER(root_window,
+				body->move_cursor,
 				hand->master_pointer,
 				XCB_INPUT_GRAB_TYPE_BUTTON, XCB_GRAB_ANY,
 				XCB_INPUT_GRAB_MODE_22_ASYNC,
