@@ -11,20 +11,7 @@ multileg‌footnote:[This program is so much crap you will surely use both
 of your legs.] support, aiming to provide efficient window navigation and
 management.
 
-== Installation
-
-You will need the following tools and libraries.
-
-=== Dependencies
-
-* `gcc`
-* `make`
-* `xcb{,-cursor,-keysyms,-shape,-xfixes,-xinput,-xrm}`
-* `xcb-util` (Debug build.)
-* `xcb-icccm` (Headers only.)
-* `cairo`
-
-=== Compiling from source
+== Install
 
 [source,sh,subs=+attributes]
 ----
