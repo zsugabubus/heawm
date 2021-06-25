@@ -516,7 +516,7 @@ static uint16_t const MONITOR_GAP = 0;
 static uint16_t const CONTAINER_GAP = 4;
 static uint16_t const WINDOW_GAP = 1;
 static uint16_t const BORDER_RADIUS = 0;
-static uint16_t const SNAP_DISTANCE = 45;
+static uint16_t const SNAP_DISTANCE = 40;
 /**
  * Do not apply border radius for shaped windows.
  */
@@ -5952,10 +5952,11 @@ box_snap(Box const *const box, int16_t *const px, int16_t *const py, xcb_rectang
 	Box const *const parent = box->parent;
 
 	int16_t x = *px, y = *py;
+	uint16_t dx = SNAP_DISTANCE, dy = dx, d;
 
 #define TEST_SNAP(x, width, self_width, to_width) \
-	if (abs(x + self->width self_width - to->x - to->width to_width) < SNAP_DISTANCE) \
-		x = to->x + to->width to_width - self->width self_width;
+	if ((d = abs(x + self->width self_width - to->x - to->width to_width)) < d##x) \
+		d##x = d, x = to->x + to->width to_width - self->width self_width;
 #define TEST_SNAP_AXIS(x, width) \
 	     TEST_SNAP(x, width, *0, *0) \
 	else TEST_SNAP(x, width, *0, *1) \
