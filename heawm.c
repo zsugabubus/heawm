@@ -3326,7 +3326,9 @@ box_resize_float(Box *const box, enum FloatResize how)
 			rect.y = (parent->rect.height - rect.height) / 2;
 	}
 
-	if (FLOAT_TILE0 == how)
+	if (FLOAT_UNCHANGED == how)
+		/* Nothing. */;
+	else if (FLOAT_TILE0 == how)
 		rect = (xcb_rectangle_t){
 			.x = parent->rect.width * 3 / 16,
 			.y = parent->rect.height * 3 / 16,
