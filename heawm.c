@@ -73,6 +73,8 @@
 	y = tmp; \
 } while (0)
 
+#define REPEAT_XY(macro) macro(x, width) macro(y, height)
+
 #if defined(__GNUC__)
 # define maybe_unused __attribute__((unused))
 #else
@@ -283,12 +285,6 @@ struct Box {
 
 	uint8_t mod_x, mod_y; /**< Size granulaty */
 
-	/**
-	 * Relative size to siblings
-	 *
-	 * Used only when box has one variable dimension, i.e. when parent
-	 * layout consits of a single row or column. */
-	uint8_t weight;
 	uint8_t body;
 
 	/**
@@ -516,7 +512,7 @@ static uint16_t const MONITOR_GAP = 0;
 static uint16_t const CONTAINER_GAP = 4;
 static uint16_t const WINDOW_GAP = 1;
 static uint16_t const BORDER_RADIUS = 0;
-static uint16_t const SNAP_DISTANCE = 40;
+static uint16_t const SNAP_DISTANCE = 25;
 /**
  * Do not apply border radius for shaped windows.
  */
@@ -711,8 +707,8 @@ monitor_convert_pt2px(Box const *const monitor, Point const pt)
 {
 	assert(box_is_monitor(monitor));
 
-#define CONVERT(x, width) .x = ((int)monitor->rect.width * (int)pt.x * 254 / 720 / (int)monitor->urect.width)
-	return (Point){ CONVERT(x, width), CONVERT(y, height) };
+#define CONVERT(x, width) .x = ((int)monitor->rect.width * (int)pt.x * 254 / 720 / (int)monitor->urect.width),
+	return (Point){ REPEAT_XY(CONVERT) };
 #undef CONVERT
 }
 
@@ -1032,10 +1028,7 @@ box_compute_position(Box const *const box, enum Orientation const ox, enum Orien
 		ret.x = monitor->rect.x; \
 	else if (monitor->rect.x + monitor->rect.width < ret.x + size.x) \
 		ret.x = monitor->rect.x + monitor->rect.width - size.x;
-
-	CLAMP(x, width)
-	CLAMP(y, height)
-
+	REPEAT_XY(CLAMP);
 #undef CLAMP
 
 	return ret;
@@ -1444,14 +1437,6 @@ box_set_position(Box *const box, int16_t const x, int16_t const y)
 }
 
 static void
-box_set_uposition(Box *const box, int16_t const x, int16_t const y)
-{
-	box->urect.x = x;
-	box->urect.y = y;
-	box_set_position(box, x, y);
-}
-
-static void
 box_set_size(Box *const box, uint16_t const width, uint16_t const height)
 {
 	box->layout_changed |=
@@ -1460,6 +1445,14 @@ box_set_size(Box *const box, uint16_t const width, uint16_t const height)
 	box->should_map |= !box->rect.width;
 	box->rect.width = width;
 	box->rect.height = height;
+}
+
+static void
+box_set_uposition(Box *const box, int16_t const x, int16_t const y)
+{
+	box->urect.x = x;
+	box->urect.y = y;
+	box_set_position(box, x, y);
 }
 
 static void
@@ -1805,17 +1798,13 @@ box_update_layout(Box const *const box)
 {
 	box_do_layout(box);
 
-	uint32_t total_weight = 0;
 	uint16_t tiles = 0;
 
 	for (uint16_t i = 0; i < box->num_children; ++i) {
 		Box *const child = box->children[i];
 		if ((child->flagged = box_is_visible(child)) &&
 		    !child->floating)
-		{
-			total_weight += child->weight;
 			++tiles;
-		}
 	}
 
 	xcb_rectangle_t tile = { 0 };
@@ -1891,15 +1880,15 @@ tile.width += (tile.x / error) != ((tile.x + tile.width + 1 /* Corrected pixel. 
 			 * - Size is rounded to the nearest
 			 *   mod_{x,y} just because.
 			 */
-#define ADJUST_SIZE(num_rows, x, width) ( \
+#define ADJUST_SIZE(num_rows, x, width) tile.width = ( \
 	1 == tiles || box->rect.width + 1 /* Pixel correction overrun. */ < tile.x + 2 * tile.width \
 	? box->rect.width - tile.x \
 	: tile.width + (1 == num_rows && 1 < tiles && 0 < child->mod_##x \
 	? child->mod_##x / 2 - (tile.width + child->mod_##x / 2) % child->mod_##x \
 	: 0))
 			/* TODO: Distribute error. */
-			tile.width = ADJUST_SIZE(num_rows, x, width);
-			tile.height = ADJUST_SIZE(num_columns, y, height);
+			ADJUST_SIZE(num_rows, x, width);
+			ADJUST_SIZE(num_columns, y, height);
 #undef ADJUST_SIZE
 
 			box_set_position(child, box->rect.x + tile.x + gap.left, box->rect.y + tile.y + gap.top);
@@ -2157,7 +2146,7 @@ box_update(Box *const box)
 			}
 		}
 
-		/* Map only after configure. */
+		/* Map only after configured. */
 		if (should_map) {
 			xcb_icccm_set_wm_state(box->window, XCB_ICCCM_WM_STATE_NORMAL);
 			box_update_net(box);
@@ -2299,29 +2288,35 @@ do_gc(void)
 
 static unsigned
 get_rect_overlap(xcb_rectangle_t const *const r, xcb_rectangle_t const *const s) {
-#define DEFINE_D(x, width) \
+#define COMPUTE(x, width) \
 	int16_t d##x = (MIN(r->x + r->width, s->x + s->width) - MAX(r->x, s->x)); \
 	if (d##x <= 0) \
 		return 0;
-	DEFINE_D(x, width);
-	DEFINE_D(y, height);
+	REPEAT_XY(COMPUTE);
+#undef COMPUTE
 	return 1024UL * (dx * dy) / (r->width * r->height);
-#undef DEFINE_D
 }
 
-static xcb_rectangle_t
-box_get_chase_rect(Box const *const box)
+/* When box->parent is hidden it will be just a best-effort "approximation". */
+static xcb_rectangle_t const *
+box_get_parent_bounds(Box const *const box)
 {
 	Box const *parent = box;
 	do
 		parent = parent->parent;
 	while (!parent->rect.width);
+	return &parent->rect;
+}
+
+static xcb_rectangle_t
+box_get_chase_rect(Box const *const box)
+{
+	xcb_rectangle_t const *bounds = box_get_parent_bounds(box);
 
 	/* Mirror X/Y around center of parent. */
-	xcb_rectangle_t const *const rect = &parent->rect;
 	return (xcb_rectangle_t){
-		.x = rect->x + (rect->x + rect->width - (box->urect.x + box->urect.width)),
-		.y = rect->y + (rect->y + rect->height - (box->urect.y + box->urect.height)),
+		.x = bounds->x + (bounds->x + bounds->width - (box->urect.x + box->urect.width)),
+		.y = bounds->y + (bounds->y + bounds->height - (box->urect.y + box->urect.height)),
 		.width = box->urect.width,
 		.height = box->urect.height,
 	};
@@ -2926,8 +2921,6 @@ box_swap(Box *const x, Box *const y)
 	box_set_size(y, xrect.width, xrect.height);
 	box_set_position(y, xrect.x, xrect.y);
 
-	SWAP(x->weight, y->weight);
-
 	box_update_children(x->parent);
 	box_update_children(y->parent);
 
@@ -3310,11 +3303,7 @@ box_resize_float(Box *const box, enum FloatResize how)
 		return;
 
 	xcb_rectangle_t rect;
-
-	Box const *parent = box;
-	do
-		parent = parent->parent;
-	while (!parent->rect.width);
+	xcb_rectangle_t const *bounds = box_get_parent_bounds(box);
 
 	if (FLOAT_UNCHANGED == how) {
 		rect = box->urect;
@@ -3322,26 +3311,26 @@ box_resize_float(Box *const box, enum FloatResize how)
 			how = FLOAT_TILE0 + 5;
 
 		if (!rect.x && !rect.y)
-			rect.x = (parent->rect.width - rect.width) / 2,
-			rect.y = (parent->rect.height - rect.height) / 2;
+			rect.x = (bounds->width - rect.width) / 2,
+			rect.y = (bounds->height - rect.height) / 2;
 	}
 
 	if (FLOAT_UNCHANGED == how)
 		/* Nothing. */;
 	else if (FLOAT_TILE0 == how)
 		rect = (xcb_rectangle_t){
-			.x = parent->rect.width * 3 / 16,
-			.y = parent->rect.height * 3 / 16,
-			.width = parent->rect.width * 5 / 8,
-			.height = parent->rect.height * 5 / 8,
+			.x = bounds->width * 3 / 16,
+			.y = bounds->height * 3 / 16,
+			.width = bounds->width * 5 / 8,
+			.height = bounds->height * 5 / 8,
 		};
 	else if (FLOAT_TILE0 <= how && how <= FLOAT_TILE9)
 		/* TODO: Distribute error. */
 		rect = (xcb_rectangle_t){
-			.x = (parent->rect.width / 3) * ((how - FLOAT_TILE1) % 3),
-			.y =  (parent->rect.height / 3) * (2 - (how - FLOAT_TILE1) / 3),
-			.width = parent->rect.width / 3,
-			.height = parent->rect.height / 3,
+			.x = (bounds->width / 3) * ((how - FLOAT_TILE1) % 3),
+			.y =  (bounds->height / 3) * (2 - (how - FLOAT_TILE1) / 3),
+			.width = bounds->width / 3,
+			.height = bounds->height / 3,
 		};
 	else if (FLOAT_RECT == how)
 		rect = box->rect;
@@ -4384,6 +4373,7 @@ hand_grab_pointer(Hand const *const hand)
 				XCB_INPUT_XI_EVENT_MASK_MOTION,
 				{
 					EFFECTIVE_MASK(XCB_MOD_MASK_4),
+					EFFECTIVE_MASK(XCB_MOD_MASK_4 | XCB_MOD_MASK_SHIFT),
 				});
 	}
 }
@@ -4488,6 +4478,38 @@ box_send_configure_notify(Box const *const box)
 			));
 }
 
+/**
+ * After changing dimensions of box, reposition it so:
+ * - Its center stays still.
+ * - If box was previously inside parent or snapped to its bounds make it so
+ *   afterwards.
+ */
+static void
+box_set_usize_with_ureposition(Box *const box, uint16_t const width, uint16_t const height)
+{
+	xcb_rectangle_t rect = (xcb_rectangle_t){
+		.x = box->urect.x + (box->urect.width - width) / 2,
+		.y = box->urect.y + (box->urect.height - height) / 2,
+		.width = width,
+		.height = height,
+	};
+
+	xcb_rectangle_t const *bounds = box_get_parent_bounds(box);
+#define CHECK(x, width) \
+	if (box->urect.x == bounds->x || \
+	    (bounds->x <= box->urect.x && \
+	     rect.x < bounds->x)) \
+		rect.x = bounds->x; \
+	else if (box->urect.x + box->urect.width == bounds->x + bounds->width || \
+	         (box->urect.x + box->urect.width <= bounds->x + bounds->width && \
+	          bounds->x + bounds->width < rect.x + rect.width)) \
+		rect.x = box->urect.x + box->urect.width - rect.width;
+		REPEAT_XY(CHECK)
+#undef CHECK
+
+	box_set_urect(box, rect);
+}
+
 static void
 handle_configure_request(xcb_configure_request_event_t const *const event)
 {
@@ -4496,18 +4518,13 @@ handle_configure_request(xcb_configure_request_event_t const *const event)
 		return;
 
 	/* Save boundaries but only care about them when floating. */
+	if ((XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT) ==
+	    ((XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT) & event->value_mask))
+		box_set_usize_with_ureposition(box, event->width, event->height);
+
 	if ((XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y) ==
 	    ((XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y) & event->value_mask))
 		box_set_uposition(box, event->x, event->y);
-
-	if ((XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT) ==
-	    ((XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT) & event->value_mask))
-		box_set_urect(box, (xcb_rectangle_t){
-			.x = box->urect.x + (box->urect.width - event->width) / 2,
-			.y = box->urect.y + (box->urect.height - event->height) / 2,
-			.width = event->width,
-			.height = event->height,
-		});
 
 	if (box->floating)
 		box_propagate_change(box);
@@ -5949,24 +5966,26 @@ out:
 }
 
 static void
-box_snap(Box const *const box, int16_t *const px, int16_t *const py, xcb_rectangle_t const *const self)
+box_snap(Box const *const box, uint16_t distance, int16_t *const px, int16_t *const py, xcb_rectangle_t const *const self)
 {
 	Box const *const parent = box->parent;
 
-	int16_t x = *px, y = *py;
-	uint16_t dx = SNAP_DISTANCE, dy = dx, d;
+	int16_t const x = *px;
+	int16_t const y = *py;
+	int16_t tx = x, ty = y;
+	uint16_t dx = distance, dy = dx, d;
 
-#define TEST_SNAP(x, width, self_width, to_width) \
+#define TRY_SNAP(x, width, self_width, to_width) \
 	if ((d = abs(x + self->width self_width - to->x - to->width to_width)) < d##x) \
-		d##x = d, x = to->x + to->width to_width - self->width self_width;
-#define TEST_SNAP_AXIS(x, width) \
-	     TEST_SNAP(x, width, *0, *0) \
-	else TEST_SNAP(x, width, *0, *1) \
-	else TEST_SNAP(x, width, *1, *0) \
-	else TEST_SNAP(x, width, *1, *1) \
-	else TEST_SNAP(x, width, *0, /2) \
-	else TEST_SNAP(x, width, /2, /2) \
-	else TEST_SNAP(x, width, *1, /2)
+		d##x = d, t##x = to->x + to->width to_width - self->width self_width;
+#define TRY_SNAP_AXIS(x, width) \
+	TRY_SNAP(x, width, *0, *0) \
+	TRY_SNAP(x, width, *0, *1) \
+	TRY_SNAP(x, width, *1, *0) \
+	TRY_SNAP(x, width, *1, *1) \
+	TRY_SNAP(x, width, *0, /2) \
+	TRY_SNAP(x, width, /2, /2) \
+	TRY_SNAP(x, width, *1, /2)
 
 	xcb_rectangle_t const *to;
 
@@ -5977,19 +5996,17 @@ box_snap(Box const *const box, int16_t *const px, int16_t *const py, xcb_rectang
 			continue;
 
 		to = &child->rect;
-		TEST_SNAP_AXIS(x, width);
-		TEST_SNAP_AXIS(y, height);
+		REPEAT_XY(TRY_SNAP_AXIS);
 	}
 
 	/* Snap to container boundaries. */
 	to = &box->parent->rect;
-	TEST_SNAP_AXIS(x, width);
-	TEST_SNAP_AXIS(y, height);
+	REPEAT_XY(TRY_SNAP_AXIS);
 
-#undef TEST_SNAP
-#undef TEST_SNAP_AXIS
+#undef TRY_SNAP
+#undef TRY_SNAP_AXIS
 
-	*px = x, *py = y;
+	*px = tx, *py = ty;
 }
 
 static void
@@ -6002,7 +6019,9 @@ handle_input_motion(xcb_input_motion_event_t const *const event)
 	if (HAND_MODE_POINTER_RESIZE == hand->mode) {
 		int16_t x = (event->root_x >> 16) + hand->mode_rect.x,
 		        y = (event->root_y >> 16) + hand->mode_rect.y;
-		box_snap(hand->mode_box, &x, &y, &hand->mode_box->urect);
+
+		uint16_t const distance = XCB_MOD_MASK_SHIFT & event->mods.base ? UINT16_MAX : SNAP_DISTANCE;
+		box_snap(hand->mode_box, distance, &x, &y, &hand->mode_box->urect);
 		box_set_uposition(hand->mode_box, x, y);
 		box_propagate_change(hand->mode_box);
 	}
@@ -6032,7 +6051,8 @@ handle_input_button_press(xcb_input_button_press_event_t const *const event)
 		/*MAN(Keybindings)
 		 * .TP
 		 * .B Mod-PrimaryButtonPress
-		 * Focus window and start moving a floating box.
+		 * Focus window and start moving a floating box. Force snap points with
+		 * .BR Shift .
 		 */
 		Body *const body = body_get_by_root(event->root);
 		Box *const box = find_box_in_body_by_window(body, offsetof(Box, frame), event->child);
@@ -6056,7 +6076,8 @@ handle_input_button_press(xcb_input_button_press_event_t const *const event)
 		/*MAN(Keybindings)
 		 * .TP
 		 * .B Mod-SecondaryButtonPress
-		 * Resize floating box.
+		 * Resize floating box. Force snap points with
+		 * .BR Shift .
 		 */
 		if (!hand->focus)
 			return;
@@ -6076,30 +6097,46 @@ handle_input_button_press(xcb_input_button_press_event_t const *const event)
 		xcb_rectangle_t rect = foot->urect;
 
 #define EXTEND(x, width) \
-if (x < rect.x + rect.width / 2) \
-	rect.width += rect.x - x, \
-	rect.x = x; \
-else \
-	rect.width = x - rect.x;
-		EXTEND(x, width);
-		EXTEND(y, height);
+	if (x < rect.x + rect.width / 2) \
+		rect.width += rect.x - x, \
+		rect.x = x; \
+	else \
+		rect.width = x - rect.x;
+		REPEAT_XY(EXTEND);
 #undef EXTEND
 
 		int16_t xw = rect.x + rect.width,
 			yh = rect.y + rect.height;
 
 		static xcb_rectangle_t const NULL_RECT = { 0 };
-		box_snap(foot, &rect.x, &rect.y, &NULL_RECT);
-		box_snap(foot, &xw, &yh, &NULL_RECT);
+
+		uint16_t const distance = XCB_MOD_MASK_SHIFT & event->mods.base ? UINT16_MAX : SNAP_DISTANCE;
+		box_snap(foot, distance, &rect.x, &rect.y, &NULL_RECT);
+		box_snap(foot, distance, &xw, &yh, &NULL_RECT);
 
 		box_set_uposition(foot, rect.x, rect.y);
 		box_set_usize(foot, xw - rect.x, yh - rect.y);
 
 		box_propagate_change(foot);
-	}
+	} else if (4 == event->detail || 5 == event->detail) {
+		/*MAN(Keybindings)
+		 * .TP
+		 * .BR Mod-WheelUp ,\  Mod-WheelDown
+		 * Resize floating box.
+		 */
+		Body *const body = body_get_by_root(event->root);
+		Box *const box = find_box_in_body_by_window(body, offsetof(Box, frame), event->child);
+		if (!box)
+			return;
 
-	/* XDO(xcb_input_xi_allow_events, conn, XCB_CURRENT_TIME, event->deviceid,
-			XCB_INPUT_EVENT_MODE_REPLAY_DEVICE, 0, 0); */
+		if (box->floating) {
+			uint16_t const coeff = 100 + 8 * (4 == event->detail ? 1 : -1);
+			box_set_usize_with_ureposition(box,
+					box->urect.width * coeff / 100,
+					box->urect.height * coeff / 100);
+			box_propagate_change(box);
+		}
+	}
 }
 
 static void
