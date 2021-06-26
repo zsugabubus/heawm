@@ -5380,8 +5380,10 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 	case HAND_MODE_MOVE:
 		switch (KEY_MOD_MASK & event->mods.base) {
 		case XCB_MOD_MASK_4:
-			if (hand_handle_input(hand, sym))
+			if (hand_handle_input(hand, sym)) {
 				hand_input_try_jump(hand);
+				return;
+			}
 			/* FALLTHROUGH */
 		case XCB_MOD_MASK_4 | XCB_MOD_MASK_CONTROL:
 		case XCB_MOD_MASK_4 | XCB_MOD_MASK_1:
@@ -5529,8 +5531,12 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 		break;
 
 	case HAND_MODE_NAME:
-		if (!(KEY_MOD_MASK & event->mods.base))
-			hand_handle_input(hand, sym);
+		if (!(KEY_MOD_MASK & event->mods.base) &&
+		    hand_handle_input(hand, sym))
+		{
+			box_propagate_change(hand->mode_box)->label_changed = true;
+			return;
+		}
 
 		if (XKB_KEY_Return == sym ||
 		    sizeof hand->user_input == strnlen(hand->user_input, sizeof hand->user_input))
@@ -5539,7 +5545,7 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 			char *const c = &hand->mode_box->name[0];
 			*c = box_is_container(hand->mode_box) ? toupper(*c) : tolower(*c);
 			box_name(hand->mode_box);
-			break;
+			return;
 		} else if (*hand->user_input) {
 			return;
 		/* Accept some special commands until there is no user input. */
