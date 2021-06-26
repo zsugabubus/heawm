@@ -5540,28 +5540,38 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 			*c = box_is_container(hand->mode_box) ? toupper(*c) : tolower(*c);
 			box_name(hand->mode_box);
 			break;
-		/* Allow commands till we have empty input. */
-		} else if (!*hand->user_input) {
-			if (XKB_KEY_space == sym) {
-				bool hide_label = (hand->mode_box->hide_label ^= true);
-				/* Propagate hide_label when only children. */
-				for (Box *b = hand->mode_box; (b = b->parent) && 1 == b->num_children;)
-					b->hide_label = hide_label;
+		} else if (*hand->user_input) {
+			return;
+		/* Accept some special commands until there is no user input. */
+		} else if (XKB_KEY_minus == sym ||
+		           XKB_KEY_plus == sym)
+		{
+			bool const hide_label = XKB_KEY_minus == sym;
+			/* Propagate hide_label when only children. */
+			Box *b = hand->mode_box;
+			do
+				b->hide_label = hide_label;
+			while ((b = b->parent) && 1 == b->num_children);
 
-				box_propagate_change(hand->mode_box)->label_changed = true;
-				break;
-			} else if (XKB_KEY_asterisk == sym) {
-				bool const hide_label = !hand->mode_box->hide_label;
+			break;
+		} else if (XKB_KEY_slash == sym ||
+		           XKB_KEY_asterisk == sym)
+		{
+			bool const hide_label = XKB_KEY_slash == sym;
+			if (box_is_container(hand->mode_box)) {
 				Box *b;
-				for_each_box(b, hand->mode_box) {
+				for_each_box(b, hand->mode_box)
 					b->hide_label = hide_label;
-					b->content_changed = true;
-					b->label_changed = true;
+			} else {
+				Body const *const body = &bodies[hand->mode_box->body];
+				for (uint32_t i = 0; i < body->num_labels_used; ++i) {
+					Label const *label = &body->labels[i];
+					if (get_rect_overlap(&hand->mode_box->rect, &label->base->rect))
+						label->base->hide_label = hide_label;
 				}
-				break;
 			}
+			break;
 		}
-		box_propagate_change(hand->mode_box)->label_changed = true;
 		return;
 
 	default:
@@ -5818,19 +5828,19 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 
 	/*MAN(Keybindings)
 	 * .TP
-	 * .BR Mod-Ctrl-n "ame {" A-Za-z "}... Return"
+	 * .BR Mod-Ctrl-n "ame {" A-Za-z "}... " Return
 	 * Name focused box. When left empty, an automatic name will be assigned
-	 * for the box.
+	 * to the box.
 	 * .IP
 	 * Some special keys are also recogzined, namely:
 	 * .RS
 	 * .TP
-	 * .BR space
-	 * Toggle visibility of name label.
+	 * .BR + ,\  \-
+	 * Show/hide name label.
 	 * .TP
-	 * .BR *
-	 * Recursive
-	 * .BR space .
+	 * .BR "*" ,\  /
+	 * On a container show/hide name labels recursively; otherwise
+	 * show/hide any labels that obscures part of the window.
 	 * .RE
 	 */
 	case XKB_KEY_n:
