@@ -324,6 +324,8 @@ struct Box {
 	     floating: 1, /**< Tiled or floating? */
 	     vertical: 1;
 
+	xcb_xfixes_barrier_t barrier;
+
 	char *title;
 	char *class;
 
@@ -400,7 +402,7 @@ enum HandMode {
 	HAND_MODE_NULL,
 	HAND_MODE_MOVE,
 	HAND_MODE_NAME,
-	HAND_MODE_POINTER_RESIZE,
+	HAND_MODE_POINTER_MOVE,
 };
 
 typedef struct {
@@ -421,7 +423,7 @@ typedef struct {
 	     want_popup: 1,
 	     focus_changed: 1;
 
-	xcb_xfixes_barrier_t barriers[4]; /**< Pointer barrier (around) */
+	xcb_xfixes_barrier_t barrier; /**< Pointer barrier (around) */
 
 	char user_input[membersizeof(Box, name)];
 
@@ -655,6 +657,25 @@ spawn(char const *argv[], void(*fork_cb)(void *), void *arg)
 	pthread_sigmask(SIG_SETMASK, &origmask, NULL);
 
 	return ret;
+}
+
+static Hand *
+hand_find_by_barrier(xcb_xfixes_barrier_t const barrier)
+{
+	for_each_hand
+		if (hand->barrier <= barrier && barrier < hand->barrier + 4)
+			return hand;
+	return NULL;
+}
+
+static Box *
+box_find_by_barrier(Box *const root, xcb_xfixes_barrier_t const barrier)
+{
+	Box *box;
+	for_each_box(box, root)
+		if (box->barrier <= barrier && barrier < box->barrier + 4)
+			break;
+	return box;
 }
 
 static Box *
@@ -1525,40 +1546,94 @@ box_restore_pointer(Box const *const box, Hand const *const hand)
 		goto set_default_location;
 }
 
-static void
-hand_unbarricade(Hand *const hand)
+static xcb_xfixes_barrier_t
+generate_barrier_ids(void)
 {
-	for (uint8_t i = 0; i < ARRAY_SIZE(hand->barriers); ++i)
-		XDO(xcb_xfixes_delete_pointer_barrier, conn, hand->barriers[i]);
+	xcb_xfixes_barrier_t id = xcb_generate_id(conn);
+
+	for (uint8_t i = 1; i < 4;) {
+		xcb_xfixes_barrier_t next_id = xcb_generate_id(conn);
+		if (id + i++ == next_id)
+			continue;
+
+		id = next_id;
+		i = 1;
+	}
+
+	return id;
 }
 
 static void
-hand_barricade(Hand *const hand, Box const *const box)
+delete_barrier(xcb_xfixes_barrier_t const barrier)
 {
-	hand_unbarricade(hand);
+	if (XCB_NONE != barrier)
+		for (uint8_t i = 0; i < 4; ++i)
+			XDO(xcb_xfixes_delete_pointer_barrier, conn, barrier + i);
+}
 
-	for (uint8_t i = 0; i < ARRAY_SIZE(hand->barriers); ++i)
+static void
+hand_unbarricade(Hand *const hand)
+{
+	delete_barrier(hand->barrier);
+}
+
+enum {
+	XCB_XFIXES_BARRIER_DIRECTIONS_POSITIVE_XY =
+		XCB_XFIXES_BARRIER_DIRECTIONS_POSITIVE_X |
+		XCB_XFIXES_BARRIER_DIRECTIONS_POSITIVE_Y,
+	XCB_XFIXES_BARRIER_DIRECTIONS_NEGATIVE_XY =
+		XCB_XFIXES_BARRIER_DIRECTIONS_NEGATIVE_X |
+		XCB_XFIXES_BARRIER_DIRECTIONS_NEGATIVE_Y,
+	XCB_XFIXES_BARRIER_DIRECTIONS_ALL =
+		XCB_XFIXES_BARRIER_DIRECTIONS_POSITIVE_X |
+		XCB_XFIXES_BARRIER_DIRECTIONS_POSITIVE_Y |
+		XCB_XFIXES_BARRIER_DIRECTIONS_NEGATIVE_X |
+		XCB_XFIXES_BARRIER_DIRECTIONS_NEGATIVE_Y,
+};
+
+static void
+box_update_barrier(Box *const box, Hand const *const for_hand)
+{
+	delete_barrier(box->barrier);
+
+	if (!for_hand && !box->floating)
+		return;
+
+	if (XCB_NONE == box->barrier)
+		box->barrier = generate_barrier_ids();
+
+	xcb_xfixes_barrier_t const barrier = for_hand ? for_hand->barrier : box->barrier;
+	for (uint8_t i = 0; i < 4; ++i)
 		/*
 		 *  0<
 		 * 1 2
 		 * %3
 		 */
 		XDO(xcb_xfixes_create_pointer_barrier, conn,
-				hand->barriers[i],
-				box->window,
-				box->rect.x + (i < 2 ? (i == 0 ? -1 : 0) : box->rect.width + (i == 3 ? 1 : 0)),
-				box->rect.y + (i < 2 ? (i == 1 ? -1 : 0) : box->rect.height + (i == 2 ? 1 : 0)),
-				box->rect.x + (i % 2 ? (i == 3 ? -1 : 0) : box->rect.width + (i == 0 ? 1 : 0)),
-				box->rect.y + (i % 2 ? box->rect.height + (i == 1 ? 1 : 0) : (i == 2 ? -1 : 0)),
-				i < 2 ? XCB_XFIXES_BARRIER_DIRECTIONS_POSITIVE_X | XCB_XFIXES_BARRIER_DIRECTIONS_POSITIVE_Y
-				      : XCB_XFIXES_BARRIER_DIRECTIONS_NEGATIVE_X | XCB_XFIXES_BARRIER_DIRECTIONS_NEGATIVE_Y,
-				1, (uint16_t const[]){ hand->master_pointer });
+				barrier + i,
+				bodies[box->body].screen->root,
+				box->rect.x + (i < 2 ? 0 : box->rect.width),
+				box->rect.y + (i < 2 ? 0 : box->rect.height),
+				box->rect.x + (i % 2 ? 0 : box->rect.width),
+				box->rect.y + (i % 2 ? box->rect.height : 0),
+				for_hand
+					? ((i < 2) ? XCB_XFIXES_BARRIER_DIRECTIONS_POSITIVE_XY
+					           : XCB_XFIXES_BARRIER_DIRECTIONS_NEGATIVE_XY)
+					: XCB_XFIXES_BARRIER_DIRECTIONS_ALL,
+				!!for_hand, for_hand ? &for_hand->master_pointer : NULL);
+}
+
+static void
+hand_barricade(Hand *const hand, Box *const box)
+{
+	hand_unbarricade(hand);
+	box_update_barrier(box, hand);
 }
 
 static void
 hand_update_barrier(Hand *const hand)
 {
-	Box const *const focus = hand->input_focus;
+	Box *const focus = hand->input_focus;
 	if (hand->barricade && focus)
 		hand_barricade(hand, focus);
 }
@@ -2104,6 +2179,8 @@ box_update(Box *const box)
 			box_update_layout(box);
 		} else {
 			box_delete_labels(box);
+			delete_barrier(box->barrier);
+
 			if (XCB_WINDOW_NONE != box->window) {
 				xcb_icccm_set_wm_state(box->window, XCB_ICCCM_WM_STATE_ICONIC);
 				box_update_net(box);
@@ -2128,7 +2205,7 @@ box_update(Box *const box)
 	if (!box->rect.width)
 		goto out;
 
-	if (XCB_WINDOW_NONE != box->window && !box_is_container(box)) {
+	if (!box_is_container(box)) {
 		if (0 < i) {
 			Box const *const foot = box_get_foot(box);
 			if (foot) {
@@ -2142,6 +2219,9 @@ box_update(Box *const box)
 			mask |= XCB_CONFIG_WINDOW_STACK_MODE;
 			list[i++] = XCB_STACK_MODE_BELOW;
 			XDO(xcb_configure_window, conn, box->frame, mask, list);
+
+			if (layout_changed || position_changed)
+				box_update_barrier(box, NULL);
 
 			if (layout_changed) {
 				box_update_shape(box);
@@ -2357,41 +2437,6 @@ box_chase_box(Box const *box, unsigned const min_percent)
 	}
 }
 
-static bool
-box_chase_pointer(xcb_input_enter_event_t const *const event)
-{
-	/* No modifiers pressed. */
-	if (event->mods.base)
-		return false;
-
-	/* No buttons pressed. */
-	uint32_t const *buttons = xcb_input_enter_buttons(event);
-	for (int i = xcb_input_enter_buttons_length(event); 0 < i;)
-		if (buttons[--i])
-			return false;
-
-	Box *const box = box_find_by_window(root, offsetof(Box, window), event->event);
-	if (!box)
-		return false;
-	Box *const foot = root->focus_seq == box->focus_seq ? NULL : box_get_foot(box);
-	if (!foot)
-		return false;
-
-	xcb_rectangle_t const target = box_get_chase_rect(foot);
-
-	int16_t x = event->root_x >> 16,
-	        y = event->root_y >> 16;
-
-	if ((1024 / 3) < get_rect_overlap(&foot->rect, &target) ||
-	    ((target.x <= x && x <= target.x + target.width) &&
-	     (target.y <= y && y <= target.y + target.height)))
-		return false;
-
-	box_set_urect(foot, target);
-	box_propagate_change(foot);
-
-	return true;
-}
 
 /**
  * Send changes to X server.
@@ -2670,6 +2715,7 @@ box_delete(Box *box)
 		}
 	}
 
+	delete_barrier(box->barrier);
 	box_delete_labels(box);
 
 	Box *const box_parent = box->parent;
@@ -3535,6 +3581,7 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 
 	XDO(xcb_input_xi_select_events, conn, window, 1,
 			XI_EVENT_MASK(XCB_INPUT_DEVICE_ALL,
+					XCB_INPUT_XI_EVENT_MASK_BARRIER_HIT |
 					XCB_INPUT_XI_EVENT_MASK_FOCUS_IN |
 					XCB_INPUT_XI_EVENT_MASK_ENTER));
 
@@ -3638,6 +3685,7 @@ init_extensions(void)
 		xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
 	}
 
+	/* https://www.x.org/releases/X11R7.7/doc/fixesproto/fixesproto.txt */
 	ext = xcb_get_extension_data(conn, &xcb_xfixes_id);
 	if (!ext->present) {
 		fprintf(stderr, "XFixes extension missing; pointer barricading will not work\n");
@@ -4211,6 +4259,7 @@ body_setup_hands(Body *const body)
 {
 	XDO(xcb_input_xi_select_events, conn, body->screen->root, 1,
 			XI_EVENT_MASK(XCB_INPUT_DEVICE_ALL,
+					XCB_INPUT_XI_EVENT_MASK_BARRIER_HIT |
 					XCB_INPUT_XI_EVENT_MASK_HIERARCHY |
 					XCB_INPUT_XI_EVENT_MASK_FOCUS_IN |
 					XCB_INPUT_XI_EVENT_MASK_ENTER));
@@ -4375,7 +4424,6 @@ hand_grab_pointer(Hand const *const hand)
 				XCB_INPUT_GRAB_MODE_22_ASYNC,
 				XCB_INPUT_GRAB_OWNER_NO_OWNER,
 				XCB_INPUT_XI_EVENT_MASK_BARRIER_HIT |
-				XCB_INPUT_XI_EVENT_MASK_BARRIER_LEAVE |
 				XCB_INPUT_XI_EVENT_MASK_BUTTON_PRESS |
 				XCB_INPUT_XI_EVENT_MASK_BUTTON_RELEASE |
 				XCB_INPUT_XI_EVENT_MASK_MOTION,
@@ -4730,8 +4778,7 @@ hand_setup(Hand *const hand)
 			REQUIRED_MAP_PARTS,
 			NULL);
 
-	for (uint8_t i = 0; i < ARRAY_SIZE(hand->barriers); ++i)
-		hand->barriers[i] = xcb_generate_id(conn);
+	hand->barrier = generate_barrier_ids();
 }
 
 static void
@@ -6040,14 +6087,15 @@ handle_input_motion(xcb_input_motion_event_t const *const event)
 	assert(device);
 	Hand *const hand = device->hand;
 
-	if (HAND_MODE_POINTER_RESIZE == hand->mode) {
+	if (HAND_MODE_POINTER_MOVE == hand->mode) {
 		int16_t x = (event->root_x >> 16) + hand->mode_rect.x,
 		        y = (event->root_y >> 16) + hand->mode_rect.y;
 
 		uint16_t const distance = XCB_MOD_MASK_SHIFT & event->mods.base ? UINT16_MAX : SNAP_DISTANCE;
 		box_snap(hand->mode_box, distance, &x, &y, &hand->mode_box->urect);
 		box_set_uposition(hand->mode_box, x, y);
-		box_propagate_change(hand->mode_box);
+		if (hand->mode_box->position_changed)
+			box_propagate_change(hand->mode_box);
 	}
 }
 
@@ -6058,7 +6106,7 @@ handle_input_button_release(xcb_input_button_press_event_t const *const event)
 	assert(device);
 	Hand *const hand = device->hand;
 
-	if (HAND_MODE_POINTER_RESIZE == hand->mode) {
+	if (HAND_MODE_POINTER_MOVE == hand->mode) {
 		hand_leave_mode(hand);
 		hand_grab_pointer(hand);
 	}
@@ -6086,7 +6134,7 @@ handle_input_button_press(xcb_input_button_press_event_t const *const event)
 		if (HAND_MODE_NULL == hand->mode) {
 			Box *const foot = box_get_foot(box);
 			if (foot) {
-				hand->mode = HAND_MODE_POINTER_RESIZE;
+				hand->mode = HAND_MODE_POINTER_MOVE;
 				hand->mode_box = foot;
 				hand->mode_rect.x = hand->mode_box->urect.x - (event->root_x >> 16);
 				hand->mode_rect.y = hand->mode_box->urect.y - (event->root_y >> 16);
@@ -6169,20 +6217,87 @@ handle_input_enter(xcb_input_enter_event_t const *const event)
 	if (XCB_INPUT_NOTIFY_MODE_NORMAL != event->mode)
 		return;
 
-	Device *const device = get_device_by_id(event->sourceid);
-	assert(device);
-	Hand *hand = device->hand;
-	if (HAND_MODE_NULL != hand->mode)
+	XDO(xcb_input_xi_set_client_pointer, conn, event->child, event->deviceid);
+}
+
+static void
+handle_input_barrier_hit(xcb_input_barrier_hit_event_t const *const event)
+{
+	if (hand_find_by_barrier(event->barrier))
 		return;
 
-	/*MAN(Keybindings)
-	 * .TP
-	 * .B PointerEnter
-	 * Place floating box to the alternative position when no modifier keys
-	 * or buttons are pressed.
-	 */
-	if (!box_chase_pointer(event))
-		XDO(xcb_input_xi_set_client_pointer, conn, event->child, event->deviceid);
+	/* Must be released otherwise moving pointer in and out across barrier
+	 * will not notify us for some time. It is also seems important to not
+	 * to select BARRIER_LEAVE event. */
+	XDO(xcb_input_xi_barrier_release_pointer, conn, 1,
+			&(xcb_input_barrier_release_pointer_info_t const){
+				.deviceid = event->deviceid,
+				.barrier = event->barrier,
+				.eventid = event->eventid,
+			});
+
+	/* Only first hit is interesting. */
+	if (event->dtime)
+		return;
+
+	uint16_t d = event->dx.integral * event->dx.integral + event->dy.integral * event->dy.integral;
+
+	if (350 <= d)
+		return;
+
+	Box *const box = box_find_by_barrier(root, event->barrier);
+	if (!box || root->focus_seq == box->focus_seq)
+		return;
+
+	/* Moved inside-out. */
+	uint8_t i = event->barrier - box->barrier;
+	if ((0 == i && event->dy.integral <= 0) ||
+	    (3 == i && 0 <= event->dy.integral) ||
+	    (1 == i && event->dx.integral <= 0) ||
+	    (2 == i && 0 <= event->dx.integral))
+		return;
+
+	xcb_rectangle_t const target = box_get_chase_rect(box);
+	box_set_urect(box, target);
+	box_propagate_change(box);
+}
+
+static void
+handle_input_event(xcb_ge_generic_event_t const *const event)
+{
+	switch (event->event_type) {
+	case XCB_INPUT_HIERARCHY:
+		handle_input_hierarchy_change((void const *)event);
+		break;
+
+	case XCB_INPUT_FOCUS_IN:
+		handle_input_focus_in((void const *)event);
+		break;
+
+	case XCB_INPUT_KEY_PRESS:
+		handle_input_key_press((void const *)event);
+		break;
+
+	case XCB_INPUT_ENTER:
+		handle_input_enter((void const *)event);
+		break;
+
+	case XCB_INPUT_BARRIER_HIT:
+		handle_input_barrier_hit((void const *)event);
+		break;
+
+	case XCB_INPUT_BUTTON_PRESS:
+		handle_input_button_press((void const *)event);
+		break;
+
+	case XCB_INPUT_BUTTON_RELEASE:
+		handle_input_button_release((void const *)event);
+		break;
+
+	case XCB_INPUT_MOTION:
+		handle_input_motion((void const *)event);
+		break;
+	}
 }
 
 static void
@@ -6227,40 +6342,6 @@ handle_shape_event(xcb_generic_event_t const *const event)
 	}
 
 	return true;
-}
-
-static void
-handle_input_event(xcb_ge_generic_event_t const *const event)
-{
-	switch (event->event_type) {
-	case XCB_INPUT_HIERARCHY:
-		handle_input_hierarchy_change((void const *)event);
-		break;
-
-	case XCB_INPUT_FOCUS_IN:
-		handle_input_focus_in((void const *)event);
-		break;
-
-	case XCB_INPUT_KEY_PRESS:
-		handle_input_key_press((void const *)event);
-		break;
-
-	case XCB_INPUT_ENTER:
-		handle_input_enter((void const *)event);
-		break;
-
-	case XCB_INPUT_BUTTON_PRESS:
-		handle_input_button_press((void const *)event);
-		break;
-
-	case XCB_INPUT_BUTTON_RELEASE:
-		handle_input_button_release((void const *)event);
-		break;
-
-	case XCB_INPUT_MOTION:
-		handle_input_motion((void const *)event);
-		break;
-	}
 }
 
 static void
