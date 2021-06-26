@@ -2035,27 +2035,35 @@ box_update(Box *const box)
 
 	if (box != root && 3 <= HEAWM_VERBOSE)
 		printf(
-				"%*.sbox 0x%p (%.*s) win=0x%x fr=0x%x %ux%u+%d+%d u%ux%u+%d+%d leader=%x"
-				" title=\"%.15s\""
-				" class=\"%s\", \"%s\" focus#=%d/%d hand=%d conceal#=%d nvis=%d %c%c%c%c\n",
+				"%*.s%p %d (%.*s):"
+				" 0x%x->0x%x/0x%x"
+				" %ux%u+%d+%d u%ux%u+%d+%d"
+				" H=%d C=%d V=%d %c%c%c%c"
+				" (%s %s)\"%.15s\" "
+				"\n",
 				depth, "",
 				(void *)box,
+
+				box->focus_seq,
+
 				(int)sizeof box->name, box->name,
-				box->window, box->frame,
+
+				box->leader, box->frame, box->window,
+
 				box->rect.width, box->rect.height, box->rect.x, box->rect.y,
 				box->urect.width, box->urect.height, box->urect.x, box->urect.y,
-				box->leader,
-				box->title,
-				box->class,
-				box_get_class_instance(box),
-				box->focus_seq, root->focus_seq,
+
 				box->focus_hand,
 				box->conceal_seq,
 				box->num_visible,
 				box->floating ? 'F' : '-',
 				box->focus_lock ? 'L' : '-',
 				box->user_concealed ? 'U' : '-',
-				box->concealed ? 'C' : '-');
+				box->concealed ? 'C' : '-',
+
+				box->class,
+				box_get_class_instance(box),
+				box->title);
 
 	depth += 2;
 
