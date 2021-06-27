@@ -3,7 +3,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
-#include <inttypes.h>
 #include <limits.h>
 #include <math.h>
 #include <memory.h>
@@ -11,6 +10,7 @@
 #include <signal.h>
 #include <stdalign.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdlib.h>
@@ -49,33 +49,6 @@
 /* https://specifications.freedesktop.org/wm-spec/wm-spec-latest.html#idm46035372536800 */
 /* https://people.gnome.org/~tthurman/docs/metacity/xprops_8h-source.html */
 
-#ifndef M_PHI
-# define M_PHI 1.6180339887 /** Golden Ratio */
-#endif
-
-#define EXTREMAL_NAME_CHAR '\x7f'
-
-#define RGB8_TO_FLOATS(color) \
-	(uint8_t)((color) >> 16) / 256., \
-	(uint8_t)((color) >> 8 ) / 256., \
-	(uint8_t)((color)      ) / 256.
-
-/* sizeof array... but in elements */
-#define ARRAY_SIZE(...) (sizeof((__VA_ARGS__)) / sizeof(*(__VA_ARGS__)))
-#define offsetof(type, member) ((size_t)(&((type *)0)->member))
-#define memberof(type, base, offset) ((type *)((uintptr_t)(base) + (offset)))
-#define membersizeof(type, member) (sizeof(((type *)0)->member))
-
-#define SCRIPT_SIZE_MAX 32
-
-#define SWAP(x, y) do { \
-	__typeof__(x) const tmp = x; \
-	x = y; \
-	y = tmp; \
-} while (0)
-
-#define REPEAT_XY(macro) macro(x, width) macro(y, height)
-
 #if defined(__GNUC__)
 # define maybe_unused __attribute__((unused))
 #else
@@ -88,26 +61,33 @@
 # define unreachable (*(int *)0 = 0)
 #endif
 
-# define STRINGIFY_(x) #x
-# define STRINGIFY(x) STRINGIFY_(x)
-
-# define XCHECK(request, ...) \
-	check_cookie(request##_checked(__VA_ARGS__), STRINGIFY(__LINE__) ": " #request)
-
-#if 1 <= HEAWM_VERBOSE
-# define XDO(request, ...) (void)XCHECK(request, __VA_ARGS__)
-#else
-# define XDO(request, ...) (void)request(__VA_ARGS__)
+#ifndef M_PHI
+# define M_PHI 1.6180339887 /** Golden Ratio */
 #endif
 
-#define XCB_GET_REPLY(x, request, ...) \
-	request##_reply_t *const x = \
-			request##_reply(conn, request##_unchecked(conn, __VA_ARGS__), NULL)
+/* sizeof array... but in elements */
+#define ARRAY_SIZE(...) (sizeof (__VA_ARGS__) / sizeof *(__VA_ARGS__))
+#define memberof(type, base, offset) ((type *)((uintptr_t)(base) + (offset)))
+#define membersizeof(type, member) (sizeof(((type *)0)->member))
 
 #define MAX(x, y) ((x) < (y) ? (y) : (x))
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 
-#define XCB_ERROR_NOTIFY 0
+#define STRINGIFY_(x) #x
+#define STRINGIFY(x) STRINGIFY_(x)
+
+#define XCHECK(xcb_request, ...) \
+	check_cookie(xcb_request##_checked(__VA_ARGS__), STRINGIFY(__LINE__) ": " #xcb_request)
+
+#if 1 <= HEAWM_VERBOSE
+# define XDO(xcb_request, ...) (void)XCHECK(xcb_request, __VA_ARGS__)
+#else
+# define XDO(xcb_request, ...) (void)xcb_request(__VA_ARGS__)
+#endif
+
+#define XCB_GET_REPLY(x, xcb_request, ...) \
+	xcb_request##_reply_t *const x = \
+			xcb_request##_reply(conn, xcb_request##_unchecked(conn, __VA_ARGS__), NULL)
 
 /* Because xcb_send_event() does not take an |event| length argument, no matter
  * what, it will copy a fixed number of bytes. To avoid reading (then sending)
@@ -149,29 +129,21 @@
 		{ mask } \
 	}
 
-#define FRAME_WINDOW_EVENT_MASK \
-(	XCB_EVENT_MASK_STRUCTURE_NOTIFY \
-|	XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT \
-)
+#define XCB_ERROR_NOTIFY 0
 
-#define CLIENT_WINDOW_EVENT_MASK \
-(	XCB_EVENT_MASK_PROPERTY_CHANGE \
-|	XCB_EVENT_MASK_STRUCTURE_NOTIFY \
-|	XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY \
-|	XCB_EVENT_MASK_FOCUS_CHANGE \
-|	XCB_EVENT_MASK_ENTER_WINDOW \
-)
-
-#define NULL_BODY 128U
-#define MAX_NUM_HANDS 63U
-#define NULL_HAND (MAX_NUM_HANDS + 1U)
-
-#define XCB_STRING_MAX (64 * sizeof(uint32_t))
-
-#define LABEL_CLASS "heawm"
-#define LABEL_INSTANCE LABEL_CLASS "-label"
-
-#define MONITOR_CLASS "heawm-monitor"
+enum {
+	XCB_XFIXES_BARRIER_DIRECTIONS_POSITIVE_XY =
+		XCB_XFIXES_BARRIER_DIRECTIONS_POSITIVE_X |
+		XCB_XFIXES_BARRIER_DIRECTIONS_POSITIVE_Y,
+	XCB_XFIXES_BARRIER_DIRECTIONS_NEGATIVE_XY =
+		XCB_XFIXES_BARRIER_DIRECTIONS_NEGATIVE_X |
+		XCB_XFIXES_BARRIER_DIRECTIONS_NEGATIVE_Y,
+	XCB_XFIXES_BARRIER_DIRECTIONS_ALL =
+		XCB_XFIXES_BARRIER_DIRECTIONS_POSITIVE_X |
+		XCB_XFIXES_BARRIER_DIRECTIONS_POSITIVE_Y |
+		XCB_XFIXES_BARRIER_DIRECTIONS_NEGATIVE_X |
+		XCB_XFIXES_BARRIER_DIRECTIONS_NEGATIVE_Y,
+};
 
 enum { XCB_MOD_MASK_NUM_LOCK = XCB_MOD_MASK_2, };
 
@@ -193,13 +165,47 @@ enum { XCB_MOD_MASK_NUM_LOCK = XCB_MOD_MASK_2, };
 	                    XCB_MOD_MASK_NUM_LOCK | (mask), \
 	XCB_MOD_MASK_LOCK | XCB_MOD_MASK_NUM_LOCK | (mask)
 
+#define FRAME_WINDOW_EVENT_MASK \
+	( XCB_EVENT_MASK_STRUCTURE_NOTIFY \
+	| XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT \
+	)
+
+#define CLIENT_WINDOW_EVENT_MASK \
+	( XCB_EVENT_MASK_PROPERTY_CHANGE \
+	| XCB_EVENT_MASK_STRUCTURE_NOTIFY \
+	| XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY \
+	| XCB_EVENT_MASK_FOCUS_CHANGE \
+	| XCB_EVENT_MASK_ENTER_WINDOW \
+	)
+
+#define XCB_STRING_MAX (64 * sizeof(uint32_t))
+
+#define WM_NAME "heawm"
+
+#define REPEAT_XY(macro) macro(x, width) macro(y, height)
+
 #define for_each_template_(elem_type, list, index_type, name, extra) \
 	for (index_type name##_index = 0; (extra) || name##_index < num_##list; ++name##_index) \
 		for (elem_type *const name = &list[name##_index], *loop_ = (void *)true; loop_; loop_ = (void *)false)
 
-#define for_each_body for_each_template_(Body, bodies, uint8_t, body, 0 == body_index)
+#define MONITOR_CLASS WM_NAME"-monitor"
+#define EXTREMAL_NAME_CHAR '\x7f'
 
-#define for_each_hand for_each_template_(Hand, hands, uint8_t, hand, 0)
+enum Orientation {
+	LEFT = -1,
+	TOP = -1,
+	CENTER = 0,
+	RIGHT = 1,
+	BOTTOM = 1,
+};
+
+enum FloatResize {
+	FLOAT_UNCHANGED,
+	FLOAT_TILE0,
+	FLOAT_TILE1 = FLOAT_TILE0 + 1,
+	FLOAT_TILE9 = FLOAT_TILE0 + 9,
+	FLOAT_RECT,
+};
 
 #define for_each_box(x, root) \
 	for (bool loop_ = ((x) = (root), true); loop_ && ((x)->iter = 0, true); ({ \
@@ -216,17 +222,8 @@ enum { XCB_MOD_MASK_NUM_LOCK = XCB_MOD_MASK_2, };
 			(x) = (x)->children[x->iter++]; \
 	}))
 
-static int const GC_INTERVAL = 5 * 60 * 1000;
-
-static struct {
-	char const *terminal;
-	char const *shell;
-	char heawm_home[PATH_MAX];
-	size_t heawm_home_size;
-} config;
-
 typedef struct {
-	xcb_window_t window; /**< Relative to */
+	xcb_window_t window; /**< Relative to. */
 	xcb_input_fp1616_t x, y;
 } BoxPointer;
 
@@ -337,6 +334,30 @@ struct Box {
 
 static Box *root; /**< Mother of all boxes. */
 
+static uint16_t const MONITOR_GAP = 0;
+static uint16_t const CONTAINER_GAP = 4;
+static uint16_t const WINDOW_GAP = 1;
+static uint16_t const BORDER_RADIUS = 0;
+static uint16_t const SNAP_DISTANCE = 25;
+/**
+ * Do not apply border radius for shaped windows.
+ */
+static bool const BORDER_RADIUS_FOR_SHAPED = true;
+
+#define LABEL_INSTANCE WM_NAME"-label"
+
+#define RGB8_TO_FLOATS(color) \
+		(uint8_t)((color) >> 16) / 256., \
+		(uint8_t)((color) >> 8 ) / 256., \
+		(uint8_t)((color)      ) / 256.
+
+#define label_stroke_rgb 0, 0, 0
+#define label_color_rgb 1, 1, 0
+
+typedef struct {
+	int16_t x, y;
+} Point;
+
 enum LabelType {
 	LABEL_NORMAL, /**< Text only */
 	LABEL_BOX, /**< Draw glory if |base| focused */
@@ -355,50 +376,11 @@ typedef struct {
 	char name[membersizeof(Box, name)];
 } Label;
 
-typedef struct {
-	xcb_screen_t *screen;
-	xcb_visualtype_t *visual_type;
-	int screen_index;
-
-	uint32_t num_labels_used,
-	/* <= */ num_labels_mapped,
-	/* <= */ num_labels_created,
-	/* <= */ num_labels;
-	Label *labels;
-
-	/*
-	 *  LABELS
-	 *      A
-	 *      |
-	 * label_layer
-	 *      |
-	 *      V
-	 * FLOATING FOCUSED
-	 *
-	 * float_layer
-	 *      |
-	 *      V
-	 *   FLOATING
-	 *
-	 *      _
-	 *      |
-	 *      V
-	 *    TILES
-	 */
-	union {
-		xcb_window_t label_layer;
-		xcb_window_t net_window;
-	};
-	xcb_window_t float_layer;
-
-	bool net_client_list_changed: 1,
-	     composited: 1;
-
-	xcb_cursor_t move_cursor;
-} Body;
-
-static uint8_t num_bodies;
-static Body *bodies;
+static char const LABEL_FONT_DEFAULT[] = "monospace";
+static char *label_font;
+static Point label_rect = { .x = 30, .y = 60 }; /* In pts */
+static int label_stroke = 2;
+static int label_font_size = 17;
 
 enum HandMode {
 	HAND_MODE_NULL,
@@ -406,6 +388,11 @@ enum HandMode {
 	HAND_MODE_NAME,
 	HAND_MODE_POINTER_MOVE,
 };
+
+#define MAX_NUM_HANDS 63U
+#define NULL_HAND (MAX_NUM_HANDS + 1U)
+
+#define for_each_hand for_each_template_(Hand, hands, uint8_t, hand, 0)
 
 typedef struct {
 	/* Keyboard and pointer are always in pair */
@@ -505,28 +492,52 @@ typedef struct {
 static uint8_t num_devices;
 static Device *devices;
 
+#define for_each_body for_each_template_(Body, bodies, uint8_t, body, 0 == body_index)
+
 typedef struct {
-	int16_t x, y;
-} Point;
+	xcb_screen_t *screen;
+	xcb_visualtype_t *visual_type;
+	int screen_index;
 
-#define label_stroke_rgb 0, 0, 0
-#define label_color_rgb 1, 1, 0
+	uint32_t num_labels_used,
+	/* <= */ num_labels_mapped,
+	/* <= */ num_labels_created,
+	/* <= */ num_labels;
+	Label *labels;
 
-static uint16_t const MONITOR_GAP = 0;
-static uint16_t const CONTAINER_GAP = 4;
-static uint16_t const WINDOW_GAP = 1;
-static uint16_t const BORDER_RADIUS = 0;
-static uint16_t const SNAP_DISTANCE = 25;
-/**
- * Do not apply border radius for shaped windows.
- */
-static bool const BORDER_RADIUS_FOR_SHAPED = true;
+	/*
+	 *  LABELS
+	 *      A
+	 *      |
+	 * label_layer
+	 *      |
+	 *      V
+	 * FLOATING FOCUSED
+	 *
+	 * float_layer
+	 *      |
+	 *      V
+	 *   FLOATING
+	 *
+	 *      _
+	 *      |
+	 *      V
+	 *    TILES
+	 */
+	union {
+		xcb_window_t label_layer;
+		xcb_window_t net_window;
+	};
+	xcb_window_t float_layer;
 
-static char const LABEL_FONT_DEFAULT[] = "monospace";
-static char *label_font;
-static Point label_rect = { .x = 30, .y = 60 }; /* In pts */
-static int label_stroke = 2;
-static int label_font_size = 17;
+	bool net_client_list_changed: 1,
+	     composited: 1;
+
+	xcb_cursor_t move_cursor;
+} Body;
+
+static uint8_t num_bodies;
+static Body *bodies;
 
 typedef struct {
 	char name[membersizeof(Box, name)];
@@ -568,8 +579,7 @@ static Rule const RULES[] = {
 	xmacro(WM_STATE) \
 	xmacro(UTF8_STRING) \
 
-static char const *const ATOM_NAMES[] =
-{
+static char const *const ATOM_NAMES[] = {
 #define xmacro(name) #name,
 	ATOMS
 #undef xmacro
@@ -598,20 +608,23 @@ static xcb_key_symbols_t *symbols;
 static int argc;
 static char **argv;
 
+static struct {
+	char const *terminal;
+	char const *shell;
+	char heawm_home[PATH_MAX];
+	size_t heawm_home_size;
+} config;
+
+static int const GC_INTERVAL = 5 * 60 * 1000;
+
 #define print_strerror(what) \
 	fprintf(stderr, "%s: %s: %s\n", __func__, what, strerror(errno));
-
-enum Orientation {
-	LEFT = -1,
-	TOP = -1,
-	CENTER = 0,
-	RIGHT = 1,
-	BOTTOM = 1,
-};
 
 #define SPAWN(...) spawn((char const *[]){ __VA_ARGS__, NULL }, NULL, NULL)
 #define HOOK_SPAWN(hook, arg, ...) spawn((char const *[]){ __VA_ARGS__, NULL }, (void(*)(void *))hook, arg)
 #define BODY_SPAWN(body, ...) spawn((char const *[]){ __VA_ARGS__, NULL }, (void(*)(void *))body_set_display, (body))
+
+#define SCRIPT_SIZE_MAX 32
 
 static char const *
 get_script_path(char const *name)
@@ -1112,8 +1125,8 @@ label_create(Label *const label)
 	XDO(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
 			label->window, XCB_ATOM_WM_CLASS,
 			XCB_ATOM_STRING, 8,
-			sizeof LABEL_INSTANCE "\0" LABEL_CLASS,
-			LABEL_INSTANCE "\0" LABEL_CLASS);
+			sizeof LABEL_INSTANCE "\0" WM_NAME,
+			LABEL_INSTANCE "\0" WM_NAME);
 
 	/* TODO: search for labels with the same name and type and copy shape from there */
 	/* setup its shape */
@@ -1593,20 +1606,6 @@ hand_unbarricade(Hand *const hand)
 {
 	delete_barrier(hand->barrier);
 }
-
-enum {
-	XCB_XFIXES_BARRIER_DIRECTIONS_POSITIVE_XY =
-		XCB_XFIXES_BARRIER_DIRECTIONS_POSITIVE_X |
-		XCB_XFIXES_BARRIER_DIRECTIONS_POSITIVE_Y,
-	XCB_XFIXES_BARRIER_DIRECTIONS_NEGATIVE_XY =
-		XCB_XFIXES_BARRIER_DIRECTIONS_NEGATIVE_X |
-		XCB_XFIXES_BARRIER_DIRECTIONS_NEGATIVE_Y,
-	XCB_XFIXES_BARRIER_DIRECTIONS_ALL =
-		XCB_XFIXES_BARRIER_DIRECTIONS_POSITIVE_X |
-		XCB_XFIXES_BARRIER_DIRECTIONS_POSITIVE_Y |
-		XCB_XFIXES_BARRIER_DIRECTIONS_NEGATIVE_X |
-		XCB_XFIXES_BARRIER_DIRECTIONS_NEGATIVE_Y,
-};
 
 static void
 box_update_barrier(Box *const box, Hand const *const for_hand)
@@ -2987,13 +2986,17 @@ box_swap(Box *const x, Box *const y)
 	for (py = y->parent->children; *py != y; ++py);
 	*px = y, *py = x;
 
-	SWAP(x->parent, y->parent);
-	SWAP(x->urect, y->urect);
-	{
-		bool const floating = x->floating;
-		x->floating = y->floating;
-		y->floating = floating;
-	}
+#define SWAP(type, member) do { \
+	type const t = x->member; \
+	x->member = y->member; \
+	y->member = t; \
+} while (0)
+
+	SWAP(Box *, parent);
+	SWAP(xcb_rectangle_t, urect);
+	SWAP(bool, floating);
+
+#undef SWAP
 
 	xcb_rectangle_t xrect = x->rect, yrect = y->rect;
 	box_set_size(x, yrect.width, yrect.height);
@@ -3386,14 +3389,6 @@ box_set_floating(Box *const box, bool floating)
 	box_propagate_change(box)->floating = floating;
 }
 
-enum FloatResize {
-	FLOAT_UNCHANGED,
-	FLOAT_TILE0,
-	FLOAT_TILE1 = FLOAT_TILE0 + 1,
-	FLOAT_TILE9 = FLOAT_TILE0 + 9,
-	FLOAT_RECT,
-};
-
 static void
 box_resize_float(Box *const box, enum FloatResize how)
 {
@@ -3559,8 +3554,6 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 	}
 
 	if (!parent) {
-		assert(root->num_children && "no monitors");
-
 		/* Attach to the first (probably primary) monitor of body. */
 		Body *body = body_get_by_root(root_window);
 		Box **head = root->children;
@@ -3922,7 +3915,7 @@ body_setup_net_supported(Body *const body)
 static void
 body_setup_net(Body *const body)
 {
-	body_setup_net_name(body, "heawm");
+	body_setup_net_name(body, WM_NAME);
 	body_setup_net_supported(body);
 	body_clear_net_client_list(body);
 }
@@ -6584,16 +6577,16 @@ init_config(void)
 	} else if ((env = getenv("XDG_CONFIG_HOME"))) {
 		/* FIXME: split on ':' */
 		snprintf(config.heawm_home, sizeof config.heawm_home,
-				"%s/heawm", env);
+				"%s/%s", env, WM_NAME);
 	} else if ((env = getenv("HOME"))) {
 		struct stat st;
 
 		snprintf(config.heawm_home, sizeof config.heawm_home,
-				"%s/.heawm", env);
+				"%s/.%s", env, WM_NAME);
 
 		if (stat(config.heawm_home, &st) || !S_ISDIR(st.st_mode))
 			snprintf(config.heawm_home, sizeof config.heawm_home,
-					"%s/.config/heawm", env);
+					"%s/.config/%s", env, WM_NAME);
 	} else {
 		strcpy(config.heawm_home, ".");
 	}
