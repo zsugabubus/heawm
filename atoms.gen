@@ -1,8 +1,0 @@
-#!./gen
-exec >atoms.h
-echo "/* Generated automatically by $0. Do not edit. */"
-echo 'enum {'
-for_each_atom '\tHEAWM_ATOM_\1,'
-echo '};'
-echo
-echo '#define ATOM(name) ((xcb_atom_t const)atoms[HEAWM_ATOM_##name])'

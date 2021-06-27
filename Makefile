@@ -50,13 +50,7 @@ docs : docs/$(TARGET).1
 docs/$(TARGET).1 : % : docs/manpage.gen %.in $(TARGET).c
 	$+
 
-atoms.h : atoms.gen $(TARGET).c
-	./$+
-
-net_atoms.in : net_atoms.gen $(TARGET).c
-	./$+
-
-$(TARGET) : $(TARGET).c atoms.h net_atoms.in Makefile
+$(TARGET) : $(TARGET).c Makefile
 	$(CC) $(CFLAGS) -DVERSION=\"$(VERSION)\" -o $@ $<
 
 installdirs :
@@ -71,6 +65,6 @@ uninstall :
 	$(RM) $(DESTDIR)$(man1dir)/$(TARGET).1*
 
 clean :
-	$(RM) $(TARGET) atoms.h net_atoms.in
+	$(RM) $(TARGET)
 
 .PHONY: all docs reload run install installdirs uninstall

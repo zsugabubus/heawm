@@ -539,32 +539,45 @@ static Rule const RULES[] = {
 	{ "z", "org.pwmt.zathura\0Zathura", },
 };
 
-#include "atoms.h"
+#define ATOM(name) ((xcb_atom_t const)atoms[HEAWM_ATOM_##name])
+
+#define NET_ATOMS \
+	xmacro(_NET_ACTIVE_WINDOW) \
+	xmacro(_NET_CLIENT_LIST) \
+	xmacro(_NET_CLOSE_WINDOW) \
+	xmacro(_NET_SUPPORTED) \
+	xmacro(_NET_SUPPORTING_WM_CHECK) \
+	xmacro(_NET_WM_NAME) \
+	xmacro(_NET_WM_STATE) \
+	xmacro(_NET_WM_STATE_FOCUSED) \
+	xmacro(_NET_WM_STATE_HIDDEN) \
+	xmacro(_NET_WM_TRANSIENT_FOR) \
+
+#define ATOMS \
+	NET_ATOMS /* Must start with this. */ \
+	xmacro(_HEAWM_NAME) \
+	xmacro(WM_CLIENT_LEADER) \
+	xmacro(WM_DELETE_WINDOW) \
+	xmacro(WM_NORMAL_HINTS) \
+	xmacro(WM_PROTOCOLS) \
+	xmacro(WM_SIZE_HINTS) \
+	xmacro(WM_STATE) \
+	xmacro(UTF8_STRING) \
 
 static char const *const ATOM_NAMES[] =
 {
-
-	"_HEAWM_NAME",
-	"_NET_ACTIVE_WINDOW",
-	"_NET_CLIENT_LIST",
-	"_NET_CLOSE_WINDOW",
-	"_NET_SUPPORTED",
-	"_NET_SUPPORTING_WM_CHECK",
-	"_NET_WM_NAME",
-	"_NET_WM_STATE",
-	"_NET_WM_STATE_FOCUSED",
-	"_NET_WM_STATE_HIDDEN",
-	"_NET_WM_TRANSIENT_FOR",
-	"WM_CLIENT_LEADER",
-	"WM_DELETE_WINDOW",
-	"WM_NORMAL_HINTS",
-	"WM_PROTOCOLS",
-	"WM_SIZE_HINTS",
-	"WM_STATE",
-	"UTF8_STRING",
-
+#define xmacro(name) #name,
+	ATOMS
+#undef xmacro
 };
-static xcb_atom_t atoms[ARRAY_SIZE(ATOM_NAMES)]; /** resolved ATOM_NAMES */
+
+enum {
+#define xmacro(name) HEAWM_ATOM_##name,
+	ATOMS
+#undef xmacro
+};
+
+static xcb_atom_t atoms[ARRAY_SIZE(ATOM_NAMES)];
 
 static xcb_connection_t *conn;
 static xcb_xrm_database_t *xrm;
@@ -3860,13 +3873,14 @@ body_setup_net_name(Body const *const body, char const *const name)
 static void
 body_setup_net_supported(Body *const body)
 {
-	xcb_atom_t list[] = {
-#include "net_atoms.in"
-	};
+#define xmacro(name) +1
+	static uint32_t const NUM_NET_ATOMS = NET_ATOMS;
+#undef xmacro
+
 	XDO(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
 			body->screen->root, ATOM(_NET_SUPPORTED),
 			XCB_ATOM_ATOM, 32,
-			ARRAY_SIZE(list), (xcb_atom_t const *)list);
+			NUM_NET_ATOMS, atoms);
 }
 
 static void
