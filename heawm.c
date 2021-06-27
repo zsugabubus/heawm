@@ -2455,6 +2455,24 @@ box_chase_box(Box const *box, unsigned const min_percent)
 }
 
 
+static void
+hand_update_focus(Hand const *const hand)
+{
+	if (hand->input_focus)
+		box_chase_box(hand->input_focus, 1024 / 15);
+
+	if (hand != hands)
+		return;
+
+	for_each_body
+		XDO(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
+				body->screen->root, ATOM(_NET_ACTIVE_WINDOW),
+				XCB_ATOM_WINDOW, 32,
+				1, hand->input_focus && body_index == hand->input_focus->body
+					? &hand->input_focus->window
+					: &(uint32_t const){ XCB_WINDOW_NONE });
+}
+
 /**
  * Send changes to X server.
  */
@@ -2472,8 +2490,7 @@ do_update(void)
 		for_each_hand {
 			if (hand->focus_changed) {
 				hand->focus_changed = false;
-				if (hand->input_focus)
-					box_chase_box(hand->input_focus, 1024 / 15);
+				hand_update_focus(hand);
 			}
 		}
 	} while (root->content_changed);
