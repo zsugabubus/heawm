@@ -568,7 +568,6 @@ static xcb_atom_t atoms[ARRAY_SIZE(ATOM_NAMES)]; /** resolved ATOM_NAMES */
 
 static xcb_connection_t *conn;
 static xcb_xrm_database_t *xrm;
-static int preferred_screen;
 /* https://www.x.org/releases/X11R7.7/doc/inputproto/XI2proto.txt */
 static uint8_t xi_opcode; /** major opcode of XInput extension */
 /* https://www.x.org/releases/X11R7.7/doc/xextproto/shape.html */
@@ -949,7 +948,8 @@ static void *
 check_alloc(void *p) {
 	if (p)
 		return p;
-	abort();
+	fputs("Failed to allocate memory\n", stderr);
+	exit(EXIT_FAILURE);
 }
 
 static Label *
@@ -3785,39 +3785,6 @@ xrm_open(void)
 }
 
 static void
-connect_display(void)
-{
-	static char const DEFAULT_DISPLAY[] = ":0";
-
-	for (int error; (error = xcb_connection_has_error((conn = xcb_connect(NULL, &preferred_screen))));) {
-		char const *const display = getenv("DISPLAY");
-
-		if (display) {
-			fprintf(stderr, "Could not open display %s: %s\n",
-					display, xcb_connection_strerror(error));
-		} else {
-			fprintf(stderr, "DISPLAY is not set, default to %s\n",
-					DEFAULT_DISPLAY);
-
-			if (!setenv("DISPLAY", DEFAULT_DISPLAY, false))
-				continue;
-		}
-
-		exit(EXIT_FAILURE);
-	}
-
-	init_atoms();
-
-	root = box_new();
-
-	symbols = xcb_key_symbols_alloc(conn);
-
-	init_extensions();
-
-	xrm_open();
-}
-
-static void
 body_setup_windows(Body *const body)
 {
 	xcb_screen_t const *const screen = body->screen;
@@ -4062,11 +4029,12 @@ head_get_name_reply(xcb_get_atom_name_reply_t *name_reply)
 		return NULL;
 
 	int const name_size = xcb_get_atom_name_name_length(name_reply);
-	char *name = check_alloc(malloc(sizeof MONITOR_CLASS + name_size + 1 /* NUL */));
-
-	memcpy(name, MONITOR_CLASS, sizeof MONITOR_CLASS);
-	memcpy(name + sizeof MONITOR_CLASS, xcb_get_atom_name_name(name_reply), name_size);
-	name[sizeof MONITOR_CLASS + name_size] = '\0';
+	char *name = malloc(sizeof MONITOR_CLASS + name_size + 1 /* NUL */);
+	if (name) {
+		memcpy(name, MONITOR_CLASS, sizeof MONITOR_CLASS);
+		memcpy(name + sizeof MONITOR_CLASS, xcb_get_atom_name_name(name_reply), name_size);
+		name[sizeof MONITOR_CLASS + name_size] = '\0';
+	}
 
 	free(name_reply);
 
@@ -4113,7 +4081,9 @@ body_update_heads(Body *const body)
 			goto screen_as_monitor;
 
 		xcb_get_atom_name_cookie_t *const cookies =
-			check_alloc(malloc(num_monitors * sizeof *cookies));
+			malloc(num_monitors * sizeof *cookies);
+		if (!cookies)
+			goto done;
 
 		for (xcb_randr_monitor_info_iterator_t iter = xcb_randr_get_monitors_monitors_iterator(monitors);
 		     0 < iter.rem;
@@ -4164,6 +4134,7 @@ body_update_heads(Body *const body)
 
 		free(cookies);
 	}
+done:
 	free(monitors);
 
 	qsort(root->children, root->num_children, sizeof *root->children, body_head_cmp);
@@ -4268,6 +4239,37 @@ body_setup_hands(Body *const body)
 static void
 setup_display(void)
 {
+	static char const DEFAULT_DISPLAY[] = ":0";
+
+	int preferred_screen;
+	conn = check_alloc(xcb_connect(NULL, &preferred_screen));
+
+	for (int error; (error = xcb_connection_has_error(conn));) {
+		char const *const display = getenv("DISPLAY");
+
+		if (display) {
+			fprintf(stderr, "Could not open display %s: %s\n",
+					display, xcb_connection_strerror(error));
+		} else {
+			fprintf(stderr, "DISPLAY is not set, default to %s\n",
+					DEFAULT_DISPLAY);
+
+			if (!setenv("DISPLAY", DEFAULT_DISPLAY, false))
+				continue;
+		}
+
+		exit(EXIT_FAILURE);
+	}
+
+	init_atoms();
+	init_extensions();
+
+	root = box_new();
+
+	symbols = xcb_key_symbols_alloc(conn);
+
+	xrm_open();
+
 	/* Prevent windows from changing. */
 	XDO(xcb_grab_server, conn);
 
@@ -6573,8 +6575,6 @@ main(int _argc, char *_argv[])
 
 	init_config();
 
-	connect_display();
-	xrm_update();
 	setup_display();
 
 	/*MAN(HOOKS)
