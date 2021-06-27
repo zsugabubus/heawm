@@ -2800,20 +2800,24 @@ box_reparent(Box *into, uint16_t const pos, Box *box);
 static void
 box_vacuum(Box *const box)
 {
-	assert(box_is_container(box) && "for containers only");
+	assert(box_is_container(box));
 
-	if (box == root ||
-	    box_is_monitor(box))
-		goto out;
+	/* Keep container. */
+	if (!box->parent ||
+	    box_is_monitor(box) ||
+	    1 < box->num_children)
+		return;
 
-	/* Substitute box with its only children. */
-	if (1 == box->num_children &&
-	    !box->children[0]->floating &&
-	    (box_is_container(box->children[0]) ||
-	     !box_is_super_container(box->parent)))
+	/* Delete empty. */
+	else if (!box->num_children)
+		box_delete(box);
+
+	/* Substitute with its only children. */
+	else if (box_is_container(box->children[0]) ||
+	         box->floating ||
+	         !box_is_super_container(box->parent))
 	{
 		Box *const child = box->children[0];
-		/* Keep name. */
 		if (box_is_container(child))
 			memcpy(child->name, box->name, sizeof box->name);
 		child->user_concealed = box->user_concealed;
@@ -2823,19 +2827,7 @@ box_vacuum(Box *const box)
 		child->floating = box->floating;
 		child->urect = box->urect;
 		box_reparent(box->parent, box_get_pos(box), child);
-		return;
 	}
-
-	if (0 < box->num_children)
-		goto out;
-
-	box_delete(box);
-
-	return;
-
-out:
-	/* Called after box lost a child so it changed. */
-	box_propagate_change(box)->layout_changed = true;
 }
 
 static void
@@ -2887,7 +2879,7 @@ box_realloc(Box **const box, size_t const new_size)
 }
 
 static void
-box_reparent(Box *into, uint16_t pos, Box *box)
+box_reparent(Box *into, uint16_t pos, Box *const box)
 {
 	assert(box_is_container(into));
 	assert(into != box);
