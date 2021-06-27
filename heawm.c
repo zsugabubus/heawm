@@ -550,6 +550,7 @@ static Rule const RULES[] = {
 	xmacro(_NET_SUPPORTED) \
 	xmacro(_NET_SUPPORTING_WM_CHECK) \
 	xmacro(_NET_WM_NAME) \
+	xmacro(_NET_WM_PID) \
 	xmacro(_NET_WM_STATE) \
 	xmacro(_NET_WM_STATE_FOCUSED) \
 	xmacro(_NET_WM_STATE_FULLSCREEN) \
@@ -3889,6 +3890,11 @@ body_setup_net_name(Body const *const body, char const *const name)
 			body->screen->root, ATOM(_NET_SUPPORTING_WM_CHECK),
 			XCB_ATOM_WINDOW, 32,
 			1, &body->net_window);
+
+	XDO(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
+			body->net_window, ATOM(_NET_WM_PID),
+			XCB_ATOM_CARDINAL, 32,
+			sizeof(uint32_t), (uint32_t const[]){ getpid() });
 }
 
 static void
