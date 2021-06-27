@@ -30,6 +30,7 @@
 #include <xcb/xcb_aux.h>
 #include <xcb/xcb_cursor.h>
 #include <xcb/xcb_event.h>
+#include <xcb/xcb_ewmh.h>
 #include <xcb/xcb_icccm.h>
 #include <xcb/xcb_image.h>
 #include <xcb/xcb_keysyms.h>
@@ -322,7 +323,8 @@ struct Box {
 	                      window */
 	     shaped: 1, /**< Client has shaped bounding box. */
 	     floating: 1, /**< Tiled or floating? */
-	     vertical: 1;
+	     vertical: 1,
+	     net_fullscreen: 1;
 
 	xcb_xfixes_barrier_t barrier;
 
@@ -550,6 +552,7 @@ static Rule const RULES[] = {
 	xmacro(_NET_WM_NAME) \
 	xmacro(_NET_WM_STATE) \
 	xmacro(_NET_WM_STATE_FOCUSED) \
+	xmacro(_NET_WM_STATE_FULLSCREEN) \
 	xmacro(_NET_WM_STATE_HIDDEN) \
 	xmacro(_NET_WM_TRANSIENT_FOR) \
 
@@ -1235,12 +1238,12 @@ init_atoms(void)
 {
 	xcb_intern_atom_cookie_t cookies[ARRAY_SIZE(ATOM_NAMES)];
 
-	for (size_t i = 0; i < ARRAY_SIZE(ATOM_NAMES); ++i) {
+	for (uint32_t i = 0; i < ARRAY_SIZE(ATOM_NAMES); ++i) {
 		char const *const name = ATOM_NAMES[i];
 		cookies[i] = xcb_intern_atom_unchecked(conn, false, strlen(name), name);
 	}
 
-	for (size_t i = 0; i < ARRAY_SIZE(ATOM_NAMES); ++i) {
+	for (uint32_t i = 0; i < ARRAY_SIZE(ATOM_NAMES); ++i) {
 		xcb_intern_atom_reply_t *const reply =
 			xcb_intern_atom_reply(conn, cookies[i], NULL);
 
@@ -1817,7 +1820,7 @@ xcb_icccm_set_wm_state(xcb_window_t const window, xcb_icccm_wm_state_t const sta
 		XDO(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
 				window, ATOM(WM_STATE),
 				ATOM(WM_STATE), 32, sizeof(xcb_icccm_wm_state_data_t) / sizeof(uint32_t),
-				&(xcb_icccm_wm_state_data_t){
+				&(xcb_icccm_wm_state_data_t const){
 					.state = state,
 					.icon = XCB_WINDOW_NONE,
 				});
@@ -2019,16 +2022,16 @@ tile.width += (tile.x / error) != ((tile.x + tile.width + 1 /* Corrected pixel. 
 static void
 box_update_net(Box const *const box)
 {
-	if (XCB_WINDOW_NONE == box->window)
-		return;
-
-	xcb_atom_t list[1];
-	uint16_t i = 0;
+	xcb_atom_t list[10];
+	uint32_t i = 0;
 
 	if (!box->rect.width)
 		list[i++] = ATOM(_NET_WM_STATE_HIDDEN);
 	else if (box->focus_seq == root->focus_seq)
 		list[i++] = ATOM(_NET_WM_STATE_FOCUSED);
+
+	if (box->net_fullscreen)
+		list[i++] = ATOM(_NET_WM_STATE_FULLSCREEN);
 
 	XDO(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
 			box->window, ATOM(_NET_WM_STATE),
@@ -3120,9 +3123,10 @@ hand_focus_box_internal(Hand *const hand, Box *const box)
 	     new_input_focus->frame == Box_pointers(hand->input_focus)[hand - hands].window ||
 	     /* ...if mouse would be warped in the same window. */
 	     Box_pointers(new_input_focus)[hand - hands].window == Box_pointers(hand->input_focus)[hand - hands].window))
-		memcpy(&Box_pointers(new_input_focus)[hand - hands],
-		       &Box_pointers(hand->input_focus)[hand - hands],
-		       sizeof(BoxPointer));
+		memcpy(
+				&Box_pointers(new_input_focus)[hand - hands],
+				&Box_pointers(hand->input_focus)[hand - hands],
+				sizeof(BoxPointer));
 
 	if ((hand->input_focus = new_input_focus))
 		hand->input_focus->should_focus = true;
@@ -3275,6 +3279,22 @@ process_reply:
 		}
 
 		box_set_class(box.box, reply);
+	} else if (ATOM(_NET_WM_STATE) == property) {
+		if (!type) {
+			type = XCB_ATOM_ATOM;
+			len = 10 * sizeof(xcb_atom_t);
+			goto send_request;
+		}
+
+		box.box->net_fullscreen = false;
+
+		while (len) {
+			len -= sizeof(xcb_atom_t);
+			xcb_atom_t const atom = *(xcb_atom_t const *)((char *)data + len);
+			if (5 <= HEAWM_VERBOSE)
+				debug_print_atom_name("_NET_WM_STATE[] =", atom);
+			box.box->net_fullscreen |= ATOM(_NET_WM_STATE_FULLSCREEN) == atom;
+		}
 	} else if (ATOM(_HEAWM_NAME) == property) {
 		if (!type) {
 			type = XCB_ATOM_STRING;
@@ -3294,7 +3314,8 @@ process_reply:
 				box.box->name[len] = '\0';
 		}
 	} else {
-		/* debug_print_atom_name("property", property); */
+		if (5 <= HEAWM_VERBOSE)
+			debug_print_atom_name("property", property);
 		return (xcb_get_property_cookie_t){ 0 };
 	}
 
@@ -3424,7 +3445,7 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 		xcb_get_property_cookie_t cookie;
 	} properties[] = {
 #define PROPERTY(atom) { (atom), (xcb_get_property_cookie_t){ 0 } }
-		/* PROPERTY(ATOM(_NET_WM_STATE)), */
+		PROPERTY(ATOM(_NET_WM_STATE)),
 		PROPERTY(XCB_ATOM_WM_TRANSIENT_FOR),
 		PROPERTY(ATOM(WM_CLIENT_LEADER)),
 		PROPERTY(ATOM(WM_NORMAL_HINTS)),
@@ -4668,19 +4689,38 @@ handle_client_message(xcb_client_message_event_t const *const event)
 	if (ATOM(_NET_CLOSE_WINDOW) == event->type) {
 		box_close(box);
 	} else if (ATOM(_NET_ACTIVE_WINDOW) == event->type) {
-		enum { PAGER = 2, };
-
-		if (PAGER != event->data.data32[0])
+		if (XCB_EWMH_CLIENT_SOURCE_TYPE_NORMAL == event->data.data32[0])
 			return;
 
 		Hand *hand = &hands[NULL_HAND == box->focus_hand ? 0 : box->focus_hand];
 		hand_focus_box(hand, box);
 	} else if (ATOM(_NET_WM_STATE) == event->type) {
-		/* Same brainfucked programs like Chromium thinks it stands above
-		 * window manager so without an sane reasons it internally
-		 * resizes itself on entering fullscreen. To teach respect, give
-		 * a slap for such programs (solely for educational purposes). */
-		box_send_configure_notify(box);
+		if (32 == event->format &&
+		    (ATOM(_NET_WM_STATE_FULLSCREEN) == event->data.data32[1] ||
+		     ATOM(_NET_WM_STATE_FULLSCREEN) == event->data.data32[2]))
+		{
+			switch (event->data.data32[0]) {
+			case XCB_EWMH_WM_STATE_REMOVE:
+				box->net_fullscreen = false;
+				break;
+
+			case XCB_EWMH_WM_STATE_ADD:
+				box->net_fullscreen = true;
+				break;
+
+			case XCB_EWMH_WM_STATE_TOGGLE:
+				box->net_fullscreen ^= true;
+				break;
+			}
+
+			box_update_net(box);
+
+			/* Same brainfucked programs like Chromium thinks it stands above
+			 * window manager so without an sane reasons it internally
+			 * resizes itself on entering fullscreen. To teach respect, give
+			 * a slap for such programs (solely for educational purposes). */
+			box_send_configure_notify(box);
+		}
 	}
 }
 
@@ -6388,7 +6428,7 @@ handle_randr_event(xcb_generic_event_t const *const event)
 static void
 handle_keyboard_mapping(uint8_t const device_id)
 {
-	Device *device = get_device_by_id(device_id);
+	Device *const device = get_device_by_id(device_id);
 	if (!device) {
 		/* It is currently unclear under what circumstances can it occur,
 		 * but it occurs. */
@@ -6564,7 +6604,6 @@ main(int _argc, char *_argv[])
 
 	setup_signals();
 
-	/* setenv("DESKTOP_STARTUP_ID", "9", 1); */
 	for (char c; -1 != (c = getopt(argc, argv, "v"));) {
 		switch (c) {
 		/*MAN(OPTIONS)
