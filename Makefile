@@ -36,7 +36,7 @@ all : $(TARGET)
 	  true
 
 run : $(TARGET)
-	env -u MFLAGS -u MAKEFLAGS gdb ./$< -q -ex run
+	env -u MFLAGS -u MAKEFLAGS gdb ./$< -ex 'handle SIGHUP noprint nostop' -q -ex run
 
 run-cycle :
 	while make run || inotifywait -e close_write $(TARGET).c || true; do :; done

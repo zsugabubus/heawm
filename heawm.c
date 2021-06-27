@@ -334,11 +334,11 @@ struct Box {
 
 static Box *root; /**< Mother of all boxes. */
 
-static uint16_t const MONITOR_GAP = 0;
-static uint16_t const CONTAINER_GAP = 4;
-static uint16_t const WINDOW_GAP = 1;
-static uint16_t const BORDER_RADIUS = 0;
-static uint16_t const SNAP_DISTANCE = 25;
+static uint16_t monitor_gap;
+static uint16_t container_gap;
+static uint16_t window_gap;
+static uint16_t border_radius;
+static uint16_t snap_distance;
 /**
  * Do not apply border radius for shaped windows.
  */
@@ -347,12 +347,9 @@ static bool const BORDER_RADIUS_FOR_SHAPED = true;
 #define LABEL_INSTANCE WM_NAME"-label"
 
 #define RGB8_TO_FLOATS(color) \
-		(uint8_t)((color) >> 16) / 256., \
-		(uint8_t)((color) >> 8 ) / 256., \
-		(uint8_t)((color)      ) / 256.
-
-#define label_stroke_rgb 0, 0, 0
-#define label_color_rgb 1, 1, 0
+	(uint8_t)((color) >> 16) / 256., \
+	(uint8_t)((color) >> 8 ) / 256., \
+	(uint8_t)((color)      ) / 256.
 
 typedef struct {
 	int16_t x, y;
@@ -379,8 +376,10 @@ typedef struct {
 static char const LABEL_FONT_DEFAULT[] = "monospace";
 static char *label_font;
 static Point label_rect = { .x = 30, .y = 60 }; /* In pts */
-static int label_stroke = 2;
-static int label_font_size = 17;
+static int label_font_size;
+static int label_stroke_width;
+static unsigned label_stroke_color;
+static unsigned label_foreground;
 
 enum HandMode {
 	HAND_MODE_NULL,
@@ -540,17 +539,13 @@ static uint8_t num_bodies;
 static Body *bodies;
 
 typedef struct {
+	char const *instance;
+	char const *class;
 	char name[membersizeof(Box, name)];
-	char const *class_instance;
 } Rule;
 
-static Rule const RULES[] = {
-	/* FIXME: Ehhm... Probably class<->instance. */
-	{ "b", "Navigator\0firefox", },
-	{ "t", "telegram-desktop\0TelegramDesktop", },
-	{ "v", "gl\0mpv", },
-	{ "z", "org.pwmt.zathura\0Zathura", },
-};
+static uint32_t num_rules;
+static Rule *rules;
 
 #define ATOM(name) ((xcb_atom_t const)atoms[HEAWM_ATOM_##name])
 
@@ -604,9 +599,6 @@ static uint8_t randr_base_event; /** beginning of XRandR event range */
 static uint8_t xkb_base_event; /** beginning of XKB event range */
 static struct xkb_context *xkb_context;
 static xcb_key_symbols_t *symbols;
-
-static int argc;
-static char **argv;
 
 static struct {
 	char const *terminal;
@@ -806,7 +798,7 @@ label_repaint(Label const *const label, bool const shape)
 	int const font_size = monitor_convert_pt2px(monitor,
 			(Point){ 0, label_font_size }).y;
 	int const stroke_width = monitor_convert_pt2px(monitor,
-			(Point){ label_stroke, 0 }).x;
+			(Point){ label_stroke_width, 0 }).x;
 
 	Body const *const body = &bodies[label->base->body];
 	cairo_surface_t *const surface = shape
@@ -919,7 +911,7 @@ label_repaint(Label const *const label, bool const shape)
 	double te_top = -te.y_bearing - te.height / 2;
 
 	if (!shape)
-		cairo_set_source_rgb(cr, label_stroke_rgb);
+		cairo_set_source_rgb(cr, RGB8_TO_FLOATS(label_stroke_color));
 	else
 		cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
 	cairo_move_to(cr, te_left, te_top);
@@ -928,7 +920,7 @@ label_repaint(Label const *const label, bool const shape)
 	cairo_stroke(cr);
 
 	if (!shape)
-		cairo_set_source_rgb(cr, label_color_rgb);
+		cairo_set_source_rgb(cr, RGB8_TO_FLOATS(label_foreground));
 	cairo_move_to(cr, te_left, te_top);
 	cairo_show_text(cr, name);
 
@@ -952,7 +944,7 @@ label_repaint(Label const *const label, bool const shape)
 		te_top = -te.y_bearing - te.height / 2;
 
 		if (!shape)
-			cairo_set_source_rgb(cr, label_stroke_rgb);
+			cairo_set_source_rgb(cr, RGB8_TO_FLOATS(label_stroke_color));
 		else
 			cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
 		cairo_move_to(cr, te_left, te_top);
@@ -961,7 +953,7 @@ label_repaint(Label const *const label, bool const shape)
 		cairo_stroke(cr);
 
 		if (!shape)
-			cairo_set_source_rgb(cr, label_color_rgb);
+			cairo_set_source_rgb(cr, RGB8_TO_FLOATS(label_foreground));
 		cairo_move_to(cr, te_left, te_top);
 		cairo_show_text(cr, symbol);
 	}
@@ -1195,23 +1187,6 @@ label_update(Label *const label)
 }
 
 static void
-restart(void)
-{
-	execvp(
-#if __linux__
-		"/proc/self/exe"
-#elif __FreeBSD__
-		"/proc/curproc/file"
-#elif __sun__
-		"/proc/self/path/a.out"
-#else
-		argv[0]
-#endif
-		, argv);
-	print_strerror("execvp");
-}
-
-static void
 quit(void)
 {
 	if (conn) {
@@ -1225,11 +1200,20 @@ quit(void)
 }
 
 static void
-handle_signal_restart(int signum)
+xrm_open(void);
+
+static void
+handle_signal_hup(int signum)
 {
 	(void)signum;
 
-	restart();
+	xrm_open();
+
+	Box *b;
+	for_each_box(b, root)
+		b->label_changed = true,
+		b->layout_changed = true,
+		b->content_changed = true;
 }
 
 static void
@@ -1311,16 +1295,16 @@ box_propagate_change(Box *box)
 }
 
 static char const *
-box_get_class_instance(Box const *const box)
+box_get_class(Box const *const box)
 {
 	return box->class ? box->class + strlen(box->class) + 1 : NULL;
 }
 
 static bool
-box_match_class(Box const *const box, char const *const class, char const *const instance)
+rule_match(Rule const *const rule, char const *instance, char const *class)
 {
-	return (!class || (box->class && !strcmp(class, box->class))) &&
-	       (!instance || (box_get_class_instance(box) && !strcmp(instance, box_get_class_instance(box))));
+	return (!rule->class || (class && !strcmp(rule->class, class))) &&
+	       (!rule->instance || (instance && !strcmp(rule->instance, instance)));
 }
 
 static void
@@ -1359,15 +1343,15 @@ box_name(Box *const box)
 
 	char optimum = box->name[n];
 
-	for (size_t i = 0; i < ARRAY_SIZE(RULES); ++i) {
-		Rule const *const rule = &RULES[i];
+	for (uint32_t i = 0; i < num_rules; ++i) {
+		Rule const *const rule = &rules[i];
 		if (!(rule->name[n] && !rule->name[n + 1]))
 			continue;
 
 		/* Try assigning reserved letters last. */
 		letters[(unsigned char)rule->name[n]].focus_seq = root->focus_seq + 1;
 
-		if (!optimum && box_match_class(box, rule->class_instance, rule->class_instance + strlen(rule->class_instance) + 1))
+		if (!optimum && rule_match(rule, box->class, box_get_class(box)))
 			optimum = rule->name[n];
 	}
 
@@ -1936,7 +1920,7 @@ box_update_layout(Box const *const box)
 			gap.left = box->focus_lock
 				? 0
 				: box_is_container(child)
-				? CONTAINER_GAP : WINDOW_GAP;
+				? container_gap : window_gap;
 			gap.right = gap.left / 2;
 			gap.left -= gap.right;
 
@@ -1944,14 +1928,14 @@ box_update_layout(Box const *const box)
 			gap.bottom = gap.right;
 
 			if (!tile.x)
-				gap.left = is_monitor ? MONITOR_GAP : 0;
+				gap.left = is_monitor ? monitor_gap : 0;
 			if (box->rect.width < tile.x + 2 * tile.width)
-				gap.right = is_monitor ? MONITOR_GAP : 0;
+				gap.right = is_monitor ? monitor_gap : 0;
 
 			if (!tile.y)
-				gap.top = is_monitor ? MONITOR_GAP : 0;
+				gap.top = is_monitor ? monitor_gap : 0;
 			if (box->rect.height < tile.y + 2 * tile.height)
-				gap.bottom = is_monitor ? MONITOR_GAP : 0;
+				gap.bottom = is_monitor ? monitor_gap : 0;
 
 #define CORRECT_PIXEL(width, num_columns) do { \
 uint16_t error = box->rect.width % num_columns; \
@@ -2042,7 +2026,7 @@ box_update_net(Box const *const box)
 static bool
 box_update_shape(Box const *const box)
 {
-	if (!BORDER_RADIUS ||
+	if (!border_radius ||
 	    (!BORDER_RADIUS_FOR_SHAPED && box->shaped))
 		return false;
 
@@ -2057,7 +2041,7 @@ box_update_shape(Box const *const box)
 	XDO(xcb_create_gc, conn, cid, pid, XCB_GC_FOREGROUND,
 			(uint32_t const[]){ true });
 
-	uint16_t r = BORDER_RADIUS;
+	uint16_t r = border_radius;
 	r = MIN(r, box->rect.width / 2);
 	r = MIN(r, box->rect.height / 2);
 
@@ -2153,7 +2137,7 @@ box_update(Box *const box)
 				box->concealed ? 'C' : '-',
 
 				box->class,
-				box_get_class_instance(box),
+				box_get_class(box),
 				box->title);
 
 	depth += 2;
@@ -3646,7 +3630,7 @@ setup_signals(void)
 	 * .B SIGHUP
 	 * Restart program, by replacing program image with itself.
 	 */
-	sa.sa_handler = handle_signal_restart;
+	sa.sa_handler = handle_signal_hup;
 	sigaction(SIGHUP, &sa, NULL);
 
 	/*MAN(SIGNALS)
@@ -3788,6 +3772,9 @@ load_resource(char const *value_format, void *const out, char const *const class
 	COPY_ELEMENT(class_buf, "HeaWM");
 	strcpy(class_buf + elem_size, class);
 
+	if (5 <= HEAWM_VERBOSE)
+		fprintf(stderr, "resource %s (%s)\n", name_buf, class_buf);
+
 	char *value;
 	if (xcb_xrm_resource_get_string(xrm, name_buf, class_buf, &value))
 		return false;
@@ -3798,13 +3785,16 @@ load_resource(char const *value_format, void *const out, char const *const class
 		sprintf(format, "%s%%n", value_format);
 
 		res = sscanf(value, format, out, &size);
-		free(value);
 
 		if (1 != res || size <= 0 || value[size]) {
 			fprintf(stderr, "Invalid resource %s=%s for format %s\n",
 					name_buf, value, value_format);
+
+			free(value);
 			return false;
 		}
+
+		free(value);
 	} else {
 		free(*(char **)out);
 		*(char **)out = value;
@@ -3815,9 +3805,132 @@ load_resource(char const *value_format, void *const out, char const *const class
 #undef COPY_ELEMENT
 }
 
+static Rule *
+rule_find(char const *instance, char const *class)
+{
+	for (uint32_t i = 0; i < num_rules; ++i) {
+		Rule const *const rule = &rules[i];
+		if (rule_match(rule, instance, class))
+			return (Rule *)rule;
+	}
+
+	return NULL;
+}
+
+static void
+rule_parse(char *s)
+{
+	for (uint32_t i = 0; i < num_rules; ++i) {
+		Rule *const rule = &rules[i];
+		memset(rule->name, 0, sizeof rule->name);
+	}
+
+	if (!s)
+		return;
+
+	while (*s) {
+		while (isspace(*s))
+			++s;
+
+		char *class = s;
+
+		while (*s && ':' != *s)
+			++s;
+		if (!*s)
+			break;
+
+		*s++ = '\0';
+
+		Rule *rule = rule_find(NULL, class);
+		if (!rule) {
+			if (!(num_rules & (num_rules - 1))) {
+				void *p = realloc(rules, (2 * num_rules + !num_rules) * sizeof(Rule));
+				if (!p)
+					return;
+				rules = p;
+			}
+
+			class = strdup(class);
+			if (!class)
+				return;
+
+			rule = &rules[num_rules++];
+			*rule = (Rule){
+				.class = class
+			};
+		}
+
+		while (isspace(*s))
+			++s;
+
+		for (uint8_t i = 0; i < membersizeof(Box, name); ++i) {
+			if (!*s || isspace(*s))
+				break;
+			rule->name[i] = *s++;
+		}
+
+		while ('\n' != *s && isspace(*s))
+			++s;
+		if (!*s)
+			break;
+		else if ('\n' == *s)
+			++s;
+	}
+}
+
 static void
 xrm_update(void)
 {
+	/*MAN(RESOURCES)
+	 * .SS "Window Resources"
+	 */
+
+	/*MAN(RESOURCES)
+	 * .IP \(bu
+	 * .B heawm.monitorGap
+	 */
+	if (!load_resource("%hu", &monitor_gap, "Gap", "monitorGap"))
+		monitor_gap = 0;
+
+	/*MAN(RESOURCES)
+	 * .IP \(bu
+	 * .B heawm.containerGap
+	 */
+	if (!load_resource("%hu", &container_gap, "Gap", "containerGap"))
+		container_gap = 4;
+
+	/*MAN(RESOURCES)
+	 * .IP \(bu
+	 * .B heawm.windowGap
+	 */
+	if (!load_resource("%hu", &window_gap, "Gap", "windowGap"))
+		window_gap = 1;
+
+	/*MAN(RESOURCES)
+	 * .IP \(bu
+	 * .B heawm.borderRadius
+	 */
+	if (!load_resource("%hu", &border_radius, "BorderRadius", "borderRadius"))
+		border_radius = 0;
+
+	/*MAN(RESOURCES)
+	 * .IP \(bu
+	 * .B heawm.snapDistance
+	 */
+	if (!load_resource("%hu", &snap_distance, "SnapDistance", "snapDistance"))
+		snap_distance = 25;
+
+	/*MAN(RESOURCES)
+	 * .IP \(bu
+	 * .B heawm.nameRules
+	 */
+	{
+		char *value = NULL;
+		(void)load_resource(NULL, &value, "Rules", "nameRules");
+		rule_parse(value);
+		free(value);
+	}
+
 	/*MAN(RESOURCES)
 	 * .SS "Label Resources"
 	 */
@@ -3826,19 +3939,39 @@ xrm_update(void)
 	 * .IP \(bu
 	 * .B heawm.label.fontFamily
 	 */
-	load_resource(NULL, &label_font, "Label.FontFamily", "label.fontFamily");
+	if (!load_resource(NULL, &label_font, "Label.FontFamily", "label.fontFamily")) {
+		free(label_font);
+		label_font = NULL;
+	}
 
 	/*MAN(RESOURCES)
 	 * .IP \(bu
 	 * .B heawm.label.fontSize
 	 */
-	load_resource("%d", &label_font_size, "Label.FontSize", "label.fontSize");
+	if (!load_resource("%d", &label_font_size, "Label.FontSize", "label.fontSize"))
+		label_font_size = 17;
 
 	/*MAN(RESOURCES)
 	 * .IP \(bu
 	 * .B heawm.label.strokeWidth
 	 */
-	load_resource("%d", &label_stroke, "Label.Size", "label.strokeWidth");
+	if (!load_resource("%d", &label_stroke_width, "Label.Size", "label.strokeWidth"))
+		label_stroke_width = 2;
+
+	/*MAN(RESOURCES)
+	 * .IP \(bu
+	 * .B heawm.label.strokeWidth
+	 */
+	if (!load_resource("#%6x", &label_stroke_color, "Label.Color", "label.strokeColor"))
+		label_stroke_color = 0x000000;
+
+
+	/*MAN(RESOURCES)
+	 * .IP \(bu
+	 * .B heawm.label.foreground
+	 */
+	if (!load_resource("#%6x", &label_foreground, "Label.Color", "label.foreground"))
+		label_foreground = 0xffff00;
 }
 
 static void
@@ -4426,7 +4559,7 @@ retry:
 			(!ignore_leader && box->leader
 				? box->leader == child->leader
 				: box->class && child->class &&
-				  !strcmp(box_get_class_instance(box), box_get_class_instance(child))));
+				  !strcmp(box_get_class(box), box_get_class(child))));
 
 		if (box == child)
 			pos = i;
@@ -6175,7 +6308,7 @@ handle_input_motion(xcb_input_motion_event_t const *const event)
 		int16_t x = (event->root_x >> 16) + hand->mode_rect.x,
 		        y = (event->root_y >> 16) + hand->mode_rect.y;
 
-		uint16_t const distance = XCB_MOD_MASK_SHIFT & event->mods.base ? UINT16_MAX : SNAP_DISTANCE;
+		uint16_t const distance = XCB_MOD_MASK_SHIFT & event->mods.base ? UINT16_MAX : snap_distance;
 		box_snap(hand->mode_box, distance, &x, &y, &hand->mode_box->urect);
 		box_set_uposition(hand->mode_box, x, y);
 		if (hand->mode_box->position_changed)
@@ -6266,7 +6399,7 @@ handle_input_button_press(xcb_input_button_press_event_t const *const event)
 
 		static xcb_rectangle_t const NULL_RECT = { 0 };
 
-		uint16_t const distance = XCB_MOD_MASK_SHIFT & event->mods.base ? UINT16_MAX : SNAP_DISTANCE;
+		uint16_t const distance = XCB_MOD_MASK_SHIFT & event->mods.base ? UINT16_MAX : snap_distance;
 		box_snap(foot, distance, &rect.x, &rect.y, &NULL_RECT);
 		box_snap(foot, distance, &xw, &yh, &NULL_RECT);
 
@@ -6548,9 +6681,10 @@ run(void)
 		        !(event = xcb_poll_for_event(conn))))
 		{
 			int res = poll(&pfd, 1, GC_INTERVAL);
-			if (!res)
+			if (!res) {
 				do_gc();
-			else if (res < 0 || (pfd.revents & ~POLLIN))
+			} else if ((res < 0 && EINTR != errno) ||
+			           (0 <= res && (pfd.revents & ~POLLIN)))
 				return EXIT_FAILURE;
 		}
 
@@ -6625,9 +6759,8 @@ init_config(void)
 }
 
 int
-main(int _argc, char *_argv[])
+main(int argc, char *argv[])
 {
-	argc = _argc, argv = _argv;
 	atexit(quit);
 
 	setup_signals();
