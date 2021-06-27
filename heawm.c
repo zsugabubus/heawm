@@ -3757,27 +3757,67 @@ xcb_connection_strerror(int const error)
 }
 
 static bool
-load_resource(char **const out, char const *const format, ...)
+load_resource(char const *value_format, void *const out, char const *const class, char const *const instance_format, ...)
 {
+#define COPY_ELEMENT(dest, elem) do { \
+	memcpy(dest, elem".", strlen(elem".")); \
+	elem_size = strlen(elem"."); \
+} while (0)
+
 	if (!xrm)
 		return false;
 
-	va_list ap;
-	char name[128];
+	int res;
+	int size;
+	int elem_size;
+	char name_buf[128];
 
-	va_start(ap, format);
-	memcpy(name, "heawm.", 6);
-	vsnprintf(name + 6, sizeof(name) - 6, format, ap);
+	va_list ap;
+	va_start(ap, instance_format);
+	COPY_ELEMENT(name_buf, WM_NAME);
+	size = sizeof name_buf - elem_size;
+	res = vsnprintf(name_buf + elem_size, size, instance_format, ap);
 	va_end(ap);
 
-	return 0 == xcb_xrm_resource_get_string(xrm, name, NULL, out);
+	if (size <= res) {
+		fprintf(stderr, "Resource name is too long: %s\n", name_buf);
+		return false;
+	}
+
+	char class_buf[128];
+	COPY_ELEMENT(class_buf, "HeaWM");
+	strcpy(class_buf + elem_size, class);
+
+	char *value;
+	if (xcb_xrm_resource_get_string(xrm, name_buf, class_buf, &value))
+		return false;
+
+	if (value_format) {
+		size = 0;
+		char format[20];
+		sprintf(format, "%s%%n", value_format);
+
+		res = sscanf(value, format, out, &size);
+		free(value);
+
+		if (1 != res || size <= 0 || value[size]) {
+			fprintf(stderr, "Invalid resource %s=%s for format %s\n",
+					name_buf, value, value_format);
+			return false;
+		}
+	} else {
+		free(*(char **)out);
+		*(char **)out = value;
+	}
+
+	return true;
+
+#undef COPY_ELEMENT
 }
 
 static void
 xrm_update(void)
 {
-	char *value;
-
 	/*MAN(RESOURCES)
 	 * .SS "Label Resources"
 	 */
@@ -3786,28 +3826,19 @@ xrm_update(void)
 	 * .IP \(bu
 	 * .B heawm.label.fontFamily
 	 */
-	if (load_resource(&value, "label.fontFamily")) {
-		free(label_font);
-		label_font = value;
-	}
+	load_resource(NULL, &label_font, "Label.FontFamily", "label.fontFamily");
 
 	/*MAN(RESOURCES)
 	 * .IP \(bu
 	 * .B heawm.label.fontSize
 	 */
-	if (load_resource(&value, "label.fontSize")) {
-		label_font_size = strtol(value, NULL, 10);
-		free(value);
-	}
+	load_resource("%d", &label_font_size, "Label.FontSize", "label.fontSize");
 
 	/*MAN(RESOURCES)
 	 * .IP \(bu
 	 * .B heawm.label.strokeWidth
 	 */
-	if (load_resource(&value, "label.strokeWidth")) {
-		label_stroke = strtol(value, NULL, 10);
-		free(value);
-	}
+	load_resource("%d", &label_stroke, "Label.Size", "label.strokeWidth");
 }
 
 static void
@@ -4761,8 +4792,6 @@ hand_update(Hand *const hand, uint8_t index, char const *const name, int const n
 	 * .TP
 	 * .B color
 	 * Specifies focus color in
-	 * .B 0xRRGGBB
-	 * or
 	 * .B #RRGGBB
 	 * format.
 	 * .RE
@@ -4781,19 +4810,10 @@ hand_update(Hand *const hand, uint8_t index, char const *const name, int const n
 	 * heawm.hand.color: 0xffff00
 	 * .EE
 	 */
-	hand->color = 0xfe0202 /*, 0xffaf5f*/;
-	for (char *value;
-	     load_resource(&value, "hand.%.*s.color", name_size, name) ||
-	     load_resource(&value, "hand.%u.color", index) ||
-	     load_resource(&value, "hand.color");)
-	{
-		if (1 != sscanf(value, "0x%6x", &hand->color) &&
-		    1 != sscanf(value, "#%6x", &hand->color))
-			fprintf(stderr, "Invalid color resource value: %s\n",
-					value);
-		free(value);
-		break;
-	}
+	if (!load_resource("#%6x", &hand->color, "Hand.Name.Color", "hand.%.*s.color", name_size, name) &&
+	    !load_resource("#%6x", &hand->color, "Hand.Index.Color", "hand.%u.color", index) &&
+	    !load_resource("#%6x", &hand->color, "Hand.Color", "hand.color"))
+		hand->color = 0xffff00;
 
 	/* It is safe to call because we know that hand currently
 	 * has no focus. */
