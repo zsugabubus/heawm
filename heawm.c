@@ -5238,10 +5238,12 @@ hand_handle_input(Hand *const hand, xcb_keysym_t const sym)
 {
 #define INPUT_BETWEEN(lower_char, lower, upper) \
 	((lower) <= sym && sym <= (upper)) \
-		hand->user_input[input_len] = (lower_char) + (sym - (lower))
+		hand->user_input[n] = (lower_char) + (sym - (lower))
 
-	uint8_t const input_len = strnlen(hand->user_input, sizeof hand->user_input);
-	if INPUT_BETWEEN('a', XKB_KEY_a, XKB_KEY_z);
+	uint8_t const n = strnlen(hand->user_input, sizeof hand->user_input);
+	if (sizeof hand->user_input == n)
+		return false;
+	else if INPUT_BETWEEN('a', XKB_KEY_a, XKB_KEY_z);
 	else if INPUT_BETWEEN('A', XKB_KEY_A, XKB_KEY_Z);
 	else if INPUT_BETWEEN('0', XKB_KEY_0, XKB_KEY_9);
 	else if INPUT_BETWEEN('0', XKB_KEY_KP_0, XKB_KEY_KP_9);
@@ -5808,16 +5810,13 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 		{
 			box_propagate_change(hand->mode_box)->label_changed = true;
 			return;
-		}
-
-		if (XKB_KEY_Return == sym ||
-		    sizeof hand->user_input == strnlen(hand->user_input, sizeof hand->user_input))
+		} else if (XKB_KEY_Return == sym ||
+		           sizeof hand->user_input == strnlen(hand->user_input, sizeof hand->user_input))
 		{
 			memcpy(hand->mode_box->name, hand->user_input, sizeof hand->user_input);
 			char *const c = &hand->mode_box->name[0];
 			*c = box_is_container(hand->mode_box) ? toupper(*c) : tolower(*c);
 			box_name(hand->mode_box);
-			return;
 		} else if (*hand->user_input) {
 			return;
 		/* Accept some special commands until there is no user input. */
@@ -5830,8 +5829,6 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 			do
 				b->hide_label = hide_label;
 			while ((b = b->parent) && 1 == b->num_children);
-
-			break;
 		} else if (XKB_KEY_slash == sym ||
 		           XKB_KEY_asterisk == sym)
 		{
@@ -5848,9 +5845,10 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 						label->base->hide_label = hide_label;
 				}
 			}
-			break;
+		} else {
+			return;
 		}
-		return;
+		break;
 
 	default:
 		return;
