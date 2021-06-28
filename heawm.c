@@ -34,7 +34,6 @@
 #include <xcb/xcb_icccm.h>
 #include <xcb/xcb_image.h>
 #include <xcb/xcb_keysyms.h>
-#include <xcb/xcb_xrm.h>
 #include <xcb/xfixes.h>
 #include <xcb/xinput.h>
 #include <xcb/xkb.h>
@@ -326,7 +325,7 @@ struct Box {
 	xcb_xfixes_barrier_t barrier;
 
 	char *title;
-	char *class;
+	char *instance_class;
 
 	Box *parent;
 	Box *children[];
@@ -334,11 +333,11 @@ struct Box {
 
 static Box *root; /**< Mother of all boxes. */
 
-static uint16_t monitor_gap;
-static uint16_t container_gap;
-static uint16_t window_gap;
-static uint16_t border_radius;
-static uint16_t snap_distance;
+static uint16_t monitor_gap = 0;
+static uint16_t container_gap = 4;
+static uint16_t window_gap = 1;
+static uint16_t border_radius = 0;
+static uint16_t snap_distance = 25;
 /**
  * Do not apply border radius for shaped windows.
  */
@@ -373,13 +372,12 @@ typedef struct {
 	char name[membersizeof(Box, name)];
 } Label;
 
-static char const LABEL_FONT_DEFAULT[] = "monospace";
-static char *label_font;
+static char *label_font = "monospace";
 static Point label_rect = { .x = 30, .y = 60 }; /* In pts */
-static int label_font_size;
-static int label_stroke_width;
-static unsigned label_stroke_color;
-static unsigned label_foreground;
+static int label_font_size = 17;
+static int label_stroke_width = 2;
+static unsigned label_stroke_color = 0x000000;
+static unsigned label_foreground = 0xffff00;
 
 enum HandMode {
 	HAND_MODE_NULL,
@@ -539,13 +537,66 @@ static uint8_t num_bodies;
 static Body *bodies;
 
 typedef struct {
+	char const *name;
+	uint8_t index;
+	unsigned color;
+} HandRule;
+
+static HandRule hand_rules[] = {
+	{
+		"Virtual core", 0,
+		.color = 0xff0000,
+	},
+	{
+		NULL, 0,
+		.color = 0xff0000,
+	},
+	{
+		NULL, 1,
+		.color = 0x00ff00,
+	},
+	{
+		NULL, 2,
+		.color = 0x0000ff,
+	},
+	{
+		NULL, NULL_HAND,
+		.color = 0xff00ff,
+	},
+};
+
+static uint32_t num_hand_rules = ARRAY_SIZE(hand_rules);
+
+typedef struct {
 	char const *instance;
 	char const *class;
 	char name[membersizeof(Box, name)];
-} Rule;
+} BoxRule;
 
-static uint32_t num_rules;
-static Rule *rules;
+static BoxRule box_rules[] = {
+	{
+		NULL, "firefox",
+		.name = "b",
+	},
+	{
+		NULL, "Chrome",
+		.name = "c",
+	},
+	{
+		NULL, "TelegramDesktop",
+		.name = "t",
+	},
+	{
+		NULL, "mpv",
+		.name = "v",
+	},
+	{
+		NULL, "Zathura",
+		.name = "z",
+	},
+};
+
+static uint32_t num_box_rules = ARRAY_SIZE(box_rules);
 
 #define ATOM(name) ((xcb_atom_t const)atoms[HEAWM_ATOM_##name])
 
@@ -589,7 +640,6 @@ enum {
 static xcb_atom_t atoms[ARRAY_SIZE(ATOM_NAMES)];
 
 static xcb_connection_t *conn;
-static xcb_xrm_database_t *xrm;
 /* https://www.x.org/releases/X11R7.7/doc/inputproto/XI2proto.txt */
 static uint8_t xi_opcode; /** major opcode of XInput extension */
 /* https://www.x.org/releases/X11R7.7/doc/xextproto/shape.html */
@@ -809,7 +859,7 @@ label_repaint(Label const *const label, bool const shape)
 	if (!bodies[label->base->body].composited)
 		cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
 
-	cairo_select_font_face(cr, label_font ? label_font : LABEL_FONT_DEFAULT,
+	cairo_select_font_face(cr, label_font,
 			CAIRO_FONT_SLANT_NORMAL,
 			CAIRO_FONT_WEIGHT_BOLD);
 	cairo_set_font_size(cr, font_size);
@@ -1190,30 +1240,11 @@ static void
 quit(void)
 {
 	if (conn) {
-		if (xrm)
-			xcb_xrm_database_free(xrm);
 		if (symbols)
 			xcb_key_symbols_free(symbols);
 
 		xcb_disconnect(conn);
 	}
-}
-
-static void
-xrm_open(void);
-
-static void
-handle_signal_hup(int signum)
-{
-	(void)signum;
-
-	xrm_open();
-
-	Box *b;
-	for_each_box(b, root)
-		b->label_changed = true,
-		b->layout_changed = true,
-		b->content_changed = true;
 }
 
 static void
@@ -1297,14 +1328,14 @@ box_propagate_change(Box *box)
 static char const *
 box_get_class(Box const *const box)
 {
-	return box->class ? box->class + strlen(box->class) + 1 : NULL;
+	return box->instance_class ? box->instance_class + strlen(box->instance_class) + 1 : NULL;
 }
 
 static bool
-rule_match(Rule const *const rule, char const *instance, char const *class)
+box_rule_match(Box const *const box, BoxRule const *const rule)
 {
-	return (!rule->class || (class && !strcmp(rule->class, class))) &&
-	       (!rule->instance || (instance && !strcmp(rule->instance, instance)));
+	return (!rule->instance || (box->instance_class && !strcmp(rule->instance, box->instance_class))) &&
+	       (!rule->class || (box->instance_class && !strcmp(rule->class, box_get_class(box))));
 }
 
 static void
@@ -1343,15 +1374,15 @@ box_name(Box *const box)
 
 	char optimum = box->name[n];
 
-	for (uint32_t i = 0; i < num_rules; ++i) {
-		Rule const *const rule = &rules[i];
+	for (uint32_t i = 0; i < num_box_rules; ++i) {
+		BoxRule const *const rule = &box_rules[i];
 		if (!(rule->name[n] && !rule->name[n + 1]))
 			continue;
 
 		/* Try assigning reserved letters last. */
 		letters[(unsigned char)rule->name[n]].focus_seq = root->focus_seq + 1;
 
-		if (!optimum && rule_match(rule, box->class, box_get_class(box)))
+		if (!optimum && box_rule_match(box, rule))
 			optimum = rule->name[n];
 	}
 
@@ -2136,7 +2167,7 @@ box_update(Box *const box)
 				box->user_concealed ? 'U' : '-',
 				box->concealed ? 'C' : '-',
 
-				box->class,
+				box->instance_class,
 				box_get_class(box),
 				box->title);
 
@@ -2692,7 +2723,7 @@ static void
 box_free(Box *const box)
 {
 	free(box->title);
-	free(box->class);
+	free(box->instance_class);
 	free(box);
 }
 
@@ -3194,14 +3225,14 @@ box_set_class(Box *const box, xcb_get_property_reply_t const *const reply)
 	char const *const class = xcb_get_property_value(reply);
 	char const *delim;
 
-	free(box->class);
-	box->class = NULL;
+	free(box->instance_class);
+	box->instance_class = NULL;
 
 	if (len < (int)XCB_STRING_MAX &&
 	    (delim = memchr(class, '\0', len)) &&
 	    class + len - 1 == memchr(delim + 1, '\0', len - ((delim + 1) - class)))
-		if ((box->class = malloc(len)))
-			memcpy(box->class, class, len);
+		if ((box->instance_class = malloc(len)))
+			memcpy(box->instance_class, class, len);
 }
 
 static void
@@ -3627,14 +3658,6 @@ setup_signals(void)
 
 	/*MAN(SIGNALS)
 	 * .TP
-	 * .B SIGHUP
-	 * Restart program, by replacing program image with itself.
-	 */
-	sa.sa_handler = handle_signal_hup;
-	sigaction(SIGHUP, &sa, NULL);
-
-	/*MAN(SIGNALS)
-	 * .TP
 	 * .B SIGINT, SIGTERM, SIGQUIT
 	 * Terminate program gracefully.
 	 */
@@ -3738,251 +3761,6 @@ xcb_connection_strerror(int const error)
 	case XCB_CONN_CLOSED_PARSE_ERR:        return "Malformed display string";
 	default:                               return "Unknown error";
 	}
-}
-
-static bool
-load_resource(char const *value_format, void *const out, char const *const class, char const *const instance_format, ...)
-{
-#define COPY_ELEMENT(dest, elem) do { \
-	memcpy(dest, elem".", strlen(elem".")); \
-	elem_size = strlen(elem"."); \
-} while (0)
-
-	if (!xrm)
-		return false;
-
-	int res;
-	int size;
-	int elem_size;
-	char name_buf[128];
-
-	va_list ap;
-	va_start(ap, instance_format);
-	COPY_ELEMENT(name_buf, WM_NAME);
-	size = sizeof name_buf - elem_size;
-	res = vsnprintf(name_buf + elem_size, size, instance_format, ap);
-	va_end(ap);
-
-	if (size <= res) {
-		fprintf(stderr, "Resource name is too long: %s\n", name_buf);
-		return false;
-	}
-
-	char class_buf[128];
-	COPY_ELEMENT(class_buf, "HeaWM");
-	strcpy(class_buf + elem_size, class);
-
-	if (5 <= HEAWM_VERBOSE)
-		fprintf(stderr, "resource %s (%s)\n", name_buf, class_buf);
-
-	char *value;
-	if (xcb_xrm_resource_get_string(xrm, name_buf, class_buf, &value))
-		return false;
-
-	if (value_format) {
-		size = 0;
-		char format[20];
-		sprintf(format, "%s%%n", value_format);
-
-		res = sscanf(value, format, out, &size);
-
-		if (1 != res || size <= 0 || value[size]) {
-			fprintf(stderr, "Invalid resource %s=%s for format %s\n",
-					name_buf, value, value_format);
-
-			free(value);
-			return false;
-		}
-
-		free(value);
-	} else {
-		free(*(char **)out);
-		*(char **)out = value;
-	}
-
-	return true;
-
-#undef COPY_ELEMENT
-}
-
-static Rule *
-rule_find(char const *instance, char const *class)
-{
-	for (uint32_t i = 0; i < num_rules; ++i) {
-		Rule const *const rule = &rules[i];
-		if (rule_match(rule, instance, class))
-			return (Rule *)rule;
-	}
-
-	return NULL;
-}
-
-static void
-rule_parse(char *s)
-{
-	for (uint32_t i = 0; i < num_rules; ++i) {
-		Rule *const rule = &rules[i];
-		memset(rule->name, 0, sizeof rule->name);
-	}
-
-	if (!s)
-		return;
-
-	while (*s) {
-		while (isspace(*s))
-			++s;
-
-		char *class = s;
-
-		while (*s && ':' != *s)
-			++s;
-		if (!*s)
-			break;
-
-		*s++ = '\0';
-
-		Rule *rule = rule_find(NULL, class);
-		if (!rule) {
-			if (!(num_rules & (num_rules - 1))) {
-				void *p = realloc(rules, (2 * num_rules + !num_rules) * sizeof(Rule));
-				if (!p)
-					return;
-				rules = p;
-			}
-
-			class = strdup(class);
-			if (!class)
-				return;
-
-			rule = &rules[num_rules++];
-			*rule = (Rule){
-				.class = class
-			};
-		}
-
-		while (isspace(*s))
-			++s;
-
-		for (uint8_t i = 0; i < membersizeof(Box, name); ++i) {
-			if (!*s || isspace(*s))
-				break;
-			rule->name[i] = *s++;
-		}
-
-		while ('\n' != *s && isspace(*s))
-			++s;
-		if (!*s)
-			break;
-		else if ('\n' == *s)
-			++s;
-	}
-}
-
-static void
-xrm_update(void)
-{
-	/*MAN(RESOURCES)
-	 * .SS "Window Resources"
-	 */
-
-	/*MAN(RESOURCES)
-	 * .IP \(bu
-	 * .B heawm.monitorGap
-	 */
-	if (!load_resource("%hu", &monitor_gap, "Gap", "monitorGap"))
-		monitor_gap = 0;
-
-	/*MAN(RESOURCES)
-	 * .IP \(bu
-	 * .B heawm.containerGap
-	 */
-	if (!load_resource("%hu", &container_gap, "Gap", "containerGap"))
-		container_gap = 4;
-
-	/*MAN(RESOURCES)
-	 * .IP \(bu
-	 * .B heawm.windowGap
-	 */
-	if (!load_resource("%hu", &window_gap, "Gap", "windowGap"))
-		window_gap = 1;
-
-	/*MAN(RESOURCES)
-	 * .IP \(bu
-	 * .B heawm.borderRadius
-	 */
-	if (!load_resource("%hu", &border_radius, "BorderRadius", "borderRadius"))
-		border_radius = 0;
-
-	/*MAN(RESOURCES)
-	 * .IP \(bu
-	 * .B heawm.snapDistance
-	 */
-	if (!load_resource("%hu", &snap_distance, "SnapDistance", "snapDistance"))
-		snap_distance = 25;
-
-	/*MAN(RESOURCES)
-	 * .IP \(bu
-	 * .B heawm.nameRules
-	 */
-	{
-		char *value = NULL;
-		(void)load_resource(NULL, &value, "Rules", "nameRules");
-		rule_parse(value);
-		free(value);
-	}
-
-	/*MAN(RESOURCES)
-	 * .SS "Label Resources"
-	 */
-
-	/*MAN(RESOURCES)
-	 * .IP \(bu
-	 * .B heawm.label.fontFamily
-	 */
-	if (!load_resource(NULL, &label_font, "Label.FontFamily", "label.fontFamily")) {
-		free(label_font);
-		label_font = NULL;
-	}
-
-	/*MAN(RESOURCES)
-	 * .IP \(bu
-	 * .B heawm.label.fontSize
-	 */
-	if (!load_resource("%d", &label_font_size, "Label.FontSize", "label.fontSize"))
-		label_font_size = 17;
-
-	/*MAN(RESOURCES)
-	 * .IP \(bu
-	 * .B heawm.label.strokeWidth
-	 */
-	if (!load_resource("%d", &label_stroke_width, "Label.Size", "label.strokeWidth"))
-		label_stroke_width = 2;
-
-	/*MAN(RESOURCES)
-	 * .IP \(bu
-	 * .B heawm.label.strokeWidth
-	 */
-	if (!load_resource("#%6x", &label_stroke_color, "Label.Color", "label.strokeColor"))
-		label_stroke_color = 0x000000;
-
-
-	/*MAN(RESOURCES)
-	 * .IP \(bu
-	 * .B heawm.label.foreground
-	 */
-	if (!load_resource("#%6x", &label_foreground, "Label.Color", "label.foreground"))
-		label_foreground = 0xffff00;
-}
-
-static void
-xrm_open(void)
-{
-	if (xrm)
-		xcb_xrm_database_free(xrm);
-	if (!(xrm = xcb_xrm_database_from_default(conn)))
-		fprintf(stderr, "Could not load X resource manager\n");
-
-	xrm_update();
 }
 
 static void
@@ -4184,8 +3962,8 @@ body_find_head_by_name(Body *const body, char const *const name)
 		if (body - bodies != head->body)
 			continue;
 
-		if (name == head->class ||
-		    (name && head->class && !strcmp(head->class + sizeof MONITOR_CLASS, name + sizeof MONITOR_CLASS)))
+		if (name == head->instance_class ||
+		    (name && head->instance_class && !strcmp(head->instance_class + sizeof MONITOR_CLASS, name + sizeof MONITOR_CLASS)))
 			return head;
 	}
 
@@ -4271,7 +4049,7 @@ body_update_heads(Body *const body)
 	screen_as_monitor:;
 		Box *const head = box_new();
 		head->body = body - bodies;
-		head->class = NULL;
+		head->instance_class = NULL;
 		head->num_visible = 1;
 		head->flagged = 1; /* Primary. */
 		box_set_placeholder_name(head);
@@ -4312,7 +4090,7 @@ body_update_heads(Body *const body)
 			if (!head) {
 				head = box_new();
 				head->body = body - bodies;
-				head->class = name;
+				head->instance_class = name;
 				head->num_visible = 1;
 				head->floating = 1;
 				name = NULL;
@@ -4392,7 +4170,8 @@ done:
 	for (uint16_t i = root->num_children; 0 < i;) {
 		Box *const head = root->children[--i];
 		if (!head->urect.width && parent) {
-			free(head->class), head->class = NULL;
+			free(head->instance_class);
+			head->instance_class = NULL;
 
 			if (0 < gone_with_children &&
 			    gone_with_children == existing_without_children)
@@ -4475,8 +4254,6 @@ setup_display(void)
 
 	symbols = xcb_key_symbols_alloc(conn);
 
-	xrm_open();
-
 	/* Prevent windows from changing. */
 	XDO(xcb_grab_server, conn);
 
@@ -4558,7 +4335,7 @@ retry:
 			!child->user_concealed &&
 			(!ignore_leader && box->leader
 				? box->leader == child->leader
-				: box->class && child->class &&
+				: box->instance_class && child->instance_class &&
 				  !strcmp(box_get_class(box), box_get_class(child))));
 
 		if (box == child)
@@ -4902,51 +4679,16 @@ hand_find_by_master_pointer(xcb_input_device_id_t const pointer);
 static void
 hand_update(Hand *const hand, uint8_t index, char const *const name, int const name_size)
 {
-	/*MAN(RESOURCES)
-	 * .SS "Hand Resources"
-	 * The following resources can be used to customize
-	 * hands. They are specified by the following patterns
-	 * and checked in order:
-	 * .
-	 * .IP \(bu
-	 * \fBheawm.hand.\fINAME\fB.*\fR: Match hand by
-	 * its \fINAME\fR, e.g. \(lqVirtual core\(rq. \fINAME\fR
-	 * is coming from
-	 * .B XInput
-	 * \(lq\fINAME\fR pointer\(rq and
-	 * \(lq\fINAME\fR keyboard\(rq master device pair.
-	 * .
-	 * .IP \(bu
-	 * \fBheawm.hand.\fIINDEX\fB.*\fR: Match hand by its 1-based \fIINDEX\fR.
-	 * .
-	 * .IP \(bu
-	 * \fBheawm.hand.*\fR: Match all hands. Can be useful for specifying default settings.
-	 * .
-	 * .TP
-	 * .B color
-	 * Specifies focus color in
-	 * .B #RRGGBB
-	 * format.
-	 * .RE
-	 * .
-	 * .PP
-	 * Example:
-	 * .sp
-	 * .EX
-	 * ! Default input pair.
-	 * heawm.hand.Virtual core.color: #fe0202
-	 * ! Master devices \(lqmom pointer\(rq and \(lqmom keyboard\(rq.
-	 * heawm.hand.mom.color: #ff00ff
-	 * ! 17th device pair.
-	 * heawm.hand.17.color: 0xffaf5f
-	 * ! Default color.
-	 * heawm.hand.color: 0xffff00
-	 * .EE
-	 */
-	if (!load_resource("#%6x", &hand->color, "Hand.Name.Color", "hand.%.*s.color", name_size, name) &&
-	    !load_resource("#%6x", &hand->color, "Hand.Index.Color", "hand.%u.color", index) &&
-	    !load_resource("#%6x", &hand->color, "Hand.Color", "hand.color"))
-		hand->color = 0xffff00;
+	for (uint32_t i = 0; i < num_hand_rules; ++i) {
+		HandRule const *const rule = &hand_rules[i];
+		if (rule->index != NULL_HAND && rule->index != index)
+			continue;
+		if (rule->name && strncmp(rule->name, name, name_size))
+			continue;
+
+		hand->color = rule->color;
+		break;
+	}
 
 	/* It is safe to call because we know that hand currently
 	 * has no focus. */

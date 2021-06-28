@@ -72,12 +72,6 @@ INCLUDE(SIGNALS)
 (any)
 Indicates that program does not run anymore.
 .
-.SH RESOURCES
-.B heawm
-understands the following X resources:
-.
-INCLUDE(RESOURCES)
-.
 .SH HOOKS
 Hooks can be installed under $\fBHEAWM_HOME\fR directory.
 .
