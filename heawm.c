@@ -380,14 +380,14 @@ static unsigned label_stroke_color = 0x000000;
 static unsigned label_foreground = 0xffff00;
 
 enum HandMode {
-	HAND_MODE_NULL,
+	HAND_MODE_NONE,
 	HAND_MODE_MOVE,
 	HAND_MODE_NAME,
 	HAND_MODE_POINTER_MOVE,
 };
 
 #define MAX_NUM_HANDS 63U
-#define NULL_HAND (MAX_NUM_HANDS + 1U)
+#define HAND_NONE (MAX_NUM_HANDS + 1U)
 
 #define for_each_hand for_each_template_(Hand, hands, uint8_t, hand, 0)
 
@@ -560,7 +560,7 @@ static HandRule hand_rules[] = {
 		.color = 0x0000ff,
 	},
 	{
-		NULL, NULL_HAND,
+		NULL, HAND_NONE,
 		.color = 0xff00ff,
 	},
 };
@@ -1751,7 +1751,7 @@ box_label_is_visible(Box const *const box)
 {
 	for_each_hand {
 		switch (hand->mode) {
-		case HAND_MODE_NULL:
+		case HAND_MODE_NONE:
 			if (box->hide_label &&
 			    /* Show labels for focused containers. */
 			    !(box_is_container(box) && box_has_any_hand_focus(box)))
@@ -2602,7 +2602,7 @@ hand_find_recents(Hand const *const hand, Box *root, uint32_t const focus_seq, B
 	for_each_box(box, root)
 		if (/* Only client windows are interesting. */
 		    !box_is_container(box) &&
-		    (NULL_HAND == box->focus_hand ||
+		    (HAND_NONE == box->focus_hand ||
 		     (/* Not focused. */
 		      focus_seq != box->focus_seq &&
 		      /* But have been focused by us. */
@@ -2716,7 +2716,7 @@ hand_leave_mode(Hand *const hand)
 		break;
 	}
 
-	hand->mode = HAND_MODE_NULL;
+	hand->mode = HAND_MODE_NONE;
 }
 
 static void
@@ -2935,7 +2935,7 @@ static Box *
 box_new(void)
 {
 	Box *box = check_alloc(calloc(1, sizeof *box + num_hands * sizeof(BoxPointer)));
-	box->focus_hand = NULL_HAND;
+	box->focus_hand = HAND_NONE;
 	/* An initially zeroed out box->{x,y} does not mean box->window is
 	 * really at this position so marking it changed will force a
 	 * reconfiguration. */
@@ -3036,7 +3036,7 @@ hand_grab_keyboard(Hand const *const hand)
 	for_each_body {
 		xcb_window_t const root_window = body->screen->root;
 
-		if (HAND_MODE_NULL == hand->mode) {
+		if (HAND_MODE_NONE == hand->mode) {
 			XCB_INPUT_XI_PASSIVE_UNGRAB_DEVICE_WRAPPER(root_window,
 					hand->master_keyboard,
 					XCB_INPUT_GRAB_TYPE_KEYCODE, XCB_GRAB_ANY,
@@ -3532,7 +3532,7 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 
 				assert(box_hand && "box focused but no hands have it");
 				focus = true;
-			} else if (NULL_HAND != origin->focus_hand) {
+			} else if (HAND_NONE != origin->focus_hand) {
 				box_hand = &hands[origin->focus_hand];
 				focus = false;
 			} else {
@@ -3597,7 +3597,7 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 
 	if (box_hand) {
 		box_hand->want_focus = false;
-		if (focus && HAND_MODE_NULL == box_hand->mode)
+		if (focus && HAND_MODE_NONE == box_hand->mode)
 			hand_focus_box(box_hand, box);
 	}
 
@@ -4641,7 +4641,7 @@ handle_client_message(xcb_client_message_event_t const *const event)
 		if (XCB_EWMH_CLIENT_SOURCE_TYPE_NORMAL == event->data.data32[0])
 			return;
 
-		Hand *hand = &hands[NULL_HAND == box->focus_hand ? 0 : box->focus_hand];
+		Hand *hand = &hands[HAND_NONE == box->focus_hand ? 0 : box->focus_hand];
 		hand_focus_box(hand, box);
 	} else if (ATOM(_NET_WM_STATE) == event->type) {
 		if (32 == event->format &&
@@ -4681,7 +4681,7 @@ hand_update(Hand *const hand, uint8_t index, char const *const name, int const n
 {
 	for (uint32_t i = 0; i < num_hand_rules; ++i) {
 		HandRule const *const rule = &hand_rules[i];
-		if (rule->index != NULL_HAND && rule->index != index)
+		if (rule->index != HAND_NONE && rule->index != index)
 			continue;
 		if (rule->name && strncmp(rule->name, name, name_size))
 			continue;
@@ -4764,11 +4764,11 @@ hands_update(void)
 
 	/* Map old hand indexes to new hand indexes for correct stack history. */
 	/* According to specification devices above 127 are invisible to clients. */
-	uint8_t hand_map[NULL_HAND + 1];
+	uint8_t hand_map[HAND_NONE + 1];
 
 	/* Reassign boxes of deattached hands to an invalid hand. */
-	memset(hand_map, NULL_HAND, num_hands);
-	hand_map[NULL_HAND] = NULL_HAND;
+	memset(hand_map, HAND_NONE, num_hands);
+	hand_map[HAND_NONE] = HAND_NONE;
 
 	uint8_t new_num_hands = 0;
 	for (xcb_input_xi_device_info_iterator_t iter = xcb_input_xi_query_device_infos_iterator(reply);
@@ -4846,12 +4846,12 @@ hands_update(void)
 		memset(Box_pointers(box), 0, new_num_hands * sizeof(BoxPointer));
 
 		for (uint8_t i = 0; i < num_hands; ++i)
-			if (NULL_HAND != hand_map[i])
+			if (HAND_NONE != hand_map[i])
 				Box_pointers(box)[hand_map[i]] = old_pointers[i];
 	}
 
 	for (uint8_t i = 0; i < num_hands; ++i)
-		if (NULL_HAND == hand_map[i])
+		if (HAND_NONE == hand_map[i])
 			hand_destroy(&hands[i]);
 
 	/* Forget deattached hands' focus by incrementing focus number of
@@ -4999,7 +4999,7 @@ hand_handle_input(Hand *const hand, xcb_keysym_t const sym)
 static void
 hand_update_mode(Hand *const hand)
 {
-	if (HAND_MODE_NULL != hand->mode) {
+	if (HAND_MODE_NONE != hand->mode) {
 		hand_input_reset(hand);
 		hand_do_mode_changes(hand);
 	}
@@ -5940,7 +5940,7 @@ handle_input_key_press(xcb_input_key_press_event_t const *const event)
 	enum HandMode const old_mode = hand->mode;
 
 	switch (hand->mode) {
-	case HAND_MODE_NULL:
+	case HAND_MODE_NONE:
 	{
 		bool const repeating = XCB_INPUT_KEY_EVENT_FLAGS_KEY_REPEAT & event->flags;
 
@@ -6088,7 +6088,7 @@ handle_input_button_press(xcb_input_button_press_event_t const *const event)
 		if (!box)
 			return;
 
-		if (HAND_MODE_NULL == hand->mode) {
+		if (HAND_MODE_NONE == hand->mode) {
 			Box *const foot = box_get_foot(box);
 			if (foot) {
 				hand->mode = HAND_MODE_POINTER_MOVE;
