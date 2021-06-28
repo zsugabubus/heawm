@@ -6158,12 +6158,13 @@ handle_input_button_press(xcb_input_button_press_event_t const *const event)
 		if (!box)
 			return;
 
-		if (box->floating) {
+		Box *const foot = box_get_foot(box);
+		if (foot) {
 			uint16_t const coeff = 100 + 8 * (4 == event->detail ? 1 : -1);
-			box_set_usize_with_ureposition(box,
-					box->urect.width * coeff / 100,
-					box->urect.height * coeff / 100);
-			box_propagate_change(box);
+			box_set_usize_with_ureposition(foot,
+					foot->urect.width * coeff / 100,
+					foot->urect.height * coeff / 100);
+			box_propagate_change(foot);
 		}
 	}
 }
