@@ -190,6 +190,14 @@ enum { XCB_MOD_MASK_NUM_LOCK = XCB_MOD_MASK_2, };
 #define MONITOR_CLASS WM_NAME"-monitor"
 #define EXTREMAL_NAME_CHAR '\x7f'
 
+typedef union {
+	struct {
+		uint16_t x;
+		uint16_t y;
+	};
+	uint16_t v[2];
+} Vector;
+
 enum Orientation {
 	LEFT = -1,
 	TOP = -1,
@@ -1469,21 +1477,20 @@ box_name(Box *const box)
 	box_propagate_change(box)->label_changed = true;
 }
 
-static uint16_t
-compute_num_columns(xcb_rectangle_t const *const rect, uint16_t const num_tiles)
+static Vector
+compute_num_columns(uint16_t const width, uint16_t const height, uint16_t const num_tiles)
 {
-	uint16_t ret = 1; /* Always return non-zero. */
-	uint16_t minimal_row = 0;
+	Vector ret;
 	uint32_t minimal = UINT32_MAX;
 	for (uint16_t cols = 1; cols <= num_tiles; ++cols) {
 		uint16_t rows = (num_tiles + cols - 1) / cols;
 		uint16_t last_cols = num_tiles - (rows - 1) * cols;
 		uint32_t perimeter =
-			((rect->width / cols) + (rect->height / rows)) * (rows - 1) * cols +
-			((rect->width / last_cols) + (rect->height / rows)) * last_cols * 1;
-		if (perimeter < minimal && minimal_row != rows) {
-			ret = cols;
-			minimal_row = rows;
+			((width / cols) + (height / rows)) * (rows - 1) * cols +
+			((width / last_cols) + (height / rows)) * last_cols * 1;
+		if (perimeter < minimal && ret.y != rows) {
+			ret.x = cols;
+			ret.y = rows;
 			minimal = perimeter;
 		}
 	}
@@ -1922,20 +1929,37 @@ box_update_layout(Box const *const box)
 			++tiles;
 	}
 
-	xcb_rectangle_t tile = { 0 };
-	uint16_t num_columns, num_rows;
-	if (!box->vertical) {
-		num_columns = compute_num_columns(&(xcb_rectangle_t const){
-			.width =  box->rect.width - tile.x,
-			.height = box->rect.height - tile.y,
-		}, tiles);
-		num_rows = (tiles + num_columns - 1) / num_columns;
-	} else {
-		num_rows = compute_num_columns(&(xcb_rectangle_t const){
-			.width =  box->rect.height - tile.y,
-			.height = box->rect.width - tile.x,
-		}, tiles);
-		num_columns = (tiles + num_rows - 1) / num_rows;
+	Vector
+		rc, /**< Tile row/column number. */
+		xy, /**< Tile position. */
+		wh, /**< Wanted tile size. */
+		error, rem, /**< For pixel error correction. */
+		twh, /**< Computed tile size. */
+		cwh; /**< Container size. */
+
+	bool const v = box->vertical;
+
+	if (tiles) {
+		cwh.x = box->rect.width;
+		cwh.y = box->rect.height;
+
+		Vector const t = compute_num_columns(cwh.v[!v], cwh.v[v], tiles);
+		rc.v[!v] = t.x;
+		rc.v[v] = t.y;
+
+		xy.x = 0;
+		xy.y = 0;
+
+		wh.x = cwh.x / rc.x;
+		wh.y = cwh.y / rc.y;
+
+		/* Aggregated error. */
+		error.x = 0;
+		error.y = 0;
+
+		/* Total pixel error. */
+		rem.x = cwh.x % rc.x;
+		rem.y = cwh.y % rc.y;
 	}
 
 	bool const is_monitor = box_is_monitor(box);
@@ -1943,12 +1967,19 @@ box_update_layout(Box const *const box)
 	for (uint16_t i = 0; i < box->num_children; ++i) {
 		Box *const child = box->children[i];
 		if (!child->floating && child->flagged) {
-			uint16_t *num = !box->vertical ? &num_columns : &num_rows;
-			if ((!box->vertical ? !tile.x : !tile.y) && tiles < *num)
-				*num = tiles;
+			if (/* Start of row/column. */
+			    !xy.v[!v] &&
+			    /* Have less tiles than grid size. */
+			    tiles < rc.v[!v])
+			{
+				rc.v[!v] = tiles;
+				wh.v[!v] = cwh.v[!v] / rc.v[!v];
+				rem.v[!v] = cwh.v[!v] % rc.v[!v];
+			}
 
-			tile.width = box->rect.width / num_columns;
-			tile.height = box->rect.height / num_rows;
+			error.v[!v] += rem.v[!v];
+			twh.x = wh.x + (rc.x <= error.x);
+			twh.y = wh.y + (rc.y <= error.y);
 
 			struct {
 				uint16_t top;
@@ -1967,56 +1998,37 @@ box_update_layout(Box const *const box)
 			gap.top = gap.left;
 			gap.bottom = gap.right;
 
-			if (!tile.x)
+			if (!xy.x)
 				gap.left = is_monitor ? monitor_gap : 0;
-			if (box->rect.width < tile.x + 2 * tile.width)
+			if (cwh.x <= xy.x + twh.x)
 				gap.right = is_monitor ? monitor_gap : 0;
 
-			if (!tile.y)
+			if (!xy.y)
 				gap.top = is_monitor ? monitor_gap : 0;
-			if (box->rect.height < tile.y + 2 * tile.height)
+			if (cwh.y <= xy.y + twh.y)
 				gap.bottom = is_monitor ? monitor_gap : 0;
 
-#define CORRECT_PIXEL(width, num_columns) do { \
-uint16_t error = box->rect.width % num_columns; \
-if (error) { \
-error = box->rect.width / error; \
-tile.width += (tile.x / error) != ((tile.x + tile.width + 1 /* Corrected pixel. */) / error); \
-} \
-} while (0)
-			CORRECT_PIXEL(width, num_columns);
-			CORRECT_PIXEL(height, num_rows);
-#undef CORRECT_PIXEL
-
-			/* Window dimensions need a slight of adjustments:
-			 * - Last children eats up all
-			 *   remaining space to ensure pixel
-			 *   perfect display.
-			 * - Size is rounded to the nearest
-			 *   mod_{x,y} just because.
-			 */
-#define ADJUST_SIZE(num_rows, x, width) tile.width = ( \
-	1 == tiles || box->rect.width + 1 /* Pixel correction overrun. */ < tile.x + 2 * tile.width \
-	? box->rect.width - tile.x \
-	: tile.width \
-)
-			/* TODO: Distribute error. */
-			ADJUST_SIZE(num_rows, x, width);
-			ADJUST_SIZE(num_columns, y, height);
-#undef ADJUST_SIZE
-
-			box_set_position(child, box->rect.x + tile.x + gap.left, box->rect.y + tile.y + gap.top);
-			box_set_size(child, tile.width - (gap.left + gap.right), tile.height - (gap.top + gap.bottom));
+			if (gap.left + gap.right < twh.x && gap.top + gap.bottom < twh.y) {
+				box_set_position(child,
+						box->rect.x + xy.x + gap.left,
+						box->rect.y + xy.y + gap.top);
+				box_set_size(child,
+						twh.x - (gap.left + gap.right),
+						twh.y - (gap.top + gap.bottom));
+			} else {
+				box_set_size(child, 0, 0);
+			}
 
 			--tiles;
-			if (!box->vertical) {
-				tile.x += tile.width;
-				if (box->rect.width <= tile.x)
-					tile.x = 0, tile.y += tile.height;
-			} else {
-				tile.y += tile.height;
-				if (box->rect.height <= tile.y)
-					tile.y = 0, tile.x += tile.width;
+
+			xy.v[!v] += twh.v[!v];
+			if (rc.v[!v] <= error.v[!v])
+				error.v[!v] -= rc.v[!v];
+			if (cwh.v[!v] <= xy.v[!v]) {
+				xy.v[!v] = 0;
+				xy.v[v] += twh.v[v];
+				if (rc.v[v] <= error.v[v])
+					error.v[v] -= rc.v[v];
 			}
 		} else if (!child->flagged) {
 			box_set_size(child, 0, 0);
