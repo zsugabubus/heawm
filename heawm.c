@@ -320,7 +320,8 @@ struct Box {
 	     shaped: 1, /**< Client has shaped bounding box. */
 	     floating: 1, /**< Tiled or floating? */
 	     vertical: 1,
-	     net_fullscreen: 1;
+	     net_fullscreen: 1,
+	     has_barrier: 1;
 
 	xcb_xfixes_barrier_t barrier;
 
@@ -1617,6 +1618,15 @@ delete_barrier(xcb_xfixes_barrier_t const barrier)
 }
 
 static void
+box_delete_barrier(Box *const box)
+{
+	if (box->has_barrier) {
+		box->has_barrier = false;
+		delete_barrier(box->barrier);
+	}
+}
+
+static void
 hand_unbarricade(Hand *const hand)
 {
 	delete_barrier(hand->barrier);
@@ -1625,10 +1635,12 @@ hand_unbarricade(Hand *const hand)
 static void
 box_update_barrier(Box *const box, Hand const *const for_hand)
 {
-	delete_barrier(box->barrier);
+	box_delete_barrier(box);
 
 	if (!for_hand && !box->floating)
 		return;
+
+	box->has_barrier = true;
 
 	if (XCB_NONE == box->barrier)
 		box->barrier = generate_barrier_ids();
@@ -2210,7 +2222,7 @@ box_update(Box *const box)
 			box_update_layout(box);
 		} else {
 			box_delete_labels(box);
-			delete_barrier(box->barrier);
+			box_delete_barrier(box);
 
 			if (XCB_WINDOW_NONE != box->window) {
 				xcb_icccm_set_wm_state(box->window, XCB_ICCCM_WM_STATE_ICONIC);
@@ -2763,7 +2775,7 @@ box_delete(Box *box)
 		}
 	}
 
-	delete_barrier(box->barrier);
+	box_delete_barrier(box);
 	box_delete_labels(box);
 
 	Box *const box_parent = box->parent;
