@@ -280,8 +280,6 @@ struct Box {
 
 	char name[2];
 
-	uint8_t mod_x, mod_y; /**< Size granulaty */
-
 	uint8_t body;
 
 	/**
@@ -620,7 +618,6 @@ static uint32_t num_box_rules = ARRAY_SIZE(box_rules);
 	xmacro(_HEAWM_NAME) \
 	xmacro(WM_CLIENT_LEADER) \
 	xmacro(WM_DELETE_WINDOW) \
-	xmacro(WM_NORMAL_HINTS) \
 	xmacro(WM_PROTOCOLS) \
 	xmacro(WM_SIZE_HINTS) \
 	xmacro(WM_STATE) \
@@ -2001,9 +1998,8 @@ tile.width += (tile.x / error) != ((tile.x + tile.width + 1 /* Corrected pixel. 
 #define ADJUST_SIZE(num_rows, x, width) tile.width = ( \
 	1 == tiles || box->rect.width + 1 /* Pixel correction overrun. */ < tile.x + 2 * tile.width \
 	? box->rect.width - tile.x \
-	: tile.width + (1 == num_rows && 1 < tiles && 0 < child->mod_##x \
-	? child->mod_##x / 2 - (tile.width + child->mod_##x / 2) % child->mod_##x \
-	: 0))
+	: tile.width \
+)
 			/* TODO: Distribute error. */
 			ADJUST_SIZE(num_rows, x, width);
 			ADJUST_SIZE(num_columns, y, height);
@@ -3283,24 +3279,6 @@ process_reply:
 			memcpy(box.box->title, data, len);
 			box.box->title[len] = '\0';
 		}
-	} else if (ATOM(WM_NORMAL_HINTS) == property) {
-		if (!type) {
-			type = ATOM(WM_SIZE_HINTS);
-			len = sizeof(xcb_size_hints_t) / sizeof(uint32_t);
-			goto send_request;
-		}
-
-		xcb_size_hints_t const *const hints = data;
-
-		if (sizeof *hints == len) {
-			if (XCB_ICCCM_SIZE_HINT_P_RESIZE_INC & hints->flags) {
-				box.box->mod_y = hints->height_inc;
-				box.box->mod_x = hints->width_inc;
-			}
-		} else {
-			box.box->mod_y = 0;
-			box.box->mod_x = 0;
-		}
 	} else if (ATOM(WM_CLIENT_LEADER) == property) {
 		if (!type) {
 			type = XCB_ATOM_WINDOW;
@@ -3480,7 +3458,6 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 		PROPERTY(ATOM(_NET_WM_STATE)),
 		PROPERTY(XCB_ATOM_WM_TRANSIENT_FOR),
 		PROPERTY(ATOM(WM_CLIENT_LEADER)),
-		PROPERTY(ATOM(WM_NORMAL_HINTS)),
 		PROPERTY(ATOM(_HEAWM_NAME)),
 		PROPERTY(XCB_ATOM_WM_CLASS),
 		PROPERTY(XCB_ATOM_WM_NAME),
