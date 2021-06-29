@@ -75,8 +75,24 @@
 #define STRINGIFY_(x) #x
 #define STRINGIFY(x) STRINGIFY_(x)
 
-#define XCHECK(xcb_request, ...) \
-	check_cookie(xcb_request##_checked(__VA_ARGS__), STRINGIFY(__LINE__) ": " #xcb_request)
+typedef struct {
+	xcb_void_cookie_t cookie;
+#if 1 <= HEAWM_VERBOSE
+# define XCOOKIE_MESSAGE(xcb_request) \
+	.message = STRINGIFY(__LINE__) ": " #xcb_request,
+	char const *message;
+#else
+# define XCOOKIE_MESSAGE(xcb_request) /* No message. */
+#endif
+} Cookie;
+
+#define XCOOKIE(xcb_request, ...) \
+	(Cookie const){ \
+		.cookie = xcb_request##_checked(__VA_ARGS__), \
+		XCOOKIE_MESSAGE(xcb_request) \
+	}
+
+#define XCHECK(xcb_request, ...) cookie_check(XCOOKIE(xcb_request, __VA_ARGS__))
 
 #if 1 <= HEAWM_VERBOSE
 # define XDO(xcb_request, ...) (void)XCHECK(xcb_request, __VA_ARGS__)
@@ -263,6 +279,8 @@ struct Box {
 	xcb_window_t frame;
 	xcb_window_t leader;
 
+	xcb_xfixes_barrier_t barrier;
+
 	uint16_t num_children,
 	/**
 	 * Show only last N focused children. (Not counting user_concealed.)
@@ -286,8 +304,6 @@ struct Box {
 	 */
 	xcb_rectangle_t urect;
 
-	char name[2];
-
 	uint8_t body;
 
 	/**
@@ -303,33 +319,29 @@ struct Box {
 	                        maximized */
 
 	/* We always update the whole scene. these variables help to track changes. */
-	bool position_changed: 1, /**< rect->{x,y} changed */
-	     layout_changed: 1, /**< Anything changed that may affect layout of its children */
-	     should_map: 1, /**< Together with position_changed means that
-	                      window has been freshly mapped (size was
-	                      previously zero) */
-	     should_focus: 1, /**< Window freshly focused */
-	     content_changed: 1, /**< Set by children to indicate parent should
-	                           descend with update (means that this flag
-	                           must be propagated upwards until root);
-	                           for client windows indicates that name or title changed */
+	bool position_changed: 1, /**< .rect->{x,y} changed. */
+	     size_changed: 1, /**< .rect->{width,height} changed. */
+	     layout_changed: 1, /**< Layout of box (floating) or children changed. */
+	     mapped_changed: 1, /**< .mapped changed. */
+	     focus_changed: 1, /**< Have been focused by a hand. */
+	     content_changed: 1, /**< Check children for changes. */
 	     label_changed: 1, /**< Label should be repainted */
-	     close_by_force: 1,
+	     mapped: 1,
+	     close_by_force: 1, /**< Does not ask for second time. */
 	     flagged: 1, /**< Temporary flag for various purposes. */
-	     hide_label: 1,
+	     hide_label: 1, /**< No name label. */
 	     concealed: 1, /**< Show only when has focus; hide otherwise. */
 	     user_concealed: 1,
-	     saved_concealed: 1,
 	     focus_lock: 1, /**< Fix focus position on screen by always swapping
 	                      newly focused window with previously focused
 	                      window */
 	     shaped: 1, /**< Client has shaped bounding box. */
 	     floating: 1, /**< Tiled or floating? */
-	     vertical: 1,
+	     horizontal: 1,
 	     net_fullscreen: 1,
 	     has_barrier: 1;
 
-	xcb_xfixes_barrier_t barrier;
+	char name[2];
 
 	char *title;
 	char *instance_class;
@@ -414,7 +426,9 @@ typedef struct {
 	      * however many applications does not support it we cannot rely on
 	      * it. */
 	     want_popup: 1,
-	     focus_changed: 1;
+	     focus_changed: 1,
+	     focus_bounds_changed: 1,
+	     has_barrier: 1;
 
 	xcb_xfixes_barrier_t barrier; /**< Pointer barrier (around) */
 
@@ -1079,13 +1093,19 @@ print_error(xcb_generic_error_t const *const error, char const *const message)
 }
 
 static int
-check_cookie(xcb_void_cookie_t const cookie, char const *const request)
+cookie_check(Cookie const cookie)
 {
 	int ret = 0;
 	xcb_generic_error_t *error;
 
-	if ((error = xcb_request_check(conn, cookie))) {
-		print_error(error, request);
+	if ((error = xcb_request_check(conn, cookie.cookie))) {
+		print_error(error,
+#if 1 <= HEAWM_VERBOSE
+				cookie.message
+#else
+				"(unknown)"
+#endif
+		);
 		ret = error->error_code;
 		if (0 == ret)
 			unreachable;
@@ -1510,10 +1530,9 @@ box_set_position(Box *const box, int16_t const x, int16_t const y)
 static void
 box_set_size(Box *const box, uint16_t const width, uint16_t const height)
 {
-	box->layout_changed |=
+	box->size_changed |=
 		width != box->rect.width ||
 		height != box->rect.height;
-	box->should_map |= !box->rect.width;
 	box->rect.width = width;
 	box->rect.height = height;
 }
@@ -1631,23 +1650,35 @@ box_delete_barrier(Box *const box)
 }
 
 static void
-hand_unbarricade(Hand *const hand)
+hand_delete_barrier(Hand *const hand)
 {
-	delete_barrier(hand->barrier);
+	if (hand->has_barrier) {
+		hand->has_barrier = false;
+		delete_barrier(hand->barrier);
+	}
 }
 
 static void
-box_update_barrier(Box *const box, Hand const *const for_hand)
+box_update_barrier(Box *const box, Hand *const for_hand)
 {
-	box_delete_barrier(box);
+	if (!for_hand) {
+		box_delete_barrier(box);
 
-	if (!for_hand && !box->floating)
-		return;
+		if (!box->floating)
+			return;
 
-	box->has_barrier = true;
+		box->has_barrier = true;
 
-	if (XCB_NONE == box->barrier)
-		box->barrier = generate_barrier_ids();
+		if (XCB_NONE == box->barrier)
+			box->barrier = generate_barrier_ids();
+	} else {
+		hand_delete_barrier(for_hand);
+
+		if (!for_hand->barricade)
+			return;
+
+		for_hand->has_barrier = true;
+	}
 
 	xcb_xfixes_barrier_t const barrier = for_hand ? for_hand->barrier : box->barrier;
 	for (uint8_t i = 0; i < 4; ++i)
@@ -1671,35 +1702,16 @@ box_update_barrier(Box *const box, Hand const *const for_hand)
 }
 
 static void
-hand_barricade(Hand *const hand, Box *const box)
+hand_update_input_focus(Hand *const hand)
 {
-	hand_unbarricade(hand);
-	box_update_barrier(box, hand);
-}
-
-static void
-hand_update_barrier(Hand *const hand)
-{
-	Box *const focus = hand->input_focus;
-	if (hand->barricade && focus)
-		hand_barricade(hand, focus);
-}
-
-static void
-hand_refocus(Hand *const hand)
-{
-	Box const *const focus = hand->input_focus;
-	assert(!focus || !box_is_container(focus));
-	assert(!focus || box_is_focused(focus));
-
 	XDO(xcb_input_xi_set_focus, conn,
 			hand_get_wanted_focus(hand),
 			XCB_CURRENT_TIME, hand->master_keyboard);
 	XDO(xcb_input_xi_set_client_pointer, conn,
-			focus ? focus->frame : XCB_WINDOW_NONE,
+			hand->input_focus
+				? hand->input_focus->frame
+				: XCB_WINDOW_NONE,
 			hand->master_pointer);
-
-	hand_update_barrier(hand);
 }
 
 static void
@@ -1708,19 +1720,9 @@ hand_set_barrier(Hand *const hand, bool const barricade)
 	if (hand->barricade == barricade)
 		return;
 
-	if ((hand->barricade = barricade))
-		hand_refocus(hand);
-	else
-		hand_unbarricade(hand);
-}
-
-static void
-hand_focus(Hand *const hand)
-{
-	hand_refocus(hand);
-
-	if (hand->input_focus)
-		box_restore_pointer(hand->input_focus, hand);
+	hand->barricade = barricade;
+	hand->focus_bounds_changed = true;
+	hands_changed = true;
 }
 
 static bool
@@ -1858,7 +1860,7 @@ xcb_icccm_set_wm_state(xcb_window_t const window, xcb_icccm_wm_state_t const sta
 }
 
 static void
-box_update(Box *const box);
+box_update(Box *const box, int level);
 
 static void
 box_do_layout(Box const *const box)
@@ -1916,8 +1918,11 @@ box_do_layout(Box const *const box)
 }
 
 static void
-box_update_layout(Box const *const box)
+box_update_layout(Box const *const box, int level)
 {
+	if (4 <= HEAWM_VERBOSE)
+		printf("%*cupdating layout\n", level, 0);
+
 	box_do_layout(box);
 
 	uint16_t tiles = 0;
@@ -1934,10 +1939,9 @@ box_update_layout(Box const *const box)
 		xy, /**< Tile position. */
 		wh, /**< Wanted tile size. */
 		error, rem, /**< For pixel error correction. */
-		twh, /**< Computed tile size. */
 		cwh; /**< Container size. */
 
-	bool const v = box->vertical;
+	bool const v = box->horizontal;
 
 	if (tiles) {
 		cwh.x = box->rect.width;
@@ -1946,6 +1950,9 @@ box_update_layout(Box const *const box)
 		Vector const t = compute_num_columns(cwh.v[!v], cwh.v[v], tiles);
 		rc.v[!v] = t.x;
 		rc.v[v] = t.y;
+
+		if (4 <= HEAWM_VERBOSE)
+			printf("%*crc=%dx%d\n", level, 0, rc.x, rc.y);
 
 		xy.x = 0;
 		xy.y = 0;
@@ -1966,6 +1973,8 @@ box_update_layout(Box const *const box)
 
 	for (uint16_t i = 0; i < box->num_children; ++i) {
 		Box *const child = box->children[i];
+		bool should_map = true;
+
 		if (!child->floating && child->flagged) {
 			if (/* Start of row/column. */
 			    !xy.v[!v] &&
@@ -1978,6 +1987,8 @@ box_update_layout(Box const *const box)
 			}
 
 			error.v[!v] += rem.v[!v];
+
+			Vector twh; /**< Computed tile size. */
 			twh.x = wh.x + (rc.x <= error.x);
 			twh.y = wh.y + (rc.y <= error.y);
 
@@ -2008,7 +2019,9 @@ box_update_layout(Box const *const box)
 			if (cwh.y <= xy.y + twh.y)
 				gap.bottom = is_monitor ? monitor_gap : 0;
 
-			if (gap.left + gap.right < twh.x && gap.top + gap.bottom < twh.y) {
+			if (gap.left + gap.right < twh.x &&
+			    gap.top + gap.bottom < twh.y)
+			{
 				box_set_position(child,
 						box->rect.x + xy.x + gap.left,
 						box->rect.y + xy.y + gap.top);
@@ -2016,7 +2029,7 @@ box_update_layout(Box const *const box)
 						twh.x - (gap.left + gap.right),
 						twh.y - (gap.top + gap.bottom));
 			} else {
-				box_set_size(child, 0, 0);
+				should_map = false;
 			}
 
 			--tiles;
@@ -2031,7 +2044,7 @@ box_update_layout(Box const *const box)
 					error.v[v] -= rc.v[v];
 			}
 		} else if (!child->flagged) {
-			box_set_size(child, 0, 0);
+			should_map = false;
 		} else if (child->floating) {
 			xcb_rectangle_t rect = child->urect;
 
@@ -2050,7 +2063,10 @@ box_update_layout(Box const *const box)
 			box_set_size(child, rect.width, rect.height);
 		}
 
-		box_update(child);
+		if (should_map != child->mapped) {
+			child->mapped = should_map;
+			child->mapped_changed = true;
+		}
 	}
 }
 
@@ -2060,9 +2076,9 @@ box_update_net(Box const *const box)
 	xcb_atom_t list[10];
 	uint32_t i = 0;
 
-	if (!box->rect.width)
+	if (!box->mapped)
 		list[i++] = ATOM(_NET_WM_STATE_HIDDEN);
-	else if (box->focus_seq == root->focus_seq)
+	else if (box_is_focused(box))
 		list[i++] = ATOM(_NET_WM_STATE_FOCUSED);
 
 	if (box->net_fullscreen)
@@ -2155,20 +2171,99 @@ box_get_foot(Box const *box)
 }
 
 static void
-box_update(Box *const box)
+box_update_window(Box *const box, int level)
 {
-	static int depth = 0;
+	uint32_t mask = 0;
+	uint32_t list[7];
+	uint8_t i = 0;
 
+	if (box->position_changed) {
+		mask |=
+			XCB_CONFIG_WINDOW_X |
+			XCB_CONFIG_WINDOW_Y;
+		list[i++] = box->rect.x;
+		list[i++] = box->rect.y;
+	}
+
+	if (box->size_changed) {
+		mask |=
+			XCB_CONFIG_WINDOW_WIDTH |
+			XCB_CONFIG_WINDOW_HEIGHT;
+		list[i++] = box->rect.width;
+		list[i++] = box->rect.height;
+	}
+
+	if (box->focus_changed && !box_is_focused(box))
+		box->focus_changed = false;
+
+	if (box->focus_changed || box->layout_changed) {
+		Box const *const foot = box_get_foot(box);
+		if (foot) {
+			mask |= XCB_CONFIG_WINDOW_SIBLING;
+			Body const *const body = &bodies[box->body];
+			list[i++] = root->focus_seq == foot->focus_seq
+				? body->label_layer
+				: body->float_layer;
+		}
+
+		mask |= XCB_CONFIG_WINDOW_STACK_MODE;
+		list[i++] = XCB_STACK_MODE_BELOW;
+	}
+
+	if (0 < i) {
+		if (4 <= HEAWM_VERBOSE)
+			printf("%*cconfigure (%d)\n", level, 0, i);
+		XDO(xcb_configure_window, conn, box->frame, mask, list);
+	}
+
+	if (box->size_changed) {
+		box_update_shape(box);
+
+		/* Update window size inside frame. */
+		XDO(xcb_configure_window, conn, box->window,
+				XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+				(uint32_t[]){
+					box->rect.width,
+					box->rect.height,
+				});
+	}
+
+	if (box->position_changed || box->size_changed || box->layout_changed)
+		box_update_barrier(box, NULL);
+
+	if (box->mapped_changed || box->focus_changed)
+		box_update_net(box);
+
+	if (box->size_changed || box->position_changed || box->focus_changed) {
+		for_each_hand {
+			if (hand->input_focus == box) {
+				hand->focus_bounds_changed |= box->size_changed || box->position_changed;
+				hands_changed |= hand->focus_bounds_changed;
+			}
+		}
+	}
+
+	if (box->mapped_changed) {
+		if (4 <= HEAWM_VERBOSE)
+			printf("%*cmapping\n", level, 0);
+
+		xcb_icccm_set_wm_state(box->window, XCB_ICCCM_WM_STATE_NORMAL);
+		XDO(xcb_map_window, conn, box->frame);
+	}
+}
+
+static void
+box_update(Box *const box, int level)
+{
 	if (box != root && 3 <= HEAWM_VERBOSE)
 		printf(
-				"%*.s%p %d (%.*s):"
+				"%*c(%d %.*s):"
 				" 0x%x->0x%x/0x%x"
 				" %ux%u+%d+%d u%ux%u+%d+%d"
 				" H=%d C=%d V=%d %c%c%c%c"
 				" (%s %s)\"%.15s\" "
 				"\n",
-				depth, "",
-				(void *)box,
+				level, 0,
 
 				box->focus_seq,
 
@@ -2191,132 +2286,71 @@ box_update(Box *const box)
 				box_get_class(box),
 				box->title);
 
-	depth += 2;
-
-	uint32_t mask = 0;
-	uint32_t list[7];
-	uint8_t i = 0;
-
-	bool const content_changed = box->content_changed;
-	bool const position_changed = box->position_changed;
-	bool const should_focus = box->should_focus;
-	bool const layout_changed = box->layout_changed;
-	bool const should_map = box->should_map;
-	bool const label_changed = box->label_changed;
-
-	box->position_changed = false;
-	box->layout_changed = false;
-	box->should_map = false;
-	box->content_changed = false;
-	box->should_focus = false;
-	box->label_changed = false;
-
-	if (position_changed) {
-		mask |=
-			XCB_CONFIG_WINDOW_X |
-			XCB_CONFIG_WINDOW_Y;
-		list[i++] = box->rect.x;
-		list[i++] = box->rect.y;
-	}
-
-	if ((position_changed || layout_changed) && box->parent) {
-		if (0 < box->rect.width) {
-			mask |=
-				XCB_CONFIG_WINDOW_WIDTH |
-				XCB_CONFIG_WINDOW_HEIGHT;
-			list[i++] = box->rect.width;
-			list[i++] = box->rect.height;
-
-			box_update_layout(box);
-		} else {
+	if (box->mapped_changed) {
+		if (!box->mapped) {
 			box_delete_labels(box);
 			box_delete_barrier(box);
 
-			if (XCB_WINDOW_NONE != box->window) {
+			if (!box_is_container(box)) {
 				xcb_icccm_set_wm_state(box->window, XCB_ICCCM_WM_STATE_ICONIC);
 				box_update_net(box);
 				XDO(xcb_unmap_window, conn, box->frame);
 			}
-
-			for (uint16_t i = 0; i < box->num_children; ++i) {
-				Box *const child = box->children[i];
-				box_set_size(child, 0, 0);
-				box_update(child);
-			}
-
-			goto out;
 		}
-	} else if (content_changed) {
+
 		for (uint16_t i = 0; i < box->num_children; ++i) {
 			Box *const child = box->children[i];
-			box_update(child);
-		}
-	}
-
-	if (!box->rect.width)
-		goto out;
-
-	if (!box_is_container(box)) {
-		if (0 < i) {
-			Box const *const foot = box_get_foot(box);
-			if (foot) {
-				mask |= XCB_CONFIG_WINDOW_SIBLING;
-				Body const *const body = &bodies[box->body];
-				list[i++] = root->focus_seq == foot->focus_seq
-					? body->label_layer
-					: body->float_layer;
-			}
-
-			mask |= XCB_CONFIG_WINDOW_STACK_MODE;
-			list[i++] = XCB_STACK_MODE_BELOW;
-			XDO(xcb_configure_window, conn, box->frame, mask, list);
-
-			if (layout_changed || position_changed)
-				box_update_barrier(box, NULL);
-
-			if (layout_changed) {
-				box_update_shape(box);
-
-				/* Update window size inside frame. */
-				mask = XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT;
-				list[0] = box->rect.width;
-				list[1] = box->rect.height;
-				XDO(xcb_configure_window, conn, box->window, mask, list);
-			}
-		}
-
-		/* Map only after configured. */
-		if (should_map) {
-			xcb_icccm_set_wm_state(box->window, XCB_ICCCM_WM_STATE_NORMAL);
-			box_update_net(box);
-			XDO(xcb_map_window, conn, box->frame);
-		}
-
-		if ((layout_changed || position_changed || should_focus) && box_is_focused(box) && !box_is_container(box)) {
-			box_update_net(box);
-
-			/* Hand focus can only be updated after window is mapped. */
-			for_each_hand {
-				Box const *const focus = hand->input_focus;
-				if (box == focus) {
-					if (should_focus)
-						hand_focus(hand);
-					else
-						hand_update_barrier(hand);
-				}
+			if (child->mapped != box->mapped) {
+				child->mapped_changed = true;
+				child->mapped = box->mapped;
+				box->content_changed = true;
 			}
 		}
 	}
 
-	if (layout_changed || position_changed || label_changed)
-		box_update_label(box);
+	if (box->focus_changed && box_is_container(box))
+		box->layout_changed = true;
 
-out:
-	depth -= 2;
+	if (box->mapped &&
+	    (box->position_changed ||
+	     box->size_changed ||
+	     box->layout_changed))
+	{
+		box_update_layout(box, level + 1);
+		box->content_changed = true;
+	}
+
+	if (box->content_changed) {
+		box->content_changed = false;
+		for (uint16_t i = 0; i < box->num_children; ++i) {
+			Box *const child = box->children[i];
+			box_update(child, level + 2);
+		}
+	}
+
+	if (box->mapped) {
+		if (box->position_changed ||
+		    box->size_changed ||
+		    box->label_changed ||
+		    box->mapped_changed ||
+		    box->focus_changed)
+			box_update_label(box);
+
+		if (!box_is_container(box))
+			box_update_window(box, level + 1);
+
+		box->label_changed = false;
+		box->layout_changed = false;
+		box->size_changed = false;
+		box->position_changed = false;
+		box->focus_changed = false;
+	}
+
+	box->mapped_changed = false;
 }
 
 static void
-box_update_net_client_list(Box const *const box)
+box_append_net_client_list(Box const *const box)
 {
 	Body const *const body = &bodies[box->body];
 
@@ -2490,21 +2524,45 @@ box_chase_box(Box const *box, unsigned const min_percent)
 
 
 static void
-hand_update_focus(Hand const *const hand)
+hand_do_update(Hand *const hand)
 {
-	if (hand->input_focus)
-		box_chase_box(hand->input_focus, 1024 / 15);
+	if (hand->focus_changed) {
+		hand->focus_changed = false;
+		hand->focus_bounds_changed = true;
 
-	if (hand != hands)
-		return;
+		if (4 <= HEAWM_VERBOSE)
+			printf("hand focus changed\n");
 
-	for_each_body
-		XDO(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
-				body->screen->root, ATOM(_NET_ACTIVE_WINDOW),
-				XCB_ATOM_WINDOW, 32,
-				1, hand->input_focus && body_index == hand->input_focus->body
-					? &hand->input_focus->window
-					: &(uint32_t const){ XCB_WINDOW_NONE });
+		hand_update_input_focus(hand);
+
+		/* Restore after update to avoid spurious Enter events. */
+		if (hand->input_focus)
+			box_restore_pointer(hand->input_focus, hand);
+
+		if (hand == hands)
+			for_each_body
+				XDO(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
+						body->screen->root, ATOM(_NET_ACTIVE_WINDOW),
+						XCB_ATOM_WINDOW, 32,
+						1, hand->input_focus && body_index == hand->input_focus->body
+							? &hand->input_focus->window
+							: &(uint32_t const){ XCB_WINDOW_NONE });
+	}
+
+	if (hand->focus_bounds_changed) {
+		hand->focus_bounds_changed = false;
+
+		if (4 <= HEAWM_VERBOSE)
+			printf("hand focus bounds changed\n");
+
+		if (hand->input_focus) {
+			box_chase_box(hand->input_focus, 1024 / 15);
+			box_update_barrier(hand->input_focus, hand);
+		}
+	}
+
+	if (!hand->input_focus)
+		hand_delete_barrier(hand);
 }
 
 /**
@@ -2515,17 +2573,17 @@ do_update(void)
 {
 	do {
 		while (root->content_changed)
-			box_update(root);
+			box_update(root, 0);
 
 		if (!hands_changed)
 			break;
 		hands_changed = false;
 
+		if (5 <= HEAWM_VERBOSE)
+			printf("update hands\n");
+
 		for_each_hand {
-			if (hand->focus_changed) {
-				hand->focus_changed = false;
-				hand_update_focus(hand);
-			}
+			hand_do_update(hand);
 		}
 	} while (root->content_changed);
 
@@ -2608,7 +2666,7 @@ hand_focus_box(Hand *hand, Box *box);
  * Fill |*boxes| with the n latest focused box associated with hand
  */
 static void
-hand_find_recents(Hand const *const hand, Box *root, uint32_t const focus_seq, Box **const boxes, uint32_t const n)
+hand_find_recents(Hand const *const hand, Box *root, Box **const boxes, uint32_t const n)
 {
 	static Box const EMPTY_BOX;
 
@@ -2624,7 +2682,7 @@ hand_find_recents(Hand const *const hand, Box *root, uint32_t const focus_seq, B
 		    !box_is_container(box) &&
 		    (HAND_NONE == box->focus_hand ||
 		     (/* Not focused. */
-		      focus_seq != box->focus_seq &&
+		      root->focus_seq != box->focus_seq &&
 		      /* But have been focused by us. */
 		      hand - hands == box->focus_hand) ||
 		      box == hand->input_focus))
@@ -2646,19 +2704,17 @@ hand_find_recents(Hand const *const hand, Box *root, uint32_t const focus_seq, B
  * Make sure all hand has focused window.
  */
 static void
-hands_try_focus_all(uint32_t focus_seq)
+hands_try_focus_all(void)
 {
 	for_each_hand {
 		if (hand->input_focus)
 			continue;
 
 		Box *optimum;
-		hand_find_recents(hand, root, focus_seq, &optimum, 1);
+		hand_find_recents(hand, root, &optimum, 1);
 
-		if (optimum) {
+		if (optimum)
 			hand_focus_box(hand, optimum);
-			focus_seq = root->focus_seq;
-		}
 	}
 }
 
@@ -2750,10 +2806,6 @@ box_free(Box *const box)
 static void
 box_delete(Box *box)
 {
-	/* If we removed the currently selected box, and there is only one
-	 * hand, root->focus_seq will dropped that could make a previously
-	 * selected seems like it's selected (possibly by someone other). */
-	uint32_t const real_focus_seq = root->focus_seq;
 	bool focus_changed = false;
 
 	assert(!box->num_children);
@@ -2762,16 +2814,15 @@ box_delete(Box *box)
 		if (box == hand->mode_box)
 			hand_leave_mode(hand);
 
-		/* Forget current focus. */
 		if (box == hand->focus) {
-			focus_changed = true;
 			hand->focus = NULL;
+			focus_changed = true;
 		}
 
 		if (box == hand->input_focus) {
-			focus_changed = true;
 			hand->input_focus = NULL;
-			assert(box_is_focused(box));
+			focus_changed = true;
+			hand->focus_changed = true;
 		}
 
 		if (box == hand->latest_input[0]) {
@@ -2783,22 +2834,18 @@ box_delete(Box *box)
 		}
 	}
 
-	box_delete_barrier(box);
-	box_delete_labels(box);
-
 	Box *const box_parent = box->parent;
 	box_unparent(box);
 
 	if (focus_changed) {
-		/* Strictly after unparent: if there is only one hand and we
-		 * have just now deleted its focused box, layout may not be
-		 * updated properly, because after unparent the maximum
-		 * focus_seq is not focused in any hand. and when we try to
-		 * focus that box it seems like it has been already focused.
-		 * since root->focus_seq == that_box->focus_seq. */
+		hands_changed = true;
+
 		hands_update_focus();
-		hands_try_focus_all(real_focus_seq);
+		hands_try_focus_all();
 	}
+
+	box_delete_barrier(box);
+	box_delete_labels(box);
 
 	if (!box_is_container(box)) {
 		XDO(xcb_shape_select_input, conn, box->window, false);
@@ -2859,6 +2906,7 @@ box_vacuum(Box *const box)
 		child->conceal_seq = box->conceal_seq;
 		child->hide_label |= box->hide_label;
 		child->floating = box->floating;
+		child->layout_changed = true;
 		child->urect = box->urect;
 		box_reparent(box->parent, box_get_pos(box), child);
 	}
@@ -2956,11 +3004,10 @@ box_new(void)
 {
 	Box *box = check_alloc(calloc(1, sizeof *box + num_hands * sizeof(BoxPointer)));
 	box->focus_hand = HAND_NONE;
-	/* An initially zeroed out box->{x,y} does not mean box->window is
-	 * really at this position so marking it changed will force a
-	 * reconfiguration. */
+	/* Force reconfiguration. */
 	box->position_changed = true;
-	box->vertical = true;
+	box->size_changed = true;
+	box->layout_changed = true;
 	return box;
 }
 
@@ -3128,15 +3175,14 @@ hand_focus_box_internal(Hand *const hand, Box *const box)
 	if (hand->input_focus)
 		box_save_pointer(hand->input_focus, hand);
 
-	if (hand->input_focus)
-		box_propagate_change(hand->input_focus)->label_changed = true;
-	else if (hand->focus)
-		box_propagate_change(hand->focus)->label_changed = true;
-
-	if (hand->focus) {
-		box_propagate_labels_change(hand->focus);
-		hand->focus->layout_changed |= box_is_container(hand->focus);
+	Box *const old_focus = hand->input_focus ? hand->input_focus : hand->focus;
+	if (old_focus) {
+		box_propagate_change(old_focus);
+		box_propagate_labels_change(old_focus);
+		old_focus->focus_changed = true;
 	}
+	if (hand->focus)
+		hand->focus->focus_changed = true;
 
 	/* Find most upper locked box. */
 	Box *locked = box;
@@ -3145,7 +3191,7 @@ hand_focus_box_internal(Hand *const hand, Box *const box)
 			locked = b;
 
 	Box *recents[2];
-	hand_find_recents(hand, locked, root->focus_seq, recents, ARRAY_SIZE(recents));
+	hand_find_recents(hand, locked, recents, ARRAY_SIZE(recents));
 	if (4 <= HEAWM_VERBOSE)
 		printf("recents: %s <-> %s  new: %s  locked: %s\n",
 				recents[0] ? recents[0]->name : "?",
@@ -3177,14 +3223,9 @@ hand_focus_box_internal(Hand *const hand, Box *const box)
 				sizeof(BoxPointer));
 
 	if ((hand->input_focus = new_input_focus))
-		hand->input_focus->should_focus = true;
+		hand->input_focus->focus_changed = true;
 
-	box->label_changed = true;
-	box->layout_changed |=
-		/* All children must be shown. */
-		box_is_container(box) ||
-		/* Must be restacked. */
-		box->floating;
+	box->focus_changed = true;
 	hands_update_focus();
 
 	box_swap(box, recents[1]);
@@ -3376,11 +3417,14 @@ box_reparent_into(Box *const parent, Box *const child)
 	if (!box_is_container(parent)) {
 		Box *container = box_new();
 
-		if (box_get_foot(parent))
+		if (box_get_foot(parent)) {
 			child->floating = false;
+			child->layout_changed = true;
+		}
 
 		if ((container->floating = parent->floating)) {
 			parent->floating = false;
+			parent->layout_changed = true;
 			container->urect = parent->urect;
 		}
 
@@ -3403,7 +3447,8 @@ box_set_floating(Box *const box, bool floating)
 	box->parent->layout_changed = true;
 	if (!box->user_concealed)
 		box->concealed = false;
-	box_propagate_change(box)->floating = floating;
+	box->floating = floating;
+	box_propagate_change(box)->layout_changed = true;
 }
 
 static void
@@ -3603,44 +3648,48 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 	}
 
 	Body *const body = &bodies[parent->body];
-	XDO(xcb_create_window, conn, XCB_COPY_FROM_PARENT,
-			box->frame,
-			body->screen->root,
-			-1, -1, 1, 1, /* Rect. */
-			0, /* Border. */
-			XCB_WINDOW_CLASS_INPUT_OUTPUT,
-			XCB_COPY_FROM_PARENT,
-			XCB_CW_OVERRIDE_REDIRECT |
-			XCB_CW_EVENT_MASK,
-			(uint32_t const[]){
-				true,
-				FRAME_WINDOW_EVENT_MASK
-			});
 
-	XDO(xcb_change_save_set, conn, XCB_SET_MODE_INSERT, window);
+	Cookie const cookies[] = {
+		XCOOKIE(xcb_create_window, conn, XCB_COPY_FROM_PARENT,
+				box->frame,
+				body->screen->root,
+				-1, -1, 1, 1, /* Rect. */
+				0, /* Border. */
+				XCB_WINDOW_CLASS_INPUT_OUTPUT,
+				XCB_COPY_FROM_PARENT,
+				XCB_CW_OVERRIDE_REDIRECT |
+				XCB_CW_EVENT_MASK,
+				(uint32_t const[]){
+					true,
+					FRAME_WINDOW_EVENT_MASK
+				}),
 
-	if (XCHECK(xcb_reparent_window, conn, window, box->frame, 0, 0))
-		goto fail;
+		XCOOKIE(xcb_change_save_set, conn, XCB_SET_MODE_INSERT, window),
 
-	if (XCHECK(xcb_map_window, conn, window))
-		goto fail;
+		XCOOKIE(xcb_reparent_window, conn, window, box->frame, 0, 0),
 
-	if (XCHECK(xcb_change_window_attributes, conn, window,
+		XCOOKIE(xcb_change_window_attributes, conn, window,
 				XCB_CW_EVENT_MASK,
 				(uint32_t const[]){
 					CLIENT_WINDOW_EVENT_MASK
-				}))
-		goto fail;
+				}),
 
-	XDO(xcb_input_xi_select_events, conn, window, 1,
-			XI_EVENT_MASK(XCB_INPUT_DEVICE_ALL,
-					XCB_INPUT_XI_EVENT_MASK_BARRIER_HIT |
-					XCB_INPUT_XI_EVENT_MASK_FOCUS_IN |
-					XCB_INPUT_XI_EVENT_MASK_ENTER));
+		XCOOKIE(xcb_input_xi_select_events, conn, window, 1,
+				XI_EVENT_MASK(XCB_INPUT_DEVICE_ALL,
+						XCB_INPUT_XI_EVENT_MASK_BARRIER_HIT |
+						XCB_INPUT_XI_EVENT_MASK_FOCUS_IN |
+						XCB_INPUT_XI_EVENT_MASK_ENTER)),
+
+		XCOOKIE(xcb_map_window, conn, window),
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(cookies); ++i)
+		if (cookie_check(cookies[i]))
+			goto fail;
 
 	XDO(xcb_shape_select_input, conn, window, true);
 
-	box_update_net_client_list(box);
+	box_append_net_client_list(box);
 
 	return box;
 
@@ -4058,7 +4107,10 @@ body_update_heads(Body *const body)
 
 		head->urect.width = body->screen->width_in_millimeters;
 		head->urect.height = body->screen->height_in_millimeters;
-		head->floating = 1;
+		head->floating = true;
+		head->layout_changed = true;
+		head->mapped = true;
+		head->mapped_changed = true;
 		box_set_size(head, body->screen->width_in_pixels, body->screen->height_in_pixels);
 		box_set_position(head, 0, 0);
 	} else {
@@ -4093,7 +4145,10 @@ body_update_heads(Body *const body)
 				head->body = body - bodies;
 				head->instance_class = name;
 				head->num_visible = 1;
-				head->floating = 1;
+				head->floating = true;
+				head->layout_changed = true;
+				head->mapped = true;
+				head->mapped_changed = true;
 				name = NULL;
 
 				/* Do not name it yet. */
@@ -4454,7 +4509,7 @@ handle_input_focus_in(xcb_input_focus_in_event_t const *const event)
 	    /* Focus in event generated for root (and no focus out) but we have
 	     * to forcefully focus it again to make it really focused... */
 	    !hand->input_focus)
-		hand_refocus(hand);
+		hand_update_input_focus(hand);
 }
 
 static void
@@ -4678,28 +4733,10 @@ static Hand *
 hand_find_by_master_pointer(xcb_input_device_id_t const pointer);
 
 static void
-hand_update(Hand *const hand, uint8_t index, char const *const name, int const name_size)
-{
-	for (uint32_t i = 0; i < num_hand_rules; ++i) {
-		HandRule const *const rule = &hand_rules[i];
-		if (rule->index != HAND_NONE && rule->index != index)
-			continue;
-		if (rule->name && strncmp(rule->name, name, name_size))
-			continue;
-
-		hand->color = rule->color;
-		break;
-	}
-
-	/* It is safe to call because we know that hand currently
-	 * has no focus. */
-	hand_refocus(hand);
-}
-
-static void
 hand_setup(Hand *const hand)
 {
 	hand->want_focus = true;
+	hand->focus_changed = true;
 
 	hand_grab_pointer(hand);
 	hand_grab_keyboard(hand);
@@ -4744,7 +4781,7 @@ hand_setup(Hand *const hand)
 static void
 hand_destroy(Hand *const hand)
 {
-	hand_unbarricade(hand);
+	hand_delete_barrier(hand);
 }
 
 static void
@@ -4812,7 +4849,17 @@ hands_update(void)
 			int const name_size = xcb_input_xi_device_info_name_length(input_device) - strlen(" pointer");
 			char const *const name = xcb_input_xi_device_info_name(input_device);
 
-			hand_update(hand, hand - new_hands, name, name_size);
+			for (uint32_t i = 0; i < num_hand_rules; ++i) {
+				HandRule const *const rule = &hand_rules[i];
+				if (rule->index != HAND_NONE && rule->index != (hand - new_hands))
+					continue;
+				if (rule->name && strncmp(rule->name, name, name_size))
+					continue;
+
+				hand->color = rule->color;
+				break;
+			}
+
 			++hand;
 		}
 
@@ -4863,7 +4910,7 @@ hands_update(void)
 	hands = new_hands;
 	num_hands = new_num_hands;
 
-	hands_try_focus_all(root->focus_seq);
+	hands_try_focus_all();
 
 	/*MAN(HOOKS)
 	 * .TP
@@ -4925,7 +4972,7 @@ hand_get_latest_input(Hand const *const hand)
 	Box *ret = hand->latest_input[hand->focus == hand->latest_input[0]];
 	if (!ret) {
 		Box *recents[2];
-		hand_find_recents(hand, root, root->focus_seq, recents, 2);
+		hand_find_recents(hand, root, recents, 2);
 		ret = recents[hand->focus == recents[0]];
 	}
 	return ret;
@@ -5033,21 +5080,13 @@ hand_start_move(Hand *const hand)
 		hand_focus_box(hand, box);
 }
 
-static Box *
-box_get_parent_checked(Box const *const box)
-{
-	if (box->parent &&
-	    /* Is addressable by user. */
-	    *box->parent->name)
-		return box->parent;
-
-	return NULL;
-}
-
 static void
 hand_focus_parent(Hand *const hand)
 {
-	if (hand->focus && box_get_parent_checked(hand->focus))
+	if (hand->focus &&
+	    hand->focus->parent &&
+	    /* Addressable by user. */
+	    *hand->focus->parent->name)
 		hand_focus_box(hand, hand->focus->parent);
 }
 
@@ -5070,14 +5109,16 @@ box_maximize(Box *box, bool const recursive)
 	int zoom = 1 != box->num_visible;
 	do {
 		if (!zoom) {
-			if (box->conceal_seq != conceal_seq)
+			if (box->conceal_seq != conceal_seq ||
+			    1 != box->num_visible)
 				break;
 			box->num_visible = 0;
+			box->layout_changed = true;
 		} else if (1 != box->num_visible) {
 			box->conceal_seq = root->conceal_seq;
 			box->num_visible = 1;
+			box->layout_changed = true;
 		}
-		box->layout_changed = true;
 	} while ((recursive && !box->floating) && (box = box->parent, true));
 }
 
@@ -5823,7 +5864,7 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 		if (!hand->focus)
 			break;
 
-		hand->focus->parent->vertical ^= true;
+		hand->focus->parent->horizontal ^= true;
 		box_propagate_change(hand->focus->parent)->layout_changed = true;
 		break;
 
