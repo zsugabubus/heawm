@@ -27,7 +27,6 @@
 #include <xcb/shape.h>
 #include <xcb/xcb.h>
 #include <xcb/xcb_atom.h>
-#include <xcb/xcb_aux.h>
 #include <xcb/xcb_cursor.h>
 #include <xcb/xcb_event.h>
 #include <xcb/xcb_ewmh.h>
@@ -602,7 +601,7 @@ static BoxRule box_rules[] = {
 		.name = "b",
 	},
 	{
-		NULL, "Chrome",
+		NULL, "Chromium",
 		.name = "c",
 	},
 	{
@@ -662,12 +661,9 @@ enum {
 static xcb_atom_t atoms[ARRAY_SIZE(ATOM_NAMES)];
 
 static xcb_connection_t *conn;
-/* https://www.x.org/releases/X11R7.7/doc/inputproto/XI2proto.txt */
 static uint8_t xi_opcode; /** major opcode of XInput extension */
-/* https://www.x.org/releases/X11R7.7/doc/xextproto/shape.html */
-static uint8_t shape_base_event; /** major opcode of Shape extension */
-/* https://www.x.org/releases/X11R7.5/doc/randrproto/randrproto.txt */
-static uint8_t randr_base_event; /** beginning of XRandR event range */
+static uint8_t shape_base_event; /**< Major opcode of Shape extension. */
+static uint8_t randr_base_event; /**< Beginning of XRandR event range. */
 static uint8_t xkb_base_event; /** beginning of XKB event range */
 static struct xkb_context *xkb_context;
 static xcb_key_symbols_t *symbols;
@@ -3742,18 +3738,21 @@ init_extensions(void)
 	xcb_prefetch_extension_data(conn, &xcb_xfixes_id);
 	xcb_prefetch_extension_data(conn, &xcb_big_requests_id);
 
+	/* https://www.x.org/releases/X11R7.7/doc/inputproto/XI2proto.txt */
 	ext = xcb_get_extension_data(conn, &xcb_input_id);
 	if (!ext->present)
 		fprintf(stderr, "XInput extension missing; input will not work\n");
 	else
 		xi_opcode = ext->major_opcode;
 
+	/* https://www.x.org/releases/X11R7.5/doc/randrproto/randrproto.txt */
 	ext = xcb_get_extension_data(conn, &xcb_randr_id);
 	if (!ext->present)
-		fprintf(stderr, "RandR extension missing; multi-head display will not work properly\n");
+		fprintf(stderr, "RandR extension missing; multihead display will not work properly\n");
 	else
 		randr_base_event = ext->first_event;
 
+	/* https://www.x.org/releases/X11R7.7/doc/xextproto/shape.html */
 	ext = xcb_get_extension_data(conn, &xcb_shape_id);
 	if (!ext->present)
 		fprintf(stderr, "Shape extension missing; labels cannot be made transparent\n");
@@ -3784,7 +3783,7 @@ init_extensions(void)
 	/* https://www.x.org/releases/X11R7.7/doc/fixesproto/fixesproto.txt */
 	ext = xcb_get_extension_data(conn, &xcb_xfixes_id);
 	if (!ext->present) {
-		fprintf(stderr, "XFixes extension missing; pointer barricading will not work\n");
+		fprintf(stderr, "XFixes extension missing; pointer barriers will not work\n");
 	} else {
 		XCB_GET_REPLY(reply, xcb_xfixes_query_version,
 				XCB_XFIXES_MAJOR_VERSION, XCB_XFIXES_MINOR_VERSION);
