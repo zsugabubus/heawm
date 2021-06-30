@@ -230,6 +230,8 @@ enum FloatResize {
 	FLOAT_RECT,
 };
 
+/* NOTE: Iterators on the same subtree cannot be nested because the common
+ * Box.iter is used. */
 #define for_each_box(x, root) \
 	for (bool loop_ = ((x) = (root), true); loop_ && ((x)->iter = 0, true); ({ \
 		while ((x)->num_children <= (x)->iter) { \
@@ -5603,6 +5605,19 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 		} else if (*hand->user_input) {
 			return;
 		/* Accept some special commands until there is no user input. */
+		} else if (XKB_KEY_dollar == sym) {
+			Box *b;
+			for_each_box(b, hand->mode_box)
+				box_set_placeholder_name(b);
+
+		again:
+			for_each_box(b, hand->mode_box) {
+				if (box_has_placeholder_name(b)) {
+					box_clear_name(b);
+					box_name(b);
+					goto again;
+				}
+			}
 		} else if (XKB_KEY_minus == sym ||
 		           XKB_KEY_plus == sym)
 		{
@@ -5900,6 +5915,9 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 	 * .BR "*" ,\  /
 	 * On a container show/hide name labels recursively; otherwise
 	 * show/hide any labels that obscures part of the window.
+	 * .TP
+	 * .BR $
+	 * Reset names recursively.
 	 * .RE
 	 */
 	case XKB_KEY_n:
