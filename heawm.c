@@ -1388,12 +1388,9 @@ box_name(Box *const box)
 	if (box_has_placeholder_name(box))
 		return;
 
-	assert(box != root && box->parent);
+	assert(box->parent);
 
-	bool const is_container = box_is_container(box);
-	struct {
-		uint32_t focus_seq;
-	} letters[(unsigned)EXTREMAL_NAME_CHAR + 1] = { { UINT32_MAX }, /* 0, 0, 0, ... */ };
+	uint32_t letters[(unsigned)EXTREMAL_NAME_CHAR + 1] = { UINT32_MAX, /* 0, 0, 0, ... */ };
 
 	uint8_t n = strnlen(box->name, sizeof box->name);
 	n -= !!n;
@@ -1405,8 +1402,8 @@ box_name(Box *const box)
 		if (!(rule->name[n] && !rule->name[n + 1]))
 			continue;
 
-		/* Try assigning reserved letters last. */
-		letters[(unsigned char)rule->name[n]].focus_seq = root->focus_seq + 1;
+		/* Assign reserved letters last. */
+		letters[(unsigned char)rule->name[n]] = root->focus_seq + 1;
 
 		if (!optimum && box_rule_match(box, rule))
 			optimum = rule->name[n];
@@ -1425,46 +1422,49 @@ box_name(Box *const box)
 
 	optimum = (box_is_container(box) ? toupper : tolower)(optimum);
 
-#define NAME_MATCHES(test_box) \
-	(/* Prefix matches? */ \
-	 !memcmp((test_box)->name, box->name, n) && \
+#define NAME_MATCHES(check_self) \
+	((!check_self || test != box) && \
+	 /* Prefix matches? */ \
+	 !memcmp(test->name, box->name, n) && \
 	 /* End of name? */ \
-	 ((uint8_t)membersizeof(Box, name) <= n + 1 || !(test_box)->name[n + 1]))
+	 ((uint8_t)membersizeof(Box, name) <= n + 1 || !test->name[n + 1]))
 
-	/* Exclude names of children so we can always move at least one downwards. */
+#define EXCLUDE(check_self) \
+	if (NAME_MATCHES(check_self)) \
+		letters[(unsigned char)test->name[n]] = UINT32_MAX;
+
+	Box *test;
+
+	/* Ensure we can more vertically upwards. */
+	for (test = box; (test = test->parent);)
+		EXCLUDE(true);
+
+	/* Ensure we can move vertically downwards (at least one). */
 	for (uint16_t i = 0; i < box->num_children; ++i) {
-		Box const *const child = box->children[i];
-		if (NAME_MATCHES(child))
-			letters[(unsigned char)child->name[n]].focus_seq = UINT32_MAX;
+		test = box->children[i];
+		EXCLUDE(false);
 	}
 
-	if (!box_is_monitor(box) && box_is_monitor(box->parent))
-		/* Exclude names of neck (treat all necks from all heads as children). */
+	/* Ensure we can move horizontally. */
+	if (!optimum && !box_is_monitor(box) && box_is_monitor(box->parent))
 		for (uint16_t i = 0; i < root->num_children; ++i) {
 			Box const *const head = root->children[i];
 			for (uint16_t j = 0; j < head->num_children; ++j) {
-				Box const *const neck = head->children[j];
-				if (neck != box && NAME_MATCHES(neck))
-					letters[(unsigned char)neck->name[n]].focus_seq = UINT32_MAX;
+				test = head->children[j];
+				EXCLUDE(true);
 			}
 		}
 	else
-		/* Exclude names of siblings so we can always move horizontally. */
 		for (uint16_t i = 0; i < box->parent->num_children; ++i) {
-			Box const *const child = box->parent->children[i];
-			if (child != box && NAME_MATCHES(child))
-				letters[(unsigned char)child->name[n]].focus_seq = UINT32_MAX;
+			test = box->parent->children[i];
+			EXCLUDE(true);
 		}
 
-	/* Exclude parent names so we can always move upwards. */
-	for (Box const *parent = box; (parent = parent->parent);)
-		if (NAME_MATCHES(parent))
-			letters[(unsigned char)parent->name[n]].focus_seq = UINT32_MAX;
+#undef EXCLUDE
 
-	Box *test;
 	for_each_box(test, root)
-		if (test != box && NAME_MATCHES(test)) {
-			uint32_t *const p = &letters[(unsigned char)test->name[n]].focus_seq;
+		if (NAME_MATCHES(true)) {
+			uint32_t *const p = &letters[(unsigned char)test->name[n]];
 			/* Use a non-zero focus_seq to avoid treating never
 			 * focused boxes as free letters. */
 			if (*p < test->focus_seq + 2)
@@ -1473,14 +1473,14 @@ box_name(Box *const box)
 
 #undef NAME_MATCHES
 
-	if (UINT32_MAX == letters[(unsigned char)optimum].focus_seq)
-		for (unsigned char start = is_container ? 'A' : 'a', end = start + ('Z' - 'A');
+	if (UINT32_MAX == letters[(unsigned char)optimum])
+		for (unsigned char start = box_is_container(box) ? 'A' : 'a', end = start + ('Z' - 'A');
 		     start <= end;
 		     ++start)
-			if (letters[start].focus_seq < letters[(unsigned char)optimum].focus_seq)
+			if (letters[start] < letters[(unsigned char)optimum])
 				optimum = start;
 
-	if (UINT32_MAX == letters[(unsigned char)optimum].focus_seq) {
+	if (UINT32_MAX == letters[(unsigned char)optimum]) {
 		abort();
 		return;
 	}
@@ -1489,6 +1489,7 @@ box_name(Box *const box)
 	memset(box->name + n, 0, sizeof box->name - n);
 
 	if (!box_is_container(box))
+		/* TODO: Maybe move it inside xupdate. */
 		XDO(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
 				box->window, ATOM(_HEAWM_NAME),
 				XCB_ATOM_STRING, 8,
@@ -2175,7 +2176,7 @@ box_update_window(Box *const box, int level)
 {
 	uint32_t mask = 0;
 	uint32_t list[7];
-	uint8_t i = 0;
+	uint32_t i = 0;
 
 	if (box->position_changed) {
 		mask |=
