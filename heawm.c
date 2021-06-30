@@ -3443,11 +3443,10 @@ box_reparent_into(Box *const parent, Box *const child)
 static void
 box_set_floating(Box *const box, bool floating)
 {
-	if (floating == box->floating)
+	if (floating == box->floating ||
+	    box_is_monitor(box))
 		return;
 	box->parent->layout_changed = true;
-	if (!box->user_concealed)
-		box->concealed = false;
 	box->floating = floating;
 	box_propagate_change(box)->layout_changed = true;
 }
