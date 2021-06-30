@@ -5094,14 +5094,12 @@ hand_focus_parent(Hand *const hand)
 static void
 box_maximize(Box *box, bool const recursive)
 {
-	box_set_floating(box, false);
-	box = box->parent;
-
-	assert(box_is_container(box));
-
-	if (box == root)
+	if (box_is_monitor(box))
 		return;
 
+	box_set_floating(box, false);
+
+	box = box->parent;
 	box_propagate_change(box);
 
 	++root->conceal_seq;
