@@ -4245,7 +4245,8 @@ done:
 					}
 				}
 			} else {
-				head->urect.height = 0;
+				head->floating = false;
+				head->layout_changed = true;
 				box_reparent(parent, 0, head);
 				parent = head->parent;
 				box_vacuum(head);
