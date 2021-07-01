@@ -2495,25 +2495,70 @@ box_get_chase_rect(Box const *const box)
 }
 
 static void
-box_chase_box(Box const *box, unsigned const min_percent)
+box_chase_box(Box const *box)
 {
-	if (box_get_foot(box))
-		return;
+	Box const *foot = box; /* Just some non-zero value. */
 
-	for (Box const *parent = box->parent;; parent = parent->parent) {
+	for (Box const *parent = box;;) {
+		/* Search foot until found any foot. NULL means there is no
+		 * more foot among parents so we do not have to traverse them
+		 * again. */
+		if (foot)
+			foot = box_get_foot(parent);
+		if (foot)
+			parent = foot;
+		parent = parent->parent;
+
 		for (uint16_t i = 0; i < parent->num_children; ++i) {
 			Box *const child = parent->children[i];
-			if (!child->floating)
+			if (!child->floating || box->focus_seq <= child->focus_seq)
 				continue;
 
-			xcb_rectangle_t const target = box_get_chase_rect(child);
-			unsigned const percent = get_rect_overlap(&box->rect, &child->rect);
-			if (min_percent <= percent &&
-			    get_rect_overlap(&box->rect, &target) < percent)
-			{
-				box_set_urect(child, target);
+			xcb_rectangle_t bounds = *box_get_parent_bounds(child);
+			int16_t any_better; /* Found non-zero side. */
+
+#define MOVE(x, width) \
+	int16_t x, x##free; \
+{ \
+	int16_t const left = box->rect.x - bounds.x; \
+	int16_t const right = bounds.x + bounds.width - (box->rect.x + box->rect.width); \
+	any_better |= left | right; \
+	/* printf("%d > %d (wh=%d)\n", left, right, child->rect.width); */ \
+	if (right < left) { \
+		/* printf(#x " lef\n"); */ \
+		x = box->rect.x - child->rect.width; \
+		if (child->rect.x <= x) \
+			continue; \
+		x = MAX(x, bounds.x); \
+		x##free = left - child->rect.width; \
+	} else { \
+		/* printf(#x  " right\n"); */ \
+		x = box->rect.x + box->rect.width; \
+		if (x <= child->rect.x) \
+			continue; \
+		x = MIN(x, bounds.x + bounds.width - child->rect.width); \
+		x##free = right - child->rect.width; \
+	} \
+}
+			REPEAT_XY(MOVE);
+#undef MOVE
+
+			if (!any_better)
+				continue;
+
+			if (0 <= xfree &&
+			    (/* No enough space on the other axis. */
+			     yfree < 0 ||
+			     /* Child can be moved out of sight on both axis,
+			      * but displacement on this axis is lesser. */
+			     abs(x - child->rect.x) <= abs(y - child->rect.y)))
+				y = child->rect.y;
+			else if (0 <= yfree)
+				x = child->rect.x;
+
+			box_set_uposition(child, x, y);
+			if (child->position_changed)
 				box_propagate_change(child);
-			}
 		}
 
 		if (box_is_monitor(parent))
@@ -2555,7 +2600,7 @@ hand_do_update(Hand *const hand)
 			printf("hand focus bounds changed\n");
 
 		if (hand->input_focus) {
-			box_chase_box(hand->input_focus, 1024 / 15);
+			box_chase_box(hand->input_focus);
 			box_update_barrier(hand->input_focus, hand);
 		}
 	}
@@ -3472,16 +3517,16 @@ box_resize_float(Box *const box, enum FloatResize how)
 		/* Nothing. */;
 	else if (FLOAT_TILE0 == how)
 		rect = (xcb_rectangle_t){
-			.x = bounds->width * 3 / 16,
-			.y = bounds->height * 3 / 16,
+			.x = bounds->x + bounds->width * 3 / 16,
+			.y = bounds->y + bounds->height * 3 / 16,
 			.width = bounds->width * 5 / 8,
 			.height = bounds->height * 5 / 8,
 		};
 	else if (FLOAT_TILE0 <= how && how <= FLOAT_TILE9)
 		/* TODO: Distribute error. */
 		rect = (xcb_rectangle_t){
-			.x = (bounds->width / 3) * ((how - FLOAT_TILE1) % 3),
-			.y =  (bounds->height / 3) * (2 - (how - FLOAT_TILE1) / 3),
+			.x = bounds->x + (bounds->width / 3) * ((how - FLOAT_TILE1) % 3),
+			.y = bounds->y + (bounds->height / 3) * (2 - (how - FLOAT_TILE1) / 3),
 			.width = bounds->width / 3,
 			.height = bounds->height / 3,
 		};
@@ -4722,10 +4767,11 @@ handle_client_message(xcb_client_message_event_t const *const event)
 
 			box_update_net(box);
 
-			/* Same brainfucked programs like Chromium thinks it stands above
-			 * window manager so without an sane reasons it internally
-			 * resizes itself on entering fullscreen. To teach respect, give
-			 * a slap for such programs (solely for educational purposes). */
+			/* A brainfucked program, call it Chromium, think it
+			 * stands above window manager so without an sane
+			 * reasons it internally resizes itself on entering
+			 * fullscreen. To teach respect, give a slap to this
+			 * program (solely for educational purposes). */
 			box_send_configure_notify(box);
 		}
 	}
@@ -5565,15 +5611,6 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 				box_resize_float(hand->mode_box, FLOAT_TILE0 + (sym - XKB_KEY_KP_0));
 				break;
 
-			case XKB_KEY_t:
-				box_set_urect(hand->mode_box, box_get_chase_rect(hand->mode_box));
-				box_propagate_change(hand->mode_box);
-				break;
-
-			case XKB_KEY_c:
-				box_chase_box(hand->mode_box, 0);
-				break;
-
 			default:
 				return;
 
@@ -5741,12 +5778,6 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 	 * .BR 0
 	 * .B f
 	 * and place according to Golden Ratio.
-	 * .TP
-	 * .BR t
-	 * Place to alternative position.
-	 * .TP
-	 * .BR c hase,\  c lear
-	 * Chase all floating windows to alternative position.
 	 * .RE
 	 */
 	case XKB_KEY_t:
