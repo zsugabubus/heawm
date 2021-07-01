@@ -3222,11 +3222,12 @@ hand_focus_box_internal(Hand *const hand, Box *const box)
 	Box *const old_focus = hand->input_focus ? hand->input_focus : hand->focus;
 	if (old_focus) {
 		box_propagate_change(old_focus);
-		box_propagate_labels_change(old_focus);
 		old_focus->focus_changed = true;
 	}
-	if (hand->focus)
+	if (hand->focus) {
+		box_propagate_labels_change(hand->focus);
 		hand->focus->focus_changed = true;
+	}
 
 	/* Find most upper locked box. */
 	Box *locked = box;
