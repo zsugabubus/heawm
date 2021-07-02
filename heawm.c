@@ -4071,7 +4071,7 @@ body_find_head_by_name(Body *const body, char const *const name)
 			continue;
 
 		if (name == head->instance_class ||
-		    (name && head->instance_class && !strcmp(head->instance_class + sizeof MONITOR_CLASS, name + sizeof MONITOR_CLASS)))
+		    (name && head->instance_class && !strcmp(head->instance_class, name)))
 			return head;
 	}
 
@@ -4122,11 +4122,11 @@ head_get_name_reply(xcb_get_atom_name_reply_t *name_reply)
 		return NULL;
 
 	int const name_size = xcb_get_atom_name_name_length(name_reply);
-	char *name = malloc(sizeof MONITOR_CLASS + name_size + 1 /* NUL */);
+	char *name = malloc(name_size + 1 /* NUL */ + sizeof MONITOR_CLASS);
 	if (name) {
-		memcpy(name, MONITOR_CLASS, sizeof MONITOR_CLASS);
-		memcpy(name + sizeof MONITOR_CLASS, xcb_get_atom_name_name(name_reply), name_size);
-		name[sizeof MONITOR_CLASS + name_size] = '\0';
+		memcpy(name, xcb_get_atom_name_name(name_reply), name_size);
+		name[name_size] = '\0';
+		memcpy(name + name_size + 1, MONITOR_CLASS, sizeof MONITOR_CLASS);
 	}
 
 	free(name_reply);
