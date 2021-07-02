@@ -1550,9 +1550,21 @@ box_set_size(Box *const box, uint16_t const width, uint16_t const height)
 static void
 box_set_uposition(Box *const box, int16_t const x, int16_t const y)
 {
+	int16_t dx = x - box->urect.x,
+	        dy = y - box->urect.y;
+
+	if (!dx && !dy)
+		return;
+
 	box->urect.x = x;
 	box->urect.y = y;
 	box_set_position(box, x, y);
+
+	for (uint16_t i = 0; i < box->num_children; ++i) {
+		Box *const child = box->children[i];
+		if (child->floating)
+			box_set_uposition(child, child->urect.x + dx, child->urect.y + dy);
+	}
 }
 
 static void
