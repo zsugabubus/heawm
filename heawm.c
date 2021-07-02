@@ -1015,7 +1015,7 @@ label_repaint(Label const *const label, bool const shape)
 	}
 
 	if (symbol) {
-		cairo_set_font_size(cr, font_size);
+		cairo_set_font_size(cr, font_size * 5 / 8);
 
 		cairo_text_extents(cr, symbol, &te);
 
