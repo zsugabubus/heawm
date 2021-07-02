@@ -5820,6 +5820,7 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 				if (set != box->focus_lock) {
 					box->focus_lock = set;
 					box->layout_changed = true;
+					box->label_changed = true;
 				}
 			while (box->num_children <= 1 && (box = box->parent));
 		else
@@ -5828,6 +5829,7 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 				if (set != (box = box->parent)->focus_lock) {
 					box->focus_lock = set;
 					box->layout_changed = true;
+					box->label_changed = true;
 				}
 			while (hand->focus != box);
 
