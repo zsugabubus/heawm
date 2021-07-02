@@ -993,6 +993,7 @@ label_repaint(Label const *const label, bool const shape)
 	cairo_show_text(cr, name);
 
 	char const *symbol = NULL;
+	char buf[6];
 
 	if (LABEL_BOX == label->type) {
 		if (label->base->user_concealed)
@@ -1001,6 +1002,16 @@ label_repaint(Label const *const label, bool const shape)
 			symbol = "~";
 		else if (label->base->focus_lock && box_is_container(label->base))
 			symbol = "\xe2\x80\xa2" /* U+2022 BULLET */;
+		else if (1 < label->base->num_visible) {
+			char *p = &buf[1];
+			uint16_t n = label->base->num_visible;
+
+			*--p = '\0';
+			do
+				*--p = '0' + (n % 10);
+			while ((n /= 10));
+			symbol = p;
+		}
 	}
 
 	if (symbol) {
