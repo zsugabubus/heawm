@@ -328,7 +328,6 @@ struct Box {
 	     content_changed: 1, /**< Check children for changes. */
 	     label_changed: 1, /**< Label should be repainted */
 	     mapped: 1,
-	     close_by_force: 1, /**< Does not ask for second time. */
 	     flagged: 1, /**< Temporary flag for various purposes. */
 	     hide_label: 1, /**< No name label. */
 	     concealed: 1, /**< Show only when has focus; hide otherwise. */
@@ -496,6 +495,8 @@ typedef struct {
 	Box *focus;
 
 	unsigned int color; /* 0xrrggbb */
+
+	xcb_timestamp_t last_close_time;
 } Hand;
 
 static bool hands_changed;
@@ -3336,6 +3337,8 @@ hand_focus_box(Hand *const hand, Box *const box)
 	}
 
 	hand_focus_box_internal(hand, box);
+
+	hand->last_close_time = 0;
 }
 
 static Body *
@@ -3626,9 +3629,6 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 
 		/* Find the hand that could possibly create this window. */
 		if (origin) {
-			/* Maybe a close dialog, maybe something other. */
-			origin->close_by_force = false;
-
 			if (box_is_focused(origin)) {
 				for_each_hand {
 					if (origin != hand->input_focus)
@@ -4737,20 +4737,17 @@ wm_close_window(xcb_window_t const window)
 }
 
 static void
-box_close(Box *const root)
+box_close(Box *const root, bool const force)
 {
 	Box *box;
 	for_each_box(box, root) {
 		if (box_is_container(box))
 			continue;
 
-		if (!box->close_by_force) {
-			box->close_by_force = true;
-			wm_close_window(box->window);
-		} else {
+		if (force)
 			XDO(xcb_kill_client, conn, box->window);
-		}
-
+		else
+			wm_close_window(box->window);
 	}
 }
 
@@ -4763,7 +4760,7 @@ handle_client_message(xcb_client_message_event_t const *const event)
 		return;
 
 	if (ATOM(_NET_CLOSE_WINDOW) == event->type) {
-		box_close(box);
+		box_close(box, false);
 	} else if (ATOM(_NET_ACTIVE_WINDOW) == event->type) {
 		if (XCB_EWMH_CLIENT_SOURCE_TYPE_NORMAL == event->data.data32[0])
 			return;
@@ -5026,11 +5023,9 @@ hand_find_by_master_pointer(xcb_input_device_id_t const master_pointer)
 ) & ~XCB_MOD_MASK_NUM_LOCK)
 
 static void
-hand_handle_input_key_normal(xcb_input_key_press_event_t const *const event, Hand *const hand, xcb_keysym_t const sym, bool const repeating)
+hand_handle_input_key_normal(xcb_input_key_press_event_t const *const event, Hand *const hand, xcb_keysym_t const sym)
 {
-	(void)event;
-
-	if (repeating)
+	if (XCB_INPUT_KEY_EVENT_FLAGS_KEY_REPEAT & event->flags)
 		return;
 
 	hand->want_focus |= XKB_KEY_Return == sym;
@@ -5231,9 +5226,32 @@ hand_focus_parent_float(Hand *const hand)
 		}
 }
 
-static bool
-hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const repeating)
+static void
+hand_handle_input_key_super(xcb_input_key_press_event_t const *const event, Hand *const hand, xcb_keysym_t const sym)
 {
+	switch (sym) {
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B Mod--
+	 * Decrease system volume.
+	 */
+	case XKB_KEY_minus:
+		SPAWN("amixer", "-q", "set", "Master", "3-");
+		return;
+
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B Mod-+
+	 * Increase system volume.
+	 */
+	case XKB_KEY_plus:
+		SPAWN("amixer", "-q", "set", "Master", "1+", "unmute");
+		return;
+	}
+
+	if (XCB_INPUT_KEY_EVENT_FLAGS_KEY_REPEAT & event->flags)
+		return;
+
 	/*MAN(Keybindings)
 	 * .TP
 	 * .BR Mod- { A-Za-z }...
@@ -5241,7 +5259,7 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 	 * .BR autostart " \fIname\fR"
 	 * if there is no such box.
 	 */
-	if (!repeating && hand_handle_input(hand, sym)) {
+	if (hand_handle_input(hand, sym)) {
 		hand_input_try_jump(hand);
 	} else switch (sym) {
 	/*MAN(Keybindings)
@@ -5266,9 +5284,6 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 	 */
 	case XKB_KEY_parenright:
 	{
-		if (repeating)
-			break;
-
 		hand->want_popup = true;
 		SPAWN(config.terminal, "-e", get_script_path("quickstart"));
 	}
@@ -5281,9 +5296,6 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 	 * .BR alsamixer(1) .
 	 */
 	case XKB_KEY_bracketright:
-		if (repeating)
-			break;
-
 		hand->want_popup = true;
 		SPAWN(config.terminal, "-e", "alsamixer");
 		break;
@@ -5294,28 +5306,7 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 	 * Toggle system mute.
 	 */
 	case XKB_KEY_asterisk:
-		if (repeating)
-			break;
-
 		SPAWN("amixer", "-q", "set", "Master", "toggle");
-		break;
-
-	/*MAN(Keybindings)
-	 * .TP
-	 * .B Mod--
-	 * Decrease system volume.
-	 */
-	case XKB_KEY_minus:
-		SPAWN("amixer", "-q", "set", "Master", "3-");
-		break;
-
-	/*MAN(Keybindings)
-	 * .TP
-	 * .B Mod-+
-	 * Increase system volume.
-	 */
-	case XKB_KEY_plus:
-		SPAWN("amixer", "-q", "set", "Master", "1+", "unmute");
 		break;
 
 	/*MAN(Keybindings)
@@ -5324,9 +5315,6 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 	 * Open $\fBTERMINAL\fR.
 	 */
 	case XKB_KEY_Return:
-		if (repeating)
-			break;
-
 		hand->want_focus = true;
 		SPAWN(config.terminal);
 		break;
@@ -5358,8 +5346,7 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 	 * .RB "Refer to " Mod-Ctrl-f
 	 */
 	case XKB_KEY_period:
-		if (!repeating &&
-		    hand->focus)
+		if (hand->focus)
 			box_maximize(hand->focus, true);
 		break;
 
@@ -5403,9 +5390,6 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 	 * .RB "Refer to " Mod-Ctrl-a
 	 */
 	case XKB_KEY_braceright:
-		if (repeating)
-			break;
-
 		if (!hand->focus)
 			break;
 
@@ -5418,9 +5402,6 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 	 * Focus floating parent.
 	 */
 	case XKB_KEY_numbersign:
-		if (repeating)
-			break;
-
 		if (!hand->focus)
 			break;
 
@@ -5428,12 +5409,10 @@ hand_handle_input_key_super(Hand *const hand, xcb_keysym_t const sym, bool const
 		break;
 
 	default:
-		return true;
+		return;
 	}
 
 	hand_update_mode(hand);
-
-	return false;
 }
 
 static void
@@ -5728,9 +5707,12 @@ hand_center_pointer(Hand const *const hand, Box const *const box)
 			hand->master_pointer);
 }
 
-static bool
-hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool const repeating)
+static void
+hand_handle_input_key_command(xcb_input_key_press_event_t const *const event, Hand *const hand, xcb_keysym_t const sym)
 {
+	if (XCB_INPUT_KEY_EVENT_FLAGS_KEY_REPEAT & event->flags)
+		return;
+
 	switch (sym) {
 	/*MAN(Keybindings)
 	 * .TP
@@ -5815,9 +5797,6 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 	 */
 	case XKB_KEY_l:
 	{
-		if (repeating)
-			break;
-
 		Box *box = hand->input_focus;
 		if (!box)
 			break;
@@ -5865,9 +5844,6 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 	 */
 	case XKB_KEY_h:
 	case XKB_KEY_minus:
-		if (repeating)
-			break;
-
 		if (!hand->focus)
 			break;
 
@@ -5893,9 +5869,6 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 	 * Increase number of visible children.
 	 */
 	case XKB_KEY_x:
-		if (repeating)
-			break;
-
 		if (!hand->focus)
 			break;
 
@@ -5916,8 +5889,7 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 	 * for each level inside a floating box.
 	 */
 	case XKB_KEY_f:
-		if (!repeating &&
-		    hand->focus)
+		if (hand->focus)
 			box_maximize(hand->focus, XKB_KEY_f == sym);
 		break;
 
@@ -5928,9 +5900,6 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 	 */
 	case XKB_KEY_backslash:
 	case XKB_KEY_bar:
-		if (repeating)
-			break;
-
 		if (!hand->focus)
 			break;
 
@@ -5977,27 +5946,20 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 	 * .RE
 	 */
 	case XKB_KEY_n:
-		if (repeating)
-			break;
-
 		hand_start_name(hand);
 		break;
 
-	/* wlose/xlose */
 	/*MAN(Keybindings)
 	 * .TP
 	 * .BR Mod-Ctrl-w indow
-	 * Close box just like user would click
-	 * \*(lqX\*(rq in the title bar. Kill by force for the second time.
+	 * Close window. Kill client if repeated within a half second.
 	 */
 	case XKB_KEY_w:
-		if (repeating)
-			break;
-
 		if (!hand->focus)
 			break;
 
-		box_close(hand->focus);
+		box_close(hand->focus, event->time - hand->last_close_time < 500);
+		hand->last_close_time = event->time;
 		break;
 
 	/*MAN(Keybindings)
@@ -6011,12 +5973,10 @@ hand_handle_input_key_command(Hand *const hand, xcb_keysym_t const sym, bool con
 		break;
 
 	default:
-		return true;
+		return;
 	}
 
 	hand_update_mode(hand);
-
-	return false;
 }
 
 static void
@@ -6057,23 +6017,23 @@ handle_input_key_press(xcb_input_key_press_event_t const *const event)
 	switch (hand->mode) {
 	case HAND_MODE_NONE:
 	{
-		bool const repeating = XCB_INPUT_KEY_EVENT_FLAGS_KEY_REPEAT & event->flags;
-
 		switch (KEY_MOD_MASK & event->mods.base) {
 		default:
-			propagate = (hand_handle_input_key_normal(event, hand, sym, repeating), true);
+			propagate = (hand_handle_input_key_normal(event, hand, sym), true);
 			break;
 
 		case XCB_MOD_MASK_4:
 			if (hand->master_keyboard != event->deviceid)
 				break;
 
-			propagate = hand_handle_input_key_super(hand, sym, repeating);
+			hand_handle_input_key_super(event, hand, sym);
+			propagate = false;
 			break;
 
 		case XCB_MOD_MASK_4 | XCB_MOD_MASK_CONTROL:
 		case XCB_MOD_MASK_4 | XCB_MOD_MASK_1:
-			propagate = hand_handle_input_key_command(hand, sym, repeating);
+			hand_handle_input_key_command(event, hand, sym);
+			propagate = false;
 			break;
 		}
 
