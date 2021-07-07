@@ -4683,6 +4683,16 @@ box_set_usize_with_ureposition(Box *const box, uint16_t const width, uint16_t co
 }
 
 static void
+box_uresize(Box *const box, bool const zoom)
+{
+	uint16_t const coeff = 100 + (zoom ? 8 : -4);
+	box_set_usize_with_ureposition(box,
+			box->urect.width * coeff / 100,
+			box->urect.height * coeff / 100);
+	box_propagate_change(box);
+}
+
+static void
 handle_configure_request(xcb_configure_request_event_t const *const event)
 {
 	Box *box;
@@ -5617,6 +5627,15 @@ hand_handle_input_key_mode(xcb_input_key_press_event_t const *const event, Hand 
 				box_resize_float(hand->mode_box, FLOAT_TILE0 + (sym - XKB_KEY_KP_0));
 				break;
 
+			case XKB_KEY_asterisk:
+			case XKB_KEY_slash:
+			{
+				Box *const foot = box_get_foot(hand->mode_box);
+				if (foot)
+					box_uresize(foot, XKB_KEY_asterisk == sym);
+			}
+				return;
+
 			default:
 				return;
 
@@ -5787,6 +5806,10 @@ hand_handle_input_key_command(xcb_input_key_press_event_t const *const event, Ha
 	 * .BR 0
 	 * .B f
 	 * and place according to Golden Ratio.
+	 * .TP
+	 * .BR * ,\  /
+	 * Refer to
+	 * .BR Mod-WheelUp ,\  Mod-WheelDown .
 	 * .RE
 	 */
 	case XKB_KEY_t:
@@ -6237,13 +6260,8 @@ handle_input_button_press(xcb_input_button_press_event_t const *const event)
 			return;
 
 		Box *const foot = box_get_foot(box);
-		if (foot) {
-			uint16_t const coeff = 100 + 8 * (4 == event->detail ? 1 : -1);
-			box_set_usize_with_ureposition(foot,
-					foot->urect.width * coeff / 100,
-					foot->urect.height * coeff / 100);
-			box_propagate_change(foot);
-		}
+		if (foot)
+			box_uresize(foot, 4 == event->detail);
 	}
 }
 
