@@ -667,7 +667,6 @@ static uint8_t shape_base_event; /**< Major opcode of Shape extension. */
 static uint8_t randr_base_event; /**< Beginning of XRandR event range. */
 static uint8_t xkb_base_event; /** beginning of XKB event range */
 static struct xkb_context *xkb_context;
-static xcb_key_symbols_t *symbols;
 
 static struct {
 	char const *terminal;
@@ -1276,9 +1275,6 @@ static void
 quit(void)
 {
 	if (conn) {
-		if (symbols)
-			xcb_key_symbols_free(symbols);
-
 		xcb_disconnect(conn);
 	}
 }
@@ -4378,8 +4374,6 @@ setup_display(void)
 	init_extensions();
 
 	root = box_new();
-
-	symbols = xcb_key_symbols_alloc(conn);
 
 	/* Prevent windows from changing. */
 	XDO(xcb_grab_server, conn);
