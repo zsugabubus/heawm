@@ -1549,13 +1549,18 @@ box_set_uposition(Box *const box, int16_t const x, int16_t const y)
 {
 	int16_t dx = x - box->urect.x,
 	        dy = y - box->urect.y;
-
 	if (!dx && !dy)
 		return;
 
+	box->position_changed |=
+		box->floating &&
+		(x != box->urect.x ||
+		 y != box->urect.y);
 	box->urect.x = x;
 	box->urect.y = y;
-	box_set_position(box, x, y);
+
+	if (!box->floating)
+		return;
 
 	for (uint16_t i = 0; i < box->num_children; ++i) {
 		Box *const child = box->children[i];
@@ -1567,9 +1572,12 @@ box_set_uposition(Box *const box, int16_t const x, int16_t const y)
 static void
 box_set_usize(Box *const box, uint16_t const width, uint16_t const height)
 {
+	box->size_changed |=
+		box->floating &&
+		(width != box->urect.width ||
+		 height != box->urect.height);
 	box->urect.width = width;
 	box->urect.height = height;
-	box_set_size(box, width, height);
 }
 
 static void
@@ -2065,21 +2073,10 @@ box_update_layout(Box const *const box, int level)
 		} else if (!child->flagged) {
 			should_map = false;
 		} else if (child->floating) {
-			xcb_rectangle_t rect = child->urect;
-
-			int16_t cx = rect.x + rect.width / 2,
-			        cy = rect.y + rect.height / 2;
-
-			cx = MAX(cx, box->rect.x);
-			cx = MIN(cx, box->rect.x + box->rect.width);
-			cy = MAX(cy, box->rect.y);
-			cy = MIN(cy, box->rect.y + box->rect.height);
-
-			rect.x = cx - rect.width / 2;
-			rect.y = cy - rect.height / 2;
-
-			box_set_position(child, rect.x, rect.y);
-			box_set_size(child, rect.width, rect.height);
+			if (box->size_changed || box->position_changed) {
+				child->position_changed = true;
+				child->size_changed = true;
+			}
 		}
 
 		if (should_map != child->mapped) {
@@ -2330,24 +2327,52 @@ box_update(Box *const box, int level)
 	if (box->focus_changed && box_is_container(box))
 		box->layout_changed = true;
 
-	if (box->mapped &&
-	    (box->position_changed ||
-	     box->size_changed ||
-	     box->layout_changed))
-	{
-		box_update_layout(box, level + 1);
-		box->content_changed = true;
-	}
+	if (box_is_container(box)) {
+		if (box->mapped &&
+		    (box->position_changed ||
+		     box->size_changed ||
+		     box->layout_changed))
+		{
+			box_update_layout(box, level + 1);
+			box->content_changed = true;
+		}
 
-	if (box->content_changed) {
-		box->content_changed = false;
-		for (uint16_t i = 0; i < box->num_children; ++i) {
-			Box *const child = box->children[i];
-			box_update(child, level + 2);
+		if (box->content_changed) {
+			box->content_changed = false;
+			for (uint16_t i = 0; i < box->num_children; ++i) {
+				Box *const child = box->children[i];
+				box_update(child, level + 2);
+			}
 		}
 	}
 
 	if (box->mapped) {
+		if (box->floating &&
+		    !box_is_monitor(box) &&
+		    (box->position_changed || box->size_changed || box->layout_changed))
+		{
+			/* Ensure that floating window is always visible inside parent. */
+			Box const *const parent = box->parent;
+			xcb_rectangle_t rect = box->urect;
+
+			int16_t cx = rect.x + rect.width / 2,
+				cy = rect.y + rect.height / 2;
+
+			cx = MAX(cx, parent->rect.x);
+			cx = MIN(cx, parent->rect.x + parent->rect.width);
+			cy = MAX(cy, parent->rect.y);
+			cy = MIN(cy, parent->rect.y + parent->rect.height);
+
+			rect.x = cx - rect.width / 2;
+			rect.y = cy - rect.height / 2;
+
+			/* They were just a fake signal. */
+			box->position_changed = false;
+			box->size_changed = false;
+			box_set_position(box, rect.x, rect.y);
+			box_set_size(box, rect.width, rect.height);
+		}
+
 		if (box->position_changed ||
 		    box->size_changed ||
 		    box->label_changed ||
@@ -3507,7 +3532,7 @@ box_reparent_into(Box *const parent, Box *const child)
 }
 
 static void
-box_set_floating(Box *const box, bool floating)
+box_set_floating(Box *const box, bool const floating)
 {
 	if (floating == box->floating ||
 	    box_is_monitor(box))
@@ -3567,8 +3592,8 @@ box_resize_float(Box *const box, enum FloatResize how)
 	else
 		abort();
 
-	box_set_urect(box, rect);
 	box_set_floating(box, true);
+	box_set_urect(box, rect);
 }
 
 /**
@@ -4689,7 +4714,8 @@ box_uresize(Box *const box, bool const zoom)
 	box_set_usize_with_ureposition(box,
 			box->urect.width * coeff / 100,
 			box->urect.height * coeff / 100);
-	box_propagate_change(box);
+	if (box->position_changed)
+		box_propagate_change(box);
 }
 
 static void
@@ -4698,6 +4724,12 @@ handle_configure_request(xcb_configure_request_event_t const *const event)
 	Box *box;
 	if (!(box = box_find_by_window(root, offsetof(Box, window), event->window)))
 		return;
+
+	if (4 <= HEAWM_VERBOSE)
+		printf("configure request %dx%d+%d+%d from %s\n",
+				event->width, event->height,
+				event->x, event->y,
+				box->title);
 
 	/* Save boundaries but only care about them when floating. */
 	if ((XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT) ==
