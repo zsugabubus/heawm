@@ -3545,15 +3545,24 @@ box_resize_float(Box *const box, enum FloatResize how)
 			.width = bounds->width * 5 / 8,
 			.height = bounds->height * 5 / 8,
 		};
-	else if (FLOAT_TILE0 <= how && how <= FLOAT_TILE9)
-		/* TODO: Distribute error. */
-		rect = (xcb_rectangle_t){
-			.x = bounds->x + (bounds->width / 3) * ((how - FLOAT_TILE1) % 3),
-			.y = bounds->y + (bounds->height / 3) * (2 - (how - FLOAT_TILE1) / 3),
-			.width = bounds->width / 3,
-			.height = bounds->height / 3,
-		};
-	else if (FLOAT_RECT == how)
+	else if (FLOAT_TILE0 <= how && how <= FLOAT_TILE9) {
+		unsigned i = how - FLOAT_TILE1;
+		uint16_t x, y;
+
+		rect = box->urect;
+		if (!rect.width || !rect.height ||
+		    ((x = bounds->x + (bounds->width - rect.width) * (i % 3) / 2),
+		     (y = bounds->y + (bounds->height - rect.height) * ((8 - i) / 3) / 2),
+		     (rect.x == x && rect.y == y)))
+			rect = (xcb_rectangle_t){
+				.x = bounds->x + (bounds->width / 3) * ((how - FLOAT_TILE1) % 3),
+				.y = bounds->y + (bounds->height / 3) * (2 - (how - FLOAT_TILE1) / 3),
+				.width = bounds->width / 3,
+				.height = bounds->height / 3,
+			};
+		else
+			rect.x = x, rect.y = y;
+	} else if (FLOAT_RECT == how)
 		rect = box->rect;
 	else
 		abort();
