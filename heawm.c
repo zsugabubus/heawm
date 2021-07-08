@@ -2276,7 +2276,7 @@ box_update(Box *const box, int level)
 				"%*c(%d %.*s):"
 				" 0x%x->0x%x/0x%x"
 				" %ux%u+%d+%d u%ux%u+%d+%d"
-				" H=%d C=%d V=%d %c%c%c%c"
+				" H=%d C=%d V=%d %c%c%c%c%c"
 				" (%s %s)\"%.15s\" "
 				"\n",
 				level, 0,
@@ -2293,10 +2293,11 @@ box_update(Box *const box, int level)
 				box->focus_hand,
 				box->conceal_seq,
 				box->num_visible,
+				box->concealed ? 'C' : '-',
 				box->floating ? 'F' : '-',
 				box->focus_lock ? 'L' : '-',
+				box->mapped ? 'M' : '-',
 				box->user_concealed ? 'U' : '-',
-				box->concealed ? 'C' : '-',
 
 				box->instance_class,
 				box_get_class(box),
@@ -2327,25 +2328,6 @@ box_update(Box *const box, int level)
 	if (box->focus_changed && box_is_container(box))
 		box->layout_changed = true;
 
-	if (box_is_container(box)) {
-		if (box->mapped &&
-		    (box->position_changed ||
-		     box->size_changed ||
-		     box->layout_changed))
-		{
-			box_update_layout(box, level + 1);
-			box->content_changed = true;
-		}
-
-		if (box->content_changed) {
-			box->content_changed = false;
-			for (uint16_t i = 0; i < box->num_children; ++i) {
-				Box *const child = box->children[i];
-				box_update(child, level + 2);
-			}
-		}
-	}
-
 	if (box->mapped) {
 		if (box->floating &&
 		    !box_is_monitor(box) &&
@@ -2372,7 +2354,28 @@ box_update(Box *const box, int level)
 			box_set_position(box, rect.x, rect.y);
 			box_set_size(box, rect.width, rect.height);
 		}
+	}
 
+	if (box_is_container(box)) {
+		if (box->mapped &&
+		    (box->position_changed ||
+		     box->size_changed ||
+		     box->layout_changed))
+		{
+			box_update_layout(box, level + 1);
+			box->content_changed = true;
+		}
+
+		if (box->content_changed) {
+			box->content_changed = false;
+			for (uint16_t i = 0; i < box->num_children; ++i) {
+				Box *const child = box->children[i];
+				box_update(child, level + 2);
+			}
+		}
+	}
+
+	if (box->mapped) {
 		if (box->position_changed ||
 		    box->size_changed ||
 		    box->label_changed ||
