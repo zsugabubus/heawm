@@ -2980,6 +2980,27 @@ static void
 box_reparent(Box *into, uint16_t const pos, Box *box);
 
 static void
+box_set_floating(Box *const box, bool const floating)
+{
+	if (floating == box->floating ||
+	    box_is_monitor(box))
+		return;
+
+	box->parent->layout_changed = true;
+	box->floating = floating;
+
+	/* Restack windows. */
+	Box *b;
+	for_each_box(b, box)
+		if (box_is_container(b))
+			b->content_changed = true;
+		else
+			b->layout_changed = true;
+
+	box_propagate_change(box);
+}
+
+static void
 box_vacuum(Box *const box)
 {
 	assert(box_is_container(box));
@@ -3006,8 +3027,7 @@ box_vacuum(Box *const box)
 		child->concealed = box->concealed;
 		child->conceal_seq = box->conceal_seq;
 		child->hide_label |= box->hide_label;
-		child->floating = box->floating;
-		child->layout_changed = true;
+		box_set_floating(child, box->floating);
 		child->urect = box->urect;
 		box_reparent(box->parent, box_get_pos(box), child);
 	}
@@ -3177,12 +3197,14 @@ box_swap(Box *const x, Box *const y)
 
 	SWAP(Box *, parent);
 	SWAP(xcb_rectangle_t, urect);
-	if (x->floating != y->floating) {
-		SWAP(bool, floating);
-		x->layout_changed = true;
-		y->layout_changed = true;
-	}
+
 #undef SWAP
+
+	{
+		bool const t = x->floating;
+		box_set_floating(x, y->floating);
+		box_set_floating(y, t);
+	}
 
 	/* Heads have static layout so rect must be copied, but only for them. */
 	xcb_rectangle_t xrect = x->rect, yrect = y->rect;
@@ -3529,10 +3551,8 @@ box_reparent_into(Box *const parent, Box *const child)
 	if (!box_is_container(parent)) {
 		Box *container = box_new();
 
-		if (box_get_foot(parent)) {
-			child->floating = false;
-			child->layout_changed = true;
-		}
+		if (box_get_foot(parent))
+			box_set_floating(child, false);
 
 		if ((container->floating = parent->floating)) {
 			parent->floating = false;
@@ -3549,17 +3569,6 @@ box_reparent_into(Box *const parent, Box *const child)
 	} else {
 		box_reparent_checked(parent, 0, child);
 	}
-}
-
-static void
-box_set_floating(Box *const box, bool const floating)
-{
-	if (floating == box->floating ||
-	    box_is_monitor(box))
-		return;
-	box->parent->layout_changed = true;
-	box->floating = floating;
-	box_propagate_change(box)->layout_changed = true;
 }
 
 static void
