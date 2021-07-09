@@ -3173,8 +3173,18 @@ box_swap(Box *const x, Box *const y)
 		x->layout_changed = true;
 		y->layout_changed = true;
 	}
-
 #undef SWAP
+
+	/* Heads have static layout so rect must be copied, but only for them. */
+	xcb_rectangle_t xrect = x->rect, yrect = y->rect;
+	if (box_is_monitor(x)) {
+		box_set_size(x, yrect.width, yrect.height);
+		box_set_position(x, yrect.x, yrect.y);
+	}
+	if (box_is_monitor(y)) {
+		box_set_size(y, xrect.width, xrect.height);
+		box_set_position(y, xrect.x, xrect.y);
+	}
 
 	box_update_children(x->parent);
 	box_update_children(y->parent);
