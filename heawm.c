@@ -4198,6 +4198,10 @@ body_update_heads(Body *const body)
 			head->urect.width = 0;
 	}
 
+	/* Undo it, so going from 1->+ monitor setup will show labels. */
+	if (1 == root->num_children)
+		root->children[0]->hide_label = false;
+
 	/* Force RROutputChange under Xephyr -resizeable, otherwise monitor
 	 * dimensions are not updated. */
 	XCB_GET_REPLY(resources, xcb_randr_get_screen_resources, body->screen->root);
@@ -4369,6 +4373,9 @@ done:
 			 * anyway. */
 			head->urect.width = 1;
 	}
+
+	if (1 == root->num_children)
+		root->children[0]->hide_label = true;
 
 	/*MAN(HOOKS)
 	 * .TP
