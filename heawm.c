@@ -4203,6 +4203,8 @@ body_update_heads(Body *const body)
 	XCB_GET_REPLY(resources, xcb_randr_get_screen_resources, body->screen->root);
 	free(resources);
 
+	bool const map = !root->num_children || root->children[0]->mapped;
+
 	XCB_GET_REPLY(monitors, xcb_randr_get_monitors, body->screen->root, true);
 	if (!monitors) {
 		fprintf(stderr, "Failed to query RandR monitors\n");
@@ -4219,8 +4221,7 @@ body_update_heads(Body *const body)
 		head->urect.width = body->screen->width_in_millimeters;
 		head->urect.height = body->screen->height_in_millimeters;
 		head->floating = true;
-		head->layout_changed = true;
-		head->mapped = true;
+		head->mapped = map;
 		head->mapped_changed = true;
 		box_set_size(head, body->screen->width_in_pixels, body->screen->height_in_pixels);
 		box_set_position(head, 0, 0);
@@ -4257,8 +4258,7 @@ body_update_heads(Body *const body)
 				head->instance_class = name;
 				head->num_visible = 1;
 				head->floating = true;
-				head->layout_changed = true;
-				head->mapped = true;
+				head->mapped = map;
 				head->mapped_changed = true;
 				name = NULL;
 
@@ -5373,6 +5373,36 @@ hand_handle_input_key_super(xcb_input_key_press_event_t const *const event, Hand
 	case XKB_KEY_Return:
 		hand->want_focus = true;
 		SPAWN(config.terminal);
+		break;
+
+	/*MAN(Keybindings)
+	 * .TP
+	 * .B Mod-Space
+	 * Toggle visibility of root box (everything). Available only for the
+	 * first hand.
+	 */
+	case XKB_KEY_space:
+	{
+		if (hands < hand ||
+		    !root->num_children)
+			break;
+		bool const map = !root->children[0]->mapped;
+
+		for (uint16_t i = 0; i < root->num_children; ++i) {
+			Box *const head = root->children[i];
+			head->mapped = map;
+			head->mapped_changed = true;
+		}
+		root->content_changed = true;
+
+		if (map) {
+			for (uint8_t i = 0; i < num_hands; ++i) {
+				Hand *const hand = &hands[i];
+				hand->focus_changed = true;
+			}
+			hands_changed = true;
+		}
+	}
 		break;
 
 	/*MAN(Keybindings)
