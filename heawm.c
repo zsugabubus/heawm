@@ -2179,10 +2179,9 @@ box_update_shape(Box const *const box)
 static Box *
 box_get_foot(Box const *box)
 {
-	do
+	for (; !box_is_monitor(box); box = box->parent)
 		if (box->floating)
 			return (Box *)box;
-	while (!box_is_monitor((box = box->parent)));
 
 	return NULL;
 }
