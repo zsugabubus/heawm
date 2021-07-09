@@ -3168,15 +3168,13 @@ box_swap(Box *const x, Box *const y)
 
 	SWAP(Box *, parent);
 	SWAP(xcb_rectangle_t, urect);
-	SWAP(bool, floating);
+	if (x->floating != y->floating) {
+		SWAP(bool, floating);
+		x->layout_changed = true;
+		y->layout_changed = true;
+	}
 
 #undef SWAP
-
-	xcb_rectangle_t xrect = x->rect, yrect = y->rect;
-	box_set_size(x, yrect.width, yrect.height);
-	box_set_position(x, yrect.x, yrect.y);
-	box_set_size(y, xrect.width, xrect.height);
-	box_set_position(y, xrect.x, xrect.y);
 
 	box_update_children(x->parent);
 	box_update_children(y->parent);
