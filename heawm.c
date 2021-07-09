@@ -1969,6 +1969,7 @@ box_update_layout(Box const *const box, int level)
 		cwh; /**< Container size. */
 
 	bool const v = box->horizontal;
+	bool is_monitor;
 
 	if (tiles) {
 		cwh.x = box->rect.width;
@@ -1994,9 +1995,9 @@ box_update_layout(Box const *const box, int level)
 		/* Total pixel error. */
 		rem.x = cwh.x % rc.x;
 		rem.y = cwh.y % rc.y;
-	}
 
-	bool const is_monitor = box_is_monitor(box);
+		is_monitor = box_is_monitor(box);
+	}
 
 	for (uint16_t i = 0; i < box->num_children; ++i) {
 		Box *const child = box->children[i];
@@ -2250,11 +2251,17 @@ box_update_window(Box *const box, int level)
 	if (box->mapped_changed || box->focus_changed)
 		box_update_net(box);
 
-	if (box->size_changed || box->position_changed || box->focus_changed) {
+	if (root->focus_seq == box->focus_seq &&
+	    (box->size_changed ||
+	     box->position_changed ||
+	     box->focus_changed ||
+	     box->mapped_changed))
+	{
 		for_each_hand {
 			if (hand->input_focus == box) {
 				hand->focus_bounds_changed |= box->size_changed || box->position_changed;
-				hands_changed |= hand->focus_bounds_changed;
+				hand->focus_changed |= box->mapped_changed;
+				hands_changed |= hand->focus_changed || hand->focus_bounds_changed;
 			}
 		}
 	}
@@ -2315,20 +2322,22 @@ box_update(Box *const box, int level)
 			}
 		}
 
-		for (uint16_t i = 0; i < box->num_children; ++i) {
-			Box *const child = box->children[i];
-			if (child->mapped != box->mapped) {
-				child->mapped_changed = true;
-				child->mapped = box->mapped;
-				box->content_changed = true;
+		if (!box->mapped)
+			/* "Unmapped" layout. */
+			for (uint16_t i = 0; i < box->num_children; ++i) {
+				Box *const child = box->children[i];
+				if (child->mapped) {
+					child->mapped = false;
+					child->mapped_changed = true;
+					box->content_changed = true;
+				}
 			}
-		}
 	}
 
-	if (box->focus_changed && box_is_container(box))
-		box->layout_changed = true;
-
 	if (box->mapped) {
+		if (box->focus_changed && box_is_container(box))
+			box->layout_changed = true;
+
 		if (box->floating &&
 		    !box_is_monitor(box) &&
 		    (box->position_changed || box->size_changed || box->layout_changed))
@@ -2360,6 +2369,7 @@ box_update(Box *const box, int level)
 		if (box->mapped &&
 		    (box->position_changed ||
 		     box->size_changed ||
+		     box->mapped_changed ||
 		     box->layout_changed))
 		{
 			box_update_layout(box, level + 1);
@@ -4207,8 +4217,6 @@ body_update_heads(Body *const body)
 	XCB_GET_REPLY(resources, xcb_randr_get_screen_resources, body->screen->root);
 	free(resources);
 
-	bool const map = !root->num_children || root->children[0]->mapped;
-
 	XCB_GET_REPLY(monitors, xcb_randr_get_monitors, body->screen->root, true);
 	if (!monitors) {
 		fprintf(stderr, "Failed to query RandR monitors\n");
@@ -4225,8 +4233,6 @@ body_update_heads(Body *const body)
 		head->urect.width = body->screen->width_in_millimeters;
 		head->urect.height = body->screen->height_in_millimeters;
 		head->floating = true;
-		head->mapped = map;
-		head->mapped_changed = true;
 		box_set_size(head, body->screen->width_in_pixels, body->screen->height_in_pixels);
 		box_set_position(head, 0, 0);
 	} else {
@@ -4262,8 +4268,6 @@ body_update_heads(Body *const body)
 				head->instance_class = name;
 				head->num_visible = 1;
 				head->floating = true;
-				head->mapped = map;
-				head->mapped_changed = true;
 				name = NULL;
 
 				/* Do not name it yet. */
@@ -4426,6 +4430,7 @@ setup_display(void)
 	init_extensions();
 
 	root = box_new();
+	root->mapped = true;
 
 	/* Prevent windows from changing. */
 	XDO(xcb_grab_server, conn);
@@ -5393,22 +5398,10 @@ hand_handle_input_key_super(xcb_input_key_press_event_t const *const event, Hand
 		if (hands < hand ||
 		    !root->num_children)
 			break;
-		bool const map = !root->children[0]->mapped;
 
-		for (uint16_t i = 0; i < root->num_children; ++i) {
-			Box *const head = root->children[i];
-			head->mapped = map;
-			head->mapped_changed = true;
-		}
+		root->mapped ^= true;
+		root->mapped_changed = true;
 		root->content_changed = true;
-
-		if (map) {
-			for (uint8_t i = 0; i < num_hands; ++i) {
-				Hand *const hand = &hands[i];
-				hand->focus_changed = true;
-			}
-			hands_changed = true;
-		}
 	}
 		break;
 
