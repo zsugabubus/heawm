@@ -1479,7 +1479,11 @@ box_name(Box *const box)
 
 #undef NAME_MATCHES
 
-	if (UINT32_MAX == letters[(unsigned char)optimum])
+	if (/* Prohibited. */
+	    UINT32_MAX == letters[(unsigned char)optimum] ||
+	    /* Not that important. */
+	    (box_is_container(box) &&
+	     letters[(unsigned char)optimum]))
 		for (unsigned char start = box_is_container(box) ? 'A' : 'a', end = start + ('Z' - 'A');
 		     start <= end;
 		     ++start)
