@@ -3304,6 +3304,16 @@ box_propagate_labels_change(Box *const box)
 		}
 }
 
+static Box *
+box_get_lock_root(Box const *box)
+{
+	Box const *locked = box;
+	while ((box = box->parent))
+		if (box->focus_lock)
+			locked = box;
+	return (Box *)locked;
+}
+
 static void
 hand_focus_box_internal(Hand *const hand, Box *const box)
 {
@@ -3321,10 +3331,7 @@ hand_focus_box_internal(Hand *const hand, Box *const box)
 	}
 
 	/* Find most upper locked box. */
-	Box *locked = box;
-	for (Box *b = box; (b = b->parent);)
-		if (b->focus_lock)
-			locked = b;
+	Box *locked = box_get_lock_root(box);
 
 	Box *recents[2];
 	hand_find_recents(hand, locked, recents, ARRAY_SIZE(recents));
@@ -5912,32 +5919,17 @@ hand_handle_input_key_command(xcb_input_key_press_event_t const *const event, Ha
 		if (!box)
 			break;
 
-		bool const set = !box->parent->focus_lock;
-		if (box == hand->focus)
-			/* focus lock makes sense only if we have more
-			 * children, so move upwards till we set the
-			 * focus lock on a container that has more than
-			 * one children */
-			do
-				if (set != box->focus_lock) {
-					box->focus_lock = set;
-					box->layout_changed = true;
-					box->label_changed = true;
-				}
-			while (box->num_children <= 1 && (box = box->parent));
-		else
-			/* set focus lock from input_focus up to focus */
-			do
-				if (set != (box = box->parent)->focus_lock) {
-					box->focus_lock = set;
-					box->layout_changed = true;
-					box->label_changed = true;
-				}
-			while (hand->focus != box);
-
-		/* we change properties only at a subtree so it is enough if we
-		 * propagate changes upwards from the very bottom */
 		box_propagate_change(box);
+
+		Box *locked = box_get_lock_root(box);
+		if (locked == box) {
+			while (!box_is_monitor(locked) &&
+			       (locked = locked->parent)->num_children <= 1);
+		}
+
+		locked->focus_lock ^= true;
+		locked->layout_changed ^= true;
+		locked->label_changed ^= true;
 	}
 		break;
 
