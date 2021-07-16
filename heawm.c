@@ -4423,25 +4423,14 @@ body_setup_hands(Body *const body)
 static void
 setup_display(void)
 {
-	static char const DEFAULT_DISPLAY[] = ":0";
-
 	int preferred_screen;
 	conn = check_alloc(xcb_connect(NULL, &preferred_screen));
 
 	for (int error; (error = xcb_connection_has_error(conn));) {
 		char const *const display = getenv("DISPLAY");
 
-		if (display) {
-			fprintf(stderr, "Could not open display %s: %s\n",
-					display, xcb_connection_strerror(error));
-		} else {
-			fprintf(stderr, "DISPLAY is not set, default to %s\n",
-					DEFAULT_DISPLAY);
-
-			if (!setenv("DISPLAY", DEFAULT_DISPLAY, false))
-				continue;
-		}
-
+		fprintf(stderr, "Could not open display %s: %s\n",
+				display, xcb_connection_strerror(error));
 		exit(EXIT_FAILURE);
 	}
 
