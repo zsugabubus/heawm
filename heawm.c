@@ -1893,6 +1893,12 @@ xcb_icccm_set_wm_state(xcb_window_t const window, xcb_icccm_wm_state_t const sta
 static void
 box_update(Box *const box, int level);
 
+static bool
+box_can_tile(Box const *const box)
+{
+	return !box->floating && (!box->user_concealed || !box->concealed);
+}
+
 static void
 box_do_layout(Box const *const box)
 {
@@ -1910,8 +1916,7 @@ box_do_layout(Box const *const box)
 
 	for (uint16_t i = 0; i < box->num_children; ++i) {
 		Box *const child = box->children[i];
-		if ((child->user_concealed && child->concealed) ||
-		    child->floating)
+		if (!box_can_tile(child))
 			continue;
 
 		if (!n) {
@@ -1924,8 +1929,7 @@ box_do_layout(Box const *const box)
 			/* Find second least. */
 			for (uint16_t j = 0; j < i; ++j) {
 				Box *const child = box->children[j];
-				if ((!child->user_concealed ||
-				     !child->concealed) &&
+				if (box_can_tile(child) &&
 				    min_focus_seq < child->focus_seq &&
 				    child->focus_seq < new_min_focus_seq)
 					new_min_focus_seq = child->focus_seq;
