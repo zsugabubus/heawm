@@ -47,12 +47,6 @@
 /* https://specifications.freedesktop.org/wm-spec/wm-spec-latest.html#idm46035372536800 */
 /* https://people.gnome.org/~tthurman/docs/metacity/xprops_8h-source.html */
 
-#if defined(__GNUC__)
-# define maybe_unused __attribute__((unused))
-#else
-# define maybe_unused
-#endif
-
 #if defined(__GNUC__) || defined(clang)
 # define unreachable __builtin_unreachable()
 #else
@@ -3127,16 +3121,21 @@ box_reparent(Box *into, uint16_t pos, Box *const box)
 	box_name(box);
 }
 
-__attribute__((malloc))
-static Box *
-box_new(void)
+static void
+box_init(Box *const box)
 {
-	Box *box = check_alloc(calloc(1, sizeof *box + num_hands * sizeof(BoxPointer)));
 	box->focus_hand = HAND_NONE;
 	/* Force reconfiguration. */
 	box->position_changed = true;
 	box->size_changed = true;
 	box->layout_changed = true;
+}
+
+static Box *
+box_new(void)
+{
+	Box *box = check_alloc(calloc(1, sizeof *box));
+	box_init(box);
 	return box;
 }
 
@@ -3643,11 +3642,14 @@ box_resize_float(Box *const box, enum FloatResize how)
 /**
  * Manage window.
  */
-static Box *
+static void
 box_window(xcb_window_t const root_window, xcb_window_t const window)
 {
-	Box *box = box_new();
+	Box *box = calloc(1, sizeof *box + num_hands * sizeof(BoxPointer));
+	if (!box)
+		return;
 
+	box_init(box);
 	box->window = window;
 	box->frame = xcb_generate_id(conn);
 
@@ -3832,11 +3834,11 @@ box_window(xcb_window_t const root_window, xcb_window_t const window)
 
 	box_append_net_client_list(box);
 
-	return box;
+	return;
 
 fail:
 	box_delete(box);
-	return NULL;
+	return;
 }
 
 static void
@@ -4972,7 +4974,7 @@ hands_update(void)
 	devices_destroy();
 
 	num_devices = xcb_input_xi_query_device_infos_length(reply);
-	devices = check_alloc(realloc(devices, num_devices * sizeof(*devices)));
+	devices = check_alloc(realloc(devices, num_devices * sizeof *devices));
 	Device *device = devices;
 
 	for (xcb_input_xi_device_info_iterator_t iter = xcb_input_xi_query_device_infos_iterator(reply);
