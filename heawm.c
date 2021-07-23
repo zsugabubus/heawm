@@ -4751,7 +4751,8 @@ box_uresize(Box *const box, bool const zoom)
 	box_set_usize_with_ureposition(box,
 			box->urect.width * coeff / 100,
 			box->urect.height * coeff / 100);
-	if (box->position_changed)
+	if (box->position_changed ||
+	    box->size_changed)
 		box_propagate_change(box);
 }
 
