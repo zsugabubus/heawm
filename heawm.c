@@ -2990,6 +2990,8 @@ box_set_floating(Box *const box, bool const floating)
 
 	box->parent->layout_changed = true;
 	box->floating = floating;
+	if (!box->user_concealed)
+		box->concealed = false;
 
 	/* Restack windows. */
 	Box *b;
