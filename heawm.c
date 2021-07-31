@@ -836,9 +836,11 @@ static bool
 box_is_super_container(Box const *const box)
 {
 	assert(box_is_container(box));
-	for (uint16_t i = 0; i < box->num_children; ++i)
-		if (!box_is_container(box->children[i]))
+	for (uint16_t i = 0; i < box->num_children; ++i) {
+		Box const *const child = box->children[i];
+		if (!box_is_container(child) && !child->floating)
 			return false;
+	}
 	return true;
 }
 
