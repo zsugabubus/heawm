@@ -6198,7 +6198,7 @@ box_snap(Box const *const box, uint16_t distance, int16_t *const px, int16_t *co
 	/* Snap to children. */
 	for (uint16_t i = 0; i < parent->num_children; ++i) {
 		Box const *const child = parent->children[i];
-		if (box == child)
+		if (box == child || !child->mapped)
 			continue;
 
 		to = &child->rect;
