@@ -9,7 +9,8 @@ heawm \- X11 window manager from the angels
 .SH DESCRIPTION
 .B heawm
 is a keyboard\(hycentric, semidynamic tiling window manager for the X Window
-System, aiming to provide efficient window navigation and management.
+System with multihead and multihand support, aiming to provide efficient
+window navigation and management.
 .
 .SS Window management
 .B heawm

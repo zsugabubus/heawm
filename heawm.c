@@ -38,6 +38,8 @@
 #include <xkbcommon/xkbcommon-x11.h>
 #include <xkbcommon/xkbcommon.h>
 
+#include "config.h"
+
 /* TEST: https://superuser.com/questions/801611/how-to-make-all-applications-respect-my-modified-xkb-layout/844673#844673 */
 /* https://specifications.freedesktop.org/wm-spec/1.3/ar01s05.html */
 /* https://specifications.freedesktop.org/wm-spec/1.3/ar01s07.html */
@@ -5896,7 +5898,7 @@ hand_handle_input_key_command(xcb_input_key_press_event_t const *const event, Ha
 	 * .B f
 	 * and place according to Golden Ratio.
 	 * .TP
-	 * .BR * ,\  /
+	 * .BR "*" ,\  /
 	 * Refer to
 	 * .BR Mod-WheelUp ,\  Mod-WheelDown .
 	 * .RE
@@ -6685,16 +6687,10 @@ main(int argc, char *argv[])
 		 */
 		case 'v':
 			printf(VERSION"\n");
-			exit(EXIT_SUCCESS);
-
-		case '?':
-		case ':':
-			fprintf(stderr, "Option -%c is invalid or requires an argument\n",
-					optopt);
-			exit(EXIT_FAILURE);
+			return EXIT_SUCCESS;
 
 		default:
-			abort();
+			return EXIT_FAILURE;
 		}
 	}
 

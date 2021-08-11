@@ -1,0 +1,248 @@
+HEAWM(1)                    General Commands Manual                   HEAWM(1)
+
+
+
+NAME
+       heawm - X11 window manager from the angels
+
+SYNOPSIS
+       heawm
+
+DESCRIPTION
+       heawm  is a keyboard‐centric, semidynamic tiling window manager for the
+       X Window System with multihead and multihand support, aiming to provide
+       efficient window navigation and management.
+
+   Window management
+       heawm uses box as the building block to express hierarchy and layout of
+       windows. A box may contain further boxes or a client  window,  so  that
+       they form a tree of boxes.
+
+       Children  of  a container box are dynamically tiled inside an automatic
+       grid. The dimensions of the grid (number of columns and rows) are auto‐
+       matically chosen to provide a best-fit arrangement.
+
+       The maximum number of tiles appearing inside a grid can be limited, ex‐
+       cluding least recently used children. A box can be  optionally  cherry-
+       picked and be explicitly hidden or shown in the layout.
+
+       Floating boxes can be freely sized and always appear above tiled boxes.
+
+       When  a floating box conceals more than one third of a just now focused
+       tiled box it is placed to an alternative position if possible.
+
+       Monitors are also floating boxes with a restriction that they cannot be
+       explicitly moved or resized by the user for obvious reasons.
+
+       Boxes  can be addressed by their name that is shown at their label. Box
+       labels are circled with the color(s) of focusing hands.
+
+   Session management
+       Whenever a child of a monitor is focused, same-named children of  other
+       monitors  gets focused, providing an convenient mechanism to switch be‐
+       tween related windows across multiple monitors.
+
+   Technical details
+       heawm is reparenting.
+
+       heawm provides no window decorators.
+
+       heawm announces itself EWMH compliant, however only a minimal subset of
+       these  standards are implemented—mainly because they are useless and/or
+       inapplicable to the concepts.
+
+OPTIONS
+       -v     Show Git commit (version) and exit.
+
+USAGE
+       Escape Whenever you feel stucked.
+
+   Keybindings
+       Mod--  Decrease system volume.
+
+       Mod-+  Increase system volume.
+
+       Mod-{A-Za-z}...
+              Focus box. Run hook autostart name if  there  is  no  such  box.
+
+
+       Mod-Tab
+              Focus box that previously received input.
+
+       Mod-)  Open hook quickstart inside $TERMINAL.
+
+       Mod-]  Open alsamixer(1).
+
+       Mod-*  Toggle system mute.
+
+       Mod-Return
+              Open $TERMINAL.
+
+       Mod-Space
+              Toggle  visibility  of root box (everything). Available only for
+              the first hand.
+
+       Mod-Esc
+              Escape from wherever you are.
+
+       Mod-!  Refer to Mod-Ctrl-t
+
+       Mod-.  Refer to Mod-Ctrl-f
+
+       Mod-$  Refer to Mod-Ctrl-n
+
+       Mod-;  Refer to Mod-Ctrl-k
+
+       Mod-,  Refer to Mod-Ctrl-j
+
+       Mod-{  Refer to Mod-Ctrl-x
+
+       Mod-}  Refer to Mod-Ctrl-a
+
+       Mod-#  Focus floating parent.
+
+       Mod-Ctrl-group
+              Group related boxes.
+
+              Related boxes are determined by  WM_CLIENT_LEADER  and  WM_CLASS
+              window properties in this order.
+
+       Mod-Ctrl-barricade
+              Toggle pointer barrier around focused box.
+
+       Mod-Ctrl-take [ Mod-{A-Za-z}... ]... how
+              Take box to somewhere else.  how can be:
+
+              after, paste
+                     Move box after focused one.
+
+              before, Paste
+                     Move box before focused one.
+
+              into   Move  box into container. If box is not a container, make
+                     a container out of it.
+
+              h, j, k, l
+                     Place box visually at the given direction.
+
+              H, J, K, L
+                     Make container from box before move.
+
+              swap   Swap box with focused one.
+
+              xtract Take out every children of box and place them  after  fo‐
+                     cused box.
+
+              Xtract Just like x but place before.
+
+              float  Make box floating inside its parent.
+
+              1..9   f and place according to usual numeric keypad layout.
+
+              0      f and place according to Golden Ratio.
+
+              *, /   Refer to Mod-WheelUp, Mod-WheelDown.
+
+
+       Mod-Ctrl-lock
+              Toggle focus lock inside box.
+
+       Mod-Ctrl-show
+              Explicitly unconceal box.
+
+       Mod-Ctrl-hide
+              Explicitly conceal box.
+
+       Mod-Ctrl-a
+              Decrease number of visible children.
+
+       Mod-Ctrl-x
+              Increase number of visible children.
+
+       Mod-Ctrl-maximize
+              Toggle between all and one visible children.
+
+       Mod-Ctrl-full
+              Do Mod-Ctrl-m for each level inside a floating box.
+
+       Mod-Ctrl-|
+              Toggle between vertical and horizontal fill modes.
+
+       Mod-Ctrl-k
+              Focus parent.
+
+       Mod-Ctrl-j
+              Focus child.
+
+       Mod-Ctrl-name {A-Za-z}... Return
+              Name focused box. When left empty, an automatic name will be as‐
+              signed to the box.
+
+              Some special keys are also recogzined, namely:
+
+              +, -   Show/hide name label.
+
+              *, /   On a container show/hide name labels recursively;  other‐
+                     wise  show/hide any labels that obscures part of the win‐
+                     dow.
+
+              $      Reset names recursively.
+
+
+       Mod-Ctrl-window
+              Close window. Kill client if  repeated  within  a  half  second.
+
+
+       Mod-Ctrl-zz
+              Center pointer inside box.
+
+       Mod-PrimaryButtonPress
+              Focus  window and start moving a floating box. Force snap points
+              with Shift.
+
+       Mod-SecondaryButtonPress
+              Resize floating box. Force snap points with Shift.
+
+       Mod-WheelUp, Mod-WheelDown
+              Resize floating box.
+
+SIGNALS
+       SIGINT, SIGTERM, SIGQUIT
+              Terminate program gracefully.
+
+EXIT STATUS
+       (any)  Indicates that program does not run anymore.
+
+HOOKS
+       Hooks can be installed under $HEAWM_HOME directory.
+
+       exit   Run before exiting.
+
+       displaychange
+              Run whenever display configuration changes,  e.g.  monitor  con‐
+              nected/disconnected, resolution changed. See xrandr(1).
+
+       inputchange
+              Run  whenever  input  devices  change, e.g. keyboard plugged/un‐
+              plugged, master device added. See xinput(1).
+
+       autostart
+              Run whenever user has would like to jump to a  non-existing  la‐
+              bel. Can be useful to automagically start programs.
+
+       startup
+              Run on program (re)start.
+
+ENVIRONMENT
+       HEAWM_HOME
+              Specifies directory where main configuration resides.
+
+AUTHORS
+       Written by zsugabubus.
+
+SEE ALSO
+       xinput(1) Xorg(1) xpenguins(1) xrandr(1) xrdb(1)
+
+
+
+                                 November 2020                        HEAWM(1)
