@@ -5,6 +5,7 @@ heawm \- X11 window manager from the angels
 .SH SYNOPSIS
 .
 .B heawm
+.RI [ OPTION ]...
 .
 .SH DESCRIPTION
 .B heawm
