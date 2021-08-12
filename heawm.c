@@ -6678,14 +6678,14 @@ main(int argc, char *argv[])
 
 	setup_signals();
 
-	for (char c; -1 != (c = getopt(argc, argv, "v"));) {
+	for (char c; -1 != (c = getopt(argc, argv, "V"));) {
 		switch (c) {
 		/*MAN(OPTIONS)
 		 * .TP
-		 * .B \-v
+		 * .B \-V
 		 * Show Git commit (version) and exit.
 		 */
-		case 'v':
+		case 'V':
 			printf(VERSION"\n");
 			return EXIT_SUCCESS;
 
