@@ -1796,6 +1796,7 @@ box_label_is_visible(Box const *const box)
 	for_each_hand {
 		switch (hand->mode) {
 		case HAND_MODE_NONE:
+		case HAND_MODE_POINTER_MOVE:
 			if (box->hide_label &&
 			    /* Show labels for focused containers. */
 			    !(box_is_container(box) && box_has_any_hand_focus(box)))
