@@ -86,6 +86,10 @@ typedef struct {
 
 #define XCHECK(xcb_request, ...) cookie_check(XCOOKIE(xcb_request, __VA_ARGS__))
 
+/**
+ * Perform XCB request and optionally check return value for debugging
+ * purposes.
+ */
 #if 1 <= HEAWM_VERBOSE
 # define XDO(xcb_request, ...) (void)XCHECK(xcb_request, __VA_ARGS__)
 #else
@@ -232,7 +236,6 @@ enum FloatResize {
 				loop_ = false; \
 				break; \
 			} \
-			assert((x)->parent); \
 			(x) = (x)->parent; \
 		} \
 		if (loop_) \
@@ -398,8 +401,11 @@ enum HandMode {
 	HAND_MODE_POINTER_MOVE,
 };
 
-#define MAX_NUM_HANDS 63U
-#define HAND_NONE (MAX_NUM_HANDS + 1U)
+enum {
+	DEVICE_MAX = 128,
+	HAND_MAX = DEVICE_MAX / 2,
+	HAND_NONE = HAND_MAX,
+};
 
 #define for_each_hand for_each_template_(Hand, hands, uint8_t, hand, 0)
 
@@ -494,16 +500,15 @@ typedef struct {
 
 static bool hands_changed;
 static uint8_t num_hands;
-static Hand *hands;
+static Hand hands[HAND_MAX];
 
 typedef struct {
-	xcb_input_device_id_t id;
+	uint8_t hand;
 	struct xkb_keymap *keymap; /* NULL if not keyboard */
-	Hand *hand;
 } Device;
 
 static uint8_t num_devices;
-static Device *devices;
+static Device devices[DEVICE_MAX];
 
 #define for_each_body for_each_template_(Body, bodies, uint8_t, body, 0 == body_index)
 
@@ -550,7 +555,7 @@ typedef struct {
 } Body;
 
 static uint8_t num_bodies;
-static Body *bodies;
+static Body bodies[5];
 
 typedef struct {
 	char const *name;
@@ -912,7 +917,7 @@ label_repaint(Label const *const label, bool const shape)
 			goto normal;
 
 		uint8_t i = 0;
-		uint8_t focus_hands[MAX_NUM_HANDS];
+		uint8_t focus_hands[HAND_MAX];
 		for (uint8_t j = 0; j < num_hands; ++j) {
 			Hand const *const hand = &hands[j];
 			if (hand->input_focus == label->base ||
@@ -1038,14 +1043,6 @@ label_repaint(Label const *const label, bool const shape)
 	cairo_surface_flush(surface);
 	cairo_surface_destroy(surface);
 	cairo_destroy(cr);
-}
-
-static void *
-check_alloc(void *p) {
-	if (p)
-		return p;
-	fputs("Failed to allocate memory\n", stderr);
-	exit(EXIT_FAILURE);
 }
 
 static Label *
@@ -3039,11 +3036,29 @@ box_vacuum(Box *const box)
 	}
 }
 
+static void *
+xrealloc(void *ptr, size_t size)
+{
+	assert(size);
+	for (;;) {
+		void *p = realloc(ptr, size);
+		if (p)
+			return p;
+		sleep(5);
+	}
+}
+
+static void *
+xmalloc(size_t size)
+{
+	return xrealloc(NULL, size);
+}
+
 static void
 box_realloc(Box **const box, size_t const new_size)
 {
 	Box *const old = *box;
-	Box *const new = check_alloc(realloc(old, new_size));
+	Box *const new = xrealloc(old, new_size);
 
 	if (old == new)
 		return;
@@ -3128,6 +3143,7 @@ box_reparent(Box *into, uint16_t pos, Box *const box)
 static void
 box_init(Box *const box)
 {
+	memset(box, 0, sizeof *box);
 	box->focus_hand = HAND_NONE;
 	/* Force reconfiguration. */
 	box->position_changed = true;
@@ -3138,7 +3154,7 @@ box_init(Box *const box)
 static Box *
 box_new(void)
 {
-	Box *box = check_alloc(calloc(1, sizeof *box));
+	Box *box = xmalloc(sizeof *box);
 	box_init(box);
 	return box;
 }
@@ -3649,7 +3665,7 @@ box_resize_float(Box *const box, enum FloatResize how)
 static void
 box_window(xcb_window_t const root_window, xcb_window_t const window)
 {
-	Box *box = calloc(1, sizeof *box + num_hands * sizeof(BoxPointer));
+	Box *box = xmalloc(sizeof *box + num_hands * sizeof(BoxPointer));
 	if (!box)
 		return;
 
@@ -3975,7 +3991,7 @@ body_setup_windows(Body *const body)
 	int const num_children = xcb_query_tree_children_length(reply);
 
 	xcb_get_window_attributes_cookie_t *const cookies =
-		check_alloc(malloc(num_children * sizeof *cookies));
+		xmalloc(num_children * sizeof *cookies);
 
 	for (int i = 0; i < num_children; ++i)
 		cookies[i] = xcb_get_window_attributes_unchecked(conn, children[i]);
@@ -4045,13 +4061,13 @@ static void
 body_setup_net_supported(Body *const body)
 {
 #define xmacro(name) +1
-	static uint32_t const NUM_NET_ATOMS = NET_ATOMS;
+	static uint32_t const NET_ATOM_COUNT = NET_ATOMS;
 #undef xmacro
 
 	XDO(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
 			body->screen->root, ATOM(_NET_SUPPORTED),
 			XCB_ATOM_ATOM, 32,
-			NUM_NET_ATOMS, atoms);
+			NET_ATOM_COUNT, atoms);
 }
 
 static void
@@ -4434,9 +4450,9 @@ static void
 setup_display(void)
 {
 	int preferred_screen;
-	conn = check_alloc(xcb_connect(NULL, &preferred_screen));
 
-	for (int error; (error = xcb_connection_has_error(conn));) {
+	conn = xcb_connect(NULL, &preferred_screen);
+	for (int error; !conn || (error = xcb_connection_has_error(conn));) {
 		char const *const display = getenv("DISPLAY");
 
 		fprintf(stderr, "Could not open display %s: %s\n",
@@ -4455,14 +4471,16 @@ setup_display(void)
 
 	xcb_setup_t const *const setup = xcb_get_setup(conn);
 
-	num_bodies = xcb_setup_roots_length(setup);
-	bodies = check_alloc(calloc(num_bodies, sizeof *bodies));
-
 	int i = 0;
 	for (xcb_screen_iterator_t iter = xcb_setup_roots_iterator(setup);
 	     0 < iter.rem;
 	     ++i, xcb_screen_next(&iter))
 	{
+		if ((int)ARRAY_SIZE(bodies) <= i) {
+			fprintf(stderr, "Too much root windows\n");
+			break;
+		}
+
 		xcb_screen_t *const screen = iter.data;
 		Body *const body = &bodies[preferred_screen == i ? 0 : i + 1];
 
@@ -4472,6 +4490,7 @@ setup_display(void)
 
 		body_setup(body);
 	}
+	num_bodies = i;
 
 	XDO(xcb_ungrab_server, conn);
 
@@ -4616,26 +4635,18 @@ hand_grab_pointer(Hand const *const hand)
 	}
 }
 
-static Hand *
-get_hand_by_master_keyboard(xcb_input_device_id_t const master_keyboard)
+static Device *
+device_find_by_id(xcb_input_device_id_t const deviceid)
 {
-	for_each_hand
-		if (master_keyboard == hand->master_keyboard)
-			return hand;
-
-	return NULL;
+	assert(deviceid < DEVICE_MAX);
+	return &devices[deviceid];
 }
 
-static Device *
-get_device_by_id(xcb_input_device_id_t const deviceid)
+static Hand *
+hand_find_by_device_id(xcb_input_device_id_t deviceid)
 {
-	for (uint8_t i = 0; i < num_devices; ++i) {
-		Device const *const device = &devices[i];
-		if (deviceid == device->id)
-			return (Device *)device;
-	}
-
-	return NULL;
+	Device *const device = device_find_by_id(deviceid);
+	return &hands[device->hand];
 }
 
 static void
@@ -4644,7 +4655,7 @@ handle_input_focus_in(xcb_input_focus_in_event_t const *const event)
 	if (XCB_INPUT_NOTIFY_MODE_NORMAL != event->mode)
 		return;
 
-	Hand *const hand = get_hand_by_master_keyboard(event->deviceid);
+	Hand *const hand = hand_find_by_device_id(event->deviceid);
 	if (event->event != hand_get_wanted_focus(hand) ||
 	    /* Focus in event generated for root (and no focus out) but we have
 	     * to forcefully focus it again to make it really focused... */
@@ -4885,9 +4896,6 @@ handle_client_message(xcb_client_message_event_t const *const event)
 	}
 }
 
-static Hand *
-hand_find_by_master_pointer(xcb_input_device_id_t const pointer);
-
 static void
 hand_setup(Hand *const hand)
 {
@@ -4897,31 +4905,31 @@ hand_setup(Hand *const hand)
 	hand_grab_pointer(hand);
 	hand_grab_keyboard(hand);
 
-	uint32_t const MASK =
-		/* so we can check for repeating */
-		XCB_XKB_PER_CLIENT_FLAG_DETECTABLE_AUTO_REPEAT |
-		/* send good state in events */
-		XCB_XKB_PER_CLIENT_FLAG_GRABS_USE_XKB_STATE |
-		XCB_XKB_PER_CLIENT_FLAG_LOOKUP_STATE_WHEN_GRABBED;
+	enum {
+		MASK =
+			/* So we can check for repeating. */
+			XCB_XKB_PER_CLIENT_FLAG_DETECTABLE_AUTO_REPEAT |
+			/* Send good state in events. */
+			XCB_XKB_PER_CLIENT_FLAG_GRABS_USE_XKB_STATE |
+			XCB_XKB_PER_CLIENT_FLAG_LOOKUP_STATE_WHEN_GRABBED,
+		REQUIRED_EVENTS =
+			XCB_XKB_EVENT_TYPE_MAP_NOTIFY |
+			XCB_XKB_EVENT_TYPE_NEW_KEYBOARD_NOTIFY,
+		REQUIRED_MAP_PARTS =
+			XCB_XKB_MAP_PART_KEY_TYPES |
+			XCB_XKB_MAP_PART_KEY_SYMS |
+			XCB_XKB_MAP_PART_MODIFIER_MAP |
+			XCB_XKB_MAP_PART_EXPLICIT_COMPONENTS |
+			XCB_XKB_MAP_PART_KEY_ACTIONS |
+			XCB_XKB_MAP_PART_VIRTUAL_MODS |
+			XCB_XKB_MAP_PART_VIRTUAL_MOD_MAP,
+	};
 
 	xcb_xkb_per_client_flags(conn,
 			hand->master_keyboard,
 			MASK,
 			MASK,
 			0, 0, 0);
-
-	/* xkbcommon-x11 */
-	uint16_t const REQUIRED_EVENTS =
-		XCB_XKB_EVENT_TYPE_MAP_NOTIFY |
-		XCB_XKB_EVENT_TYPE_NEW_KEYBOARD_NOTIFY;
-	uint16_t const REQUIRED_MAP_PARTS =
-		XCB_XKB_MAP_PART_KEY_TYPES |
-		XCB_XKB_MAP_PART_KEY_SYMS |
-		XCB_XKB_MAP_PART_MODIFIER_MAP |
-		XCB_XKB_MAP_PART_EXPLICIT_COMPONENTS |
-		XCB_XKB_MAP_PART_KEY_ACTIONS |
-		XCB_XKB_MAP_PART_VIRTUAL_MODS |
-		XCB_XKB_MAP_PART_VIRTUAL_MOD_MAP;
 
 	XDO(xcb_xkb_select_events, conn, hand->master_keyboard,
 			REQUIRED_EVENTS,
@@ -4947,6 +4955,7 @@ devices_destroy(void)
 		Device *const device = &devices[i];
 		xkb_keymap_unref(device->keymap);
 	}
+	memset(devices, 0, sizeof devices);
 }
 
 static void
@@ -4956,31 +4965,17 @@ hands_update(void)
 	if (!reply)
 		return;
 
-	/* Map old hand indexes to new hand indexes for correct stack history. */
-	/* According to specification devices above 127 are invisible to clients. */
-	uint8_t hand_map[HAND_NONE + 1];
-
-	/* Reassign boxes of deattached hands to an invalid hand. */
-	memset(hand_map, HAND_NONE, num_hands);
-	hand_map[HAND_NONE] = HAND_NONE;
-
-	uint8_t new_num_hands = 0;
-	for (xcb_input_xi_device_info_iterator_t iter = xcb_input_xi_query_device_infos_iterator(reply);
-	     0 < iter.rem;
-	     xcb_input_xi_device_info_next(&iter))
-	{
-		xcb_input_xi_device_info_t const *const input_device = iter.data;
-		new_num_hands += XCB_INPUT_DEVICE_TYPE_MASTER_POINTER == input_device->type;
-	}
-
-	Hand *const new_hands = check_alloc(calloc(new_num_hands, sizeof *new_hands));
-	Hand *hand = new_hands;
+	Hand old_hands[HAND_MAX];
+	memcpy(old_hands, hands, sizeof old_hands);
+	memset(hands, 0, sizeof hands);
+	Hand *hand = hands;
 
 	devices_destroy();
 
-	num_devices = xcb_input_xi_query_device_infos_length(reply);
-	devices = check_alloc(realloc(devices, num_devices * sizeof *devices));
-	Device *device = devices;
+	/* Mapping of old hands to new ones. */
+	uint8_t hand_map[HAND_NONE + 1];
+	memset(hand_map, HAND_NONE, num_hands);
+	hand_map[HAND_NONE] = HAND_NONE;
 
 	for (xcb_input_xi_device_info_iterator_t iter = xcb_input_xi_query_device_infos_iterator(reply);
 	     0 < iter.rem;
@@ -4991,10 +4986,18 @@ hands_update(void)
 		/* Create hand for every master device pair. It is enough to look
 		 * for pointer master devices because they always come in pair. */
 		if (XCB_INPUT_DEVICE_TYPE_MASTER_POINTER == input_device->type) {
-			Hand *const old_hand = hand_find_by_master_pointer(input_device->deviceid);
+			Hand const *old_hand = NULL;
+			for (uint8_t i = 0; i < num_hands; ++i) {
+				if (input_device->deviceid == old_hands[i].master_pointer) {
+					old_hand = &old_hands[i];
+					break;
+				}
+			}
+
 			if (old_hand) {
 				*hand = *old_hand;
-				hand_map[old_hand - hands] = hand - new_hands;
+				assert(hand->master_keyboard == input_device->attachment);
+				hand_map[old_hand - old_hands] = hand - hands;
 			} else {
 				hand->master_pointer = input_device->deviceid;
 				hand->master_keyboard = input_device->attachment;
@@ -5007,7 +5010,7 @@ hands_update(void)
 
 			for (uint32_t i = 0; i < num_hand_rules; ++i) {
 				HandRule const *const rule = &hand_rules[i];
-				if (rule->index != HAND_NONE && rule->index != (hand - new_hands))
+				if (rule->index != HAND_NONE && rule->index != (hand - hands))
 					continue;
 				if (rule->name && strncmp(rule->name, name, name_size))
 					continue;
@@ -5019,20 +5022,19 @@ hands_update(void)
 			++hand;
 		}
 
-		/* Also record every slave and master device and attach it to head (master device). */
-		device->id = input_device->deviceid;
+		assert(input_device->deviceid < DEVICE_MAX);
+		Device *device = &devices[input_device->deviceid];
 
-		device->hand = new_hands;
-		while (device->hand->master_pointer != input_device->attachment &&
-		       device->hand->master_keyboard != input_device->attachment)
+		/* Attach device to hand. */
+		device->hand = 0;
+		while (hands[device->hand].master_pointer != input_device->attachment &&
+		       hands[device->hand].master_keyboard != input_device->attachment)
 			++device->hand;
-
-		device->keymap = NULL;
-		++device;
 	}
-	assert(device - devices == num_devices);
 
 	free(reply);
+
+	uint8_t new_num_hands = hand - hands;
 
 	/* Update focus history. */
 	Box *box;
@@ -5043,29 +5045,23 @@ hands_update(void)
 
 		box_realloc(&box, sizeof(Box) + new_num_hands * sizeof(BoxPointer));
 
-		BoxPointer old_pointers[MAX_NUM_HANDS];
-		/* save pointers of box becase we may shuffle them */
-		memcpy(old_pointers, Box_pointers(box), num_hands * sizeof(BoxPointer));
-		/* reset all */
+		/* Remap. */
+		BoxPointer saved_pointers[HAND_MAX];
+		memcpy(saved_pointers, Box_pointers(box), num_hands * sizeof(BoxPointer));
 		memset(Box_pointers(box), 0, new_num_hands * sizeof(BoxPointer));
-
 		for (uint8_t i = 0; i < num_hands; ++i)
 			if (HAND_NONE != hand_map[i])
-				Box_pointers(box)[hand_map[i]] = old_pointers[i];
+				Box_pointers(box)[hand_map[i]] = saved_pointers[i];
 	}
 
 	for (uint8_t i = 0; i < num_hands; ++i)
 		if (HAND_NONE == hand_map[i])
-			hand_destroy(&hands[i]);
+			hand_destroy(&old_hands[i]);
 
+	num_hands = new_num_hands;
 	/* Forget deattached hands' focus by incrementing focus number of
 	 * hands alive. */
 	hands_update_focus();
-
-	free(hands);
-	hands = new_hands;
-	num_hands = new_num_hands;
-
 	hands_try_focus_all();
 
 	/*MAN(HOOKS)
@@ -5080,23 +5076,17 @@ hands_update(void)
 static void
 handle_input_hierarchy_change(xcb_input_hierarchy_event_t const *const event)
 {
-	if (event->flags & (XCB_INPUT_HIERARCHY_MASK_MASTER_ADDED |
-	                    XCB_INPUT_HIERARCHY_MASK_MASTER_REMOVED |
-	                    XCB_INPUT_HIERARCHY_MASK_SLAVE_ADDED |
-	                    XCB_INPUT_HIERARCHY_MASK_SLAVE_REMOVED |
-	                    XCB_INPUT_HIERARCHY_MASK_SLAVE_ATTACHED |
-	                    XCB_INPUT_HIERARCHY_MASK_SLAVE_DETACHED))
+	enum {
+		MASK =
+			XCB_INPUT_HIERARCHY_MASK_MASTER_ADDED |
+			XCB_INPUT_HIERARCHY_MASK_MASTER_REMOVED |
+			XCB_INPUT_HIERARCHY_MASK_SLAVE_ADDED |
+			XCB_INPUT_HIERARCHY_MASK_SLAVE_REMOVED |
+			XCB_INPUT_HIERARCHY_MASK_SLAVE_ATTACHED |
+			XCB_INPUT_HIERARCHY_MASK_SLAVE_DETACHED,
+	};
+	if (event->flags & MASK)
 		hands_update();
-}
-
-static Hand *
-hand_find_by_master_pointer(xcb_input_device_id_t const master_pointer)
-{
-	for_each_hand
-		if (master_pointer == hand->master_pointer)
-			return hand;
-
-	return NULL;
 }
 
 /** Modifiers we are interested in. */
@@ -6087,13 +6077,13 @@ handle_input_key_press(xcb_input_key_press_event_t const *const event)
 {
 	bool propagate = true;
 
-	Device *const device = get_device_by_id(event->sourceid);
-	assert(device);
-	Hand *hand = device->hand;
-
-	assert(hand == hands);
+	xcb_input_device_id_t deviceid = event->sourceid;
+	Device *const device = device_find_by_id(deviceid);
+	Hand *const hand = &hands[device->hand];
 	if (!device->keymap)
-		device->keymap = xkb_x11_keymap_new_from_device(xkb_context, conn, device->id, XKB_KEYMAP_COMPILE_NO_FLAGS);
+		device->keymap = xkb_x11_keymap_new_from_device(
+				xkb_context, conn,
+				deviceid, XKB_KEYMAP_COMPILE_NO_FLAGS);
 	if (!device->keymap) {
 		fprintf(stderr, "Could not load keymap\n");
 		goto out;
@@ -6218,9 +6208,7 @@ box_snap(Box const *const box, uint16_t distance, int16_t *const px, int16_t *co
 static void
 handle_input_motion(xcb_input_motion_event_t const *const event)
 {
-	Device *const device = get_device_by_id(event->sourceid);
-	assert(device);
-	Hand *const hand = device->hand;
+	Hand *const hand = hand_find_by_device_id(event->sourceid);
 
 	if (HAND_MODE_POINTER_MOVE == hand->mode) {
 		int16_t x = (event->root_x >> 16) + hand->mode_rect.x,
@@ -6237,9 +6225,7 @@ handle_input_motion(xcb_input_motion_event_t const *const event)
 static void
 handle_input_button_release(xcb_input_button_press_event_t const *const event)
 {
-	Device *const device = get_device_by_id(event->sourceid);
-	assert(device);
-	Hand *const hand = device->hand;
+	Hand *const hand = hand_find_by_device_id(event->sourceid);
 
 	if (HAND_MODE_POINTER_MOVE == hand->mode) {
 		hand_leave_mode(hand);
@@ -6250,9 +6236,7 @@ handle_input_button_release(xcb_input_button_press_event_t const *const event)
 static void
 handle_input_button_press(xcb_input_button_press_event_t const *const event)
 {
-	Device *const device = get_device_by_id(event->sourceid);
-	assert(device);
-	Hand *const hand = device->hand;
+	Hand *const hand = hand_find_by_device_id(event->sourceid);
 
 	if (1 == event->detail) {
 		/*MAN(Keybindings)
@@ -6503,13 +6487,7 @@ handle_randr_event(xcb_generic_event_t const *const event)
 static void
 handle_keyboard_mapping(uint8_t const device_id)
 {
-	Device *const device = get_device_by_id(device_id);
-	if (!device) {
-		/* It is currently unclear under what circumstances can it occur,
-		 * but it occurs. */
-		return;
-	}
-
+	Device *const device = device_find_by_id(device_id);
 	xkb_keymap_unref(device->keymap), device->keymap = NULL;
 }
 
