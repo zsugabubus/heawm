@@ -320,7 +320,7 @@ struct Box {
 	     size_changed: 1, /**< .rect->{width,height} changed. */
 	     layout_changed: 1, /**< Layout of box (floating) or children changed. */
 	     mapped_changed: 1, /**< .mapped changed. */
-	     focus_changed: 1, /**< Have been focused by a hand. */
+	     focus_changed: 1, /**< Box.focus_seq == root->focus_seq changed. */
 	     content_changed: 1, /**< Check children for changes. */
 	     label_changed: 1, /**< Label should be repainted */
 	     mapped: 1,
@@ -2210,10 +2210,12 @@ box_update_window(Box *const box, int level)
 		list[i++] = box->rect.height;
 	}
 
-	if (box->focus_changed && !box_is_focused(box))
-		box->focus_changed = false;
+	if (box->mapped_changed || box->focus_changed)
+		box_update_net(box);
 
-	if (box->focus_changed || box->layout_changed) {
+	bool const just_focused = box->focus_changed && box_is_focused(box);
+
+	if (just_focused || box->layout_changed) {
 		Box const *const foot = box_get_foot(box);
 		if (foot) {
 			mask |= XCB_CONFIG_WINDOW_SIBLING;
@@ -2248,13 +2250,10 @@ box_update_window(Box *const box, int level)
 	if (box->position_changed || box->size_changed || box->layout_changed)
 		box_update_barrier(box, NULL);
 
-	if (box->mapped_changed || box->focus_changed)
-		box_update_net(box);
-
 	if (root->focus_seq == box->focus_seq &&
 	    (box->size_changed ||
 	     box->position_changed ||
-	     box->focus_changed ||
+	     just_focused ||
 	     box->mapped_changed))
 	{
 		for_each_hand {
