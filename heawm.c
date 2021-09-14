@@ -3243,6 +3243,14 @@ box_swap(Box *const x, Box *const y)
 		box_set_position(y, xrect.x, xrect.y);
 	}
 
+	{
+		bool const t = x->mapped;
+		x->mapped_changed |= y->mapped != x->mapped;
+		x->mapped = y->mapped;
+		y->mapped_changed |= t != y->mapped;
+		y->mapped = t;
+	}
+
 	box_update_children(x->parent);
 	box_update_children(y->parent);
 
