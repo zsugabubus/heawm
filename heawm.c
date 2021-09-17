@@ -394,17 +394,19 @@ static int label_stroke_width = 2;
 static unsigned label_stroke_color = 0x000000;
 static unsigned label_foreground = 0xffff00;
 
+typedef struct {
+	uint8_t hand;
+	struct xkb_keymap *keymap; /* NULL if not keyboard */
+} Device;
+
+static uint16_t num_devices;
+static Device devices[UINT8_MAX + 1];
+
 enum HandMode {
 	HAND_MODE_NONE,
 	HAND_MODE_MOVE,
 	HAND_MODE_NAME,
 	HAND_MODE_POINTER_MOVE,
-};
-
-enum {
-	DEVICE_MAX = 128,
-	HAND_MAX = DEVICE_MAX / 2,
-	HAND_NONE = HAND_MAX,
 };
 
 #define for_each_hand for_each_template_(Hand, hands, uint8_t, hand, 0)
@@ -500,15 +502,9 @@ typedef struct {
 
 static bool hands_changed;
 static uint8_t num_hands;
-static Hand hands[HAND_MAX];
+static Hand hands[ARRAY_SIZE(devices) / 2 /* Pointer + keyboard master device. */];
 
-typedef struct {
-	uint8_t hand;
-	struct xkb_keymap *keymap; /* NULL if not keyboard */
-} Device;
-
-static uint8_t num_devices;
-static Device devices[DEVICE_MAX];
+enum { HAND_NONE = ARRAY_SIZE(hands), };
 
 #define for_each_body for_each_template_(Body, bodies, uint8_t, body, 0 == body_index)
 
@@ -917,7 +913,7 @@ label_repaint(Label const *const label, bool const shape)
 			goto normal;
 
 		uint8_t i = 0;
-		uint8_t focus_hands[HAND_MAX];
+		uint8_t focus_hands[ARRAY_SIZE(hands)];
 		for (uint8_t j = 0; j < num_hands; ++j) {
 			Hand const *const hand = &hands[j];
 			if (hand->input_focus == label->base ||
@@ -4645,7 +4641,7 @@ hand_grab_pointer(Hand const *const hand)
 static Device *
 device_find_by_id(xcb_input_device_id_t const deviceid)
 {
-	assert(deviceid < DEVICE_MAX);
+	assert(deviceid < ARRAY_SIZE(devices));
 	return &devices[deviceid];
 }
 
@@ -4958,11 +4954,11 @@ hand_destroy(Hand *const hand)
 static void
 devices_destroy(void)
 {
-	for (uint8_t i = 0; i < num_devices; ++i) {
+	for (uint16_t i = 0; i < num_devices; ++i) {
 		Device *const device = &devices[i];
 		xkb_keymap_unref(device->keymap);
 	}
-	memset(devices, 0, sizeof devices);
+	memset(devices, 0, num_devices * sizeof *devices);
 }
 
 static void
@@ -4972,9 +4968,9 @@ hands_update(void)
 	if (!reply)
 		return;
 
-	Hand old_hands[HAND_MAX];
-	memcpy(old_hands, hands, sizeof old_hands);
-	memset(hands, 0, sizeof hands);
+	Hand old_hands[ARRAY_SIZE(hands)];
+	memcpy(old_hands, hands, num_hands * sizeof *old_hands);
+	memset(hands, 0, num_hands * sizeof *hands);
 	Hand *hand = hands;
 
 	devices_destroy();
@@ -4993,6 +4989,8 @@ hands_update(void)
 		/* Create hand for every master device pair. It is enough to look
 		 * for pointer master devices because they always come in pair. */
 		if (XCB_INPUT_DEVICE_TYPE_MASTER_POINTER == input_device->type) {
+			assert((size_t)(hand - hands) < ARRAY_SIZE(hands));
+
 			Hand const *old_hand = NULL;
 			for (uint8_t i = 0; i < num_hands; ++i) {
 				if (input_device->deviceid == old_hands[i].master_pointer) {
@@ -5029,7 +5027,7 @@ hands_update(void)
 			++hand;
 		}
 
-		assert(input_device->deviceid < DEVICE_MAX);
+		assert(input_device->deviceid < ARRAY_SIZE(devices));
 		Device *device = &devices[input_device->deviceid];
 
 		/* Attach device to hand. */
@@ -5053,7 +5051,7 @@ hands_update(void)
 		box_realloc(&box, sizeof(Box) + new_num_hands * sizeof(BoxPointer));
 
 		/* Remap. */
-		BoxPointer saved_pointers[HAND_MAX];
+		BoxPointer saved_pointers[ARRAY_SIZE(hands)];
 		memcpy(saved_pointers, Box_pointers(box), num_hands * sizeof(BoxPointer));
 		memset(Box_pointers(box), 0, new_num_hands * sizeof(BoxPointer));
 		for (uint8_t i = 0; i < num_hands; ++i)
