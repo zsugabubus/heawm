@@ -1,0 +1,237 @@
+=head1 NAME
+
+heawm - x11 window manager
+
+=head1 SYNOPSIS
+
+B<heawm>
+
+=head1 DESCRIPTION
+
+B<heawm> is a dynamic tiling window manager for X attempting to provide
+painless window management. Has multi-head and half-baked multi-user support.
+
+B<heawm> comes with a single pixel gap between windows and no gap between
+windows and the edge of the monitor. Windows have a name (C<_HEAWM_NAME>) and a
+label (C<_HEAWM_LABEL>). Name is an arbitrary string that can only ever be
+useful during search, while label is a single letter that is always shown at
+the top right corner of a window. There are no directions between windows but
+these labels are used to address them directly.
+
+Windows can be grouped into unnamed tabs. A tab shows either the zoomed window,
+if any, or its area is split between a single master window (optional) and a
+slave area where the remaining windows are tiled in a grid.
+
+Tabs can be grouped into unnamed sessions. When a session contains floating
+windows only (in one more tabs) it is called a floating session.
+
+Finally, Nth output shows nth tab of the first, focused session. Windows from
+other sessions are hidden. However, floating sessions are always visible,
+essentially providing sticky floating windows.
+
+=head1 DESCRIPTION
+
+=head1 CONTROL
+
+B<Mod> is hardcoded to be Mod4.
+
+=head2 Normal mode
+
+=over 4
+
+=item B<Mod+Return>
+
+Open C<$TERMINAL>.
+
+=item B<Mod+a>..B<Mod+z>
+
+Focus window.
+
+=item B<Mod+!>
+
+Focus urgent window.
+
+=item B<Mod+/>
+
+Open window search bar.
+
+=item B<Mod+Tab>
+
+Focus previously focused window.
+
+=item B<Mod+#>
+
+Focus previously focused tab.
+
+=item B<Mod+[>, B<Mod+]>
+
+Focus prev/next window in tab.
+
+=item B<Mod+{>, B<Mod+}>
+
+Focus prev/next tab in session.
+
+=item B<Mod+(>, B<Mod+)>
+
+Focus prev/next session.
+
+=item B<Mod+.>
+
+Zoom/unzoom focused window.
+
+=item B<Mod+Space>
+
+Move focused window to master position. If it is already in
+master position, swap it with the previously focused window
+and focus it. If previously focused window is in a
+different tab, swap tabs instead and focus its last focused
+window.
+
+=item B<Mod+A>..B<Mod+Z>
+
+Swap with focused window and focus.
+
+=item B<Mod+Escape>
+
+Enter command mode.
+
+=item B<Mod++>, B<Mod+->
+
+Shortcut for B<Mod+Escape +/->.
+
+=item B<Mod+&>
+
+Move window to new tab.
+
+=item B<Mod+;>
+
+Enter label mode.
+
+=item B<Mod+,>
+
+Edit window layout in C<$EDITOR> (opened with C<$TERMINAL>). Lines contain tab
+separated values: window id, label (editable), name (editable), class, title.
+
+Tabs are separated by a single, sessions by at least two blank lines. Lines can
+be freely reordered and deleted, window layout will be changed accordingly.
+Deleted windows are closed (not killed).
+
+=item B<Mod+*>
+
+Warp pointer to the center of the focused window.
+
+=item B<Mod+PrimaryClick>
+
+Focus window and start moving.
+
+=item B<Mod+SecondaryClick>
+
+Move nearest corner of focused window here.
+
+=item B<Mod+WheelDown>, B<Mod+WheelUp>
+
+Same as mode B<Mod+{>, B<Mod+}>.
+
+=item B<Mod+Shift+WheelDown>, B<Mod+Shift+WheelUp>
+
+Same as mode B<Mod+(>, B<Mod+)>.
+
+=item other
+
+Pass-through.
+
+=back
+
+=head2 Command mode
+
+=over 4
+
+=item B<1>..B<9>
+
+Set I<N>.
+
+=item I<N>B<h>, I<N>B<j>, I<N>B<k>, I<N>B<l>
+
+Set place of master window. Master size is set to I<N>, if I<N> is present. If
+not in master mode, I<N> defaults to 6.
+
+=item B<+>, B<->
+
+Increase/decrease master size.
+
+=item I<N>B<s>
+
+Set master size.
+
+=item I<N>B<R>, I<N>B<r>, I<N>B<C>, I<N>B<c>, B<G>, B<g>
+
+Set grid dimensions to fixed number of rows/columns or auto. Uppercase
+variations exit master mode. I<N> defaults to 1.
+
+=item B<M>, B<m>
+
+Enter monocle mode. Grid dimensions are ignored and only the last focused
+window is shown.
+
+=item B<q>
+
+Close window.
+
+=item B<Q>
+
+Kill window.
+
+=item B<i>
+
+Enter insert mode.
+
+=item B<F>
+
+Sink all floating windows.
+
+=item B<f>
+
+Toggle window floating.
+
+=item I<N>B<f>
+
+Float window and move-resize it according to the position of digit I<N> in the
+numeric keypad (1=bottom left).
+
+=item other
+
+Block.
+
+=back
+
+=head2 Label mode
+
+=over 4
+
+=item B<a>..B<z>
+
+Set label of the focused window.
+
+=item B<;>, B<Space>
+
+Choose label automatically for the focused window.
+
+=item other
+
+Block.
+
+=back
+
+=head2 Insert mode
+
+=over 4
+
+=item B<Mod+Escape>
+
+Enter normal mode.
+
+=item other
+
+Pass-through.
+
+=back

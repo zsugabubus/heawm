@@ -1,0 +1,11 @@
+#!/bin/dash
+prop=${1?Property missing}
+case $prop in
+n) prop=_HEAWM_NAME ;;
+l) prop=_HEAWM_LABEL ;;
+esac
+# -id "$(xdotool getwindowfocus)" \
+xprop \
+	-format _HEAWM_NAME 8u \
+	-format _HEAWM_LABEL 8u \
+	-set "$prop" "${2?Value missing}"
