@@ -3586,6 +3586,7 @@ load_tree(struct proc *proc)
 
 	struct session *curs = NULL;
 	struct tab *curt = NULL;
+	struct win *focusw = NULL;
 	int blanks = 2;
 
 	char *line = NULL;
@@ -3637,6 +3638,9 @@ load_tree(struct proc *proc)
 
 		win_update_label(w, label);
 		win_update_name(w, name);
+
+		if (' ' == *line)
+			focusw = w;
 	}
 	free(line);
 	fclose(f);
@@ -3655,6 +3659,8 @@ load_tree(struct proc *proc)
 	}
 
 	wins_changed = true;
+	if (focusw)
+		user_focus_win(proc->user, focusw);
 }
 
 static void
