@@ -2137,6 +2137,7 @@ user_feed_normal(struct user *u, xkb_keysym_t keysym,
 		break;
 
 	case XKB_KEY_comma:
+	case XKB_KEY_slash:
 		user_dump_tree(u);
 		break;
 
