@@ -23,7 +23,6 @@ endif
 
 executable('heawm',
 	'heawm.c',
-	'editor.c',
 	'win_hash.c',
 	dependencies: deps,
 	install: true,

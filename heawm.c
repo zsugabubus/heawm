@@ -36,7 +36,6 @@
 #include <xkbcommon/xkbcommon-x11.h>
 #include <xkbcommon/xkbcommon.h>
 
-#include "editor.h"
 #include "win_hash.h"
 
 /*
@@ -345,15 +344,12 @@ struct user {
 		MODE_COMMAND,
 		MODE_MOUSE,
 		MODE_INSERT,
-		MODE_WINDOWS,
 		MODE_RELABEL,
 	} mode;
 	uint32_t num;
 	xcb_timestamp_t timestamp;
 	int16_t pointer_x, pointer_y;
-	xcb_window_t popup;
 	xcb_input_device_id_t master_pointer, master_keyboard;
-	struct editor input;
 };
 
 static TAILQ_HEAD(, user) users = TAILQ_HEAD_INITIALIZER(users);
@@ -733,9 +729,6 @@ win_update_name(struct win const *w, char const *name)
 }
 
 static void
-user_render_popup(struct user *);
-
-static void
 win_prop_update_title(struct win *w, void *data, int sz)
 {
 	/* Ignore zero-sized reply meaning property is not supported (or
@@ -949,8 +942,6 @@ user_number(struct user const *u, uint32_t def)
 static xcb_window_t
 user_get_focus_target(struct user *u)
 {
-	if (MODE_WINDOWS == u->mode)
-		return u->popup;
 	if (u->focused_win)
 		return u->focused_win->window;
 	return screen->root;
@@ -1173,7 +1164,6 @@ user_focus_win(struct user *u, struct win *w)
 
 	if (!w) {
 		user_update_input_focus(u);
-		user_render_popup(u);
 		return;
 	}
 
@@ -1217,7 +1207,6 @@ user_focus_win(struct user *u, struct win *w)
 	server_update_wins();
 	user_restore_pointer(u);
 	user_update_input_focus(u);
-	user_render_popup(u);
 }
 
 static void
@@ -1292,23 +1281,6 @@ user_new(xcb_input_xi_device_info_t const *xdev)
 	char const *name = xcb_input_xi_device_info_name(xdev);
 	int sz = xcb_input_xi_device_info_name_length(xdev) - strlen(" pointer");
 	XASSERT(u->name = strndup(name, sz));
-
-	u->popup = xcb_generate_id(conn);
-	XDO(xcb_create_window, conn, XCB_COPY_FROM_PARENT,
-			u->popup,
-			screen->root,
-			-1, -1, 1, 1, /* Rect. */
-			0, /* Border. */
-			XCB_WINDOW_CLASS_INPUT_OUTPUT,
-			XCB_COPY_FROM_PARENT,
-			XCB_CW_OVERRIDE_REDIRECT |
-			XCB_CW_SAVE_UNDER |
-			XCB_CW_EVENT_MASK,
-			(uint32_t const[]){
-				true,
-				true,
-				XCB_EVENT_MASK_EXPOSURE,
-			});
 
 	return u;
 }
@@ -1412,170 +1384,6 @@ user_grab_pointer(struct user *u)
 			});
 }
 
-static bool
-user_is_win_matched(struct user *u, struct win *w)
-{
-	return !strncasecmp(u->input.buf, w->name, u->input.len);
-}
-
-static void
-user_render_popup(struct user *u)
-{
-	if (u->mode != MODE_WINDOWS)
-		return;
-
-	uint32_t mask;
-	uint32_t values[8];
-
-	xcb_rectangle_t const *geom;
-	if (u->focused_win && u->focused_win->tab->output)
-		geom = &u->focused_win->tab->output->geom;
-	else if (!TAILQ_EMPTY(&outputs))
-		geom = &TAILQ_FIRST(&outputs)->geom;
-	else
-		return;
-
-	int font_size = screen_pt2px(10);
-
-	int item_height = font_size * 1.5;
-
-	mask = XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
-		XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT;
-	values[0] = geom->x;
-	values[1] = geom->y + geom->height / 2;
-	values[2] = geom->width;
-	values[3] = item_height + 4;
-	values[1] -= values[3] / 2;
-
-	mask |= XCB_CONFIG_WINDOW_STACK_MODE;
-	values[4] = XCB_STACK_MODE_ABOVE;
-
-	XDO(xcb_configure_window, conn, u->popup, mask, values);
-
-	XDO(xcb_map_window, conn, u->popup);
-
-	cairo_surface_t *surface = cairo_xcb_surface_create(conn,
-			u->popup, visual_type,
-			values[2], values[3]);
-	cairo_t *cr = cairo_create(surface);
-	cairo_surface_destroy(surface);
-
-	cairo_push_group(cr);
-	cairo_save(cr);
-
-	cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
-	cairo_set_font_size(cr, font_size);
-
-	cairo_set_source_rgb(cr, RGB8_TO_FLOATS(0xffffff));
-	cairo_rectangle(cr, 0, 0, values[2], values[3]);
-	cairo_fill(cr);
-
-	{
-		cairo_rectangle(cr, 2, 2, values[2] - 3, values[3] - 3);
-		cairo_set_source_rgb(cr, RGB8_TO_FLOATS(0x000000));
-		cairo_set_line_width(cr, 1);
-		cairo_stroke_preserve(cr);
-
-		cairo_clip(cr);
-	}
-
-	int y = 2;
-	int x = 2;
-
-	{
-		struct editor *ed = &u->input;
-		cairo_select_font_face(cr, label_font,
-				CAIRO_FONT_SLANT_NORMAL,
-				CAIRO_FONT_WEIGHT_NORMAL);
-		cairo_set_source_rgb(cr, RGB8_TO_FLOATS(0x000000));
-
-		cairo_text_extents_t te;
-		cairo_text_extents(cr, ed->buf, &te);
-		cairo_move_to(cr, x, y + item_height / 2 + font_size / 2);
-		cairo_show_text(cr, ed->buf);
-
-		cairo_text_extents_t ch;
-		cairo_text_extents(cr, " ", &ch);
-
-		int w = ch.x_advance * 10;
-		int endx = (int)(x + te.x_advance + w - 1) / w * w;
-
-		int c = ed->buf[ed->cur];
-		ed->buf[ed->cur] = '\0';
-		cairo_text_extents(cr, ed->buf, &te);
-		ed->buf[ed->cur] = c;
-		cairo_rectangle(cr, (int)(x + te.x_advance), y, 1, item_height);
-		cairo_fill(cr);
-
-		x = endx;
-	}
-
-	struct session *s;
-	TAILQ_FOREACH(s, &sessions, link) {
-		struct tab *t;
-		TAILQ_FOREACH(t, &s->tabs, link) {
-			struct win *w;
-			TAILQ_FOREACH(w, &t->wins, link) {
-				if (!user_is_win_matched(u, w))
-					continue;
-
-				char buf[100];
-				snprintf(buf, sizeof buf, " %c:%s ", w->label, w->name);
-
-				cairo_text_extents_t te;
-				cairo_text_extents(cr, buf, &te);
-
-				int bg, fg, bold = 0;
-
-				if (w == u->focused_win) {
-					bg = 0x121212;
-					fg = 0xffffff;
-					/* bg = 0xffffff;
-					fg = 0x121212; */
-					bold = 1;
-				} else if (w->urgent) {
-					bg = 0xffdf00;
-					fg = 0xff0000;
-					bold = 1;
-				} else {
-					bg = 0xffffff;
-					fg = 0x000000;
-				}
-
-				cairo_select_font_face(cr, label_font,
-						CAIRO_FONT_SLANT_NORMAL,
-						bold ? CAIRO_FONT_WEIGHT_BOLD : CAIRO_FONT_WEIGHT_NORMAL);
-
-				if (0xffFFff != bg) {
-					cairo_set_source_rgb(cr, RGB8_TO_FLOATS(bg));
-					cairo_rectangle(cr, x, y, te.x_advance, item_height);
-					cairo_fill(cr);
-				}
-
-				cairo_set_source_rgb(cr, RGB8_TO_FLOATS(fg));
-				cairo_move_to(cr, x, y + item_height / 2 + font_size / 2);
-				cairo_show_text(cr, buf);
-
-				x += te.x_advance;
-			}
-
-			cairo_text_extents_t te;
-			cairo_text_extents(cr, "  ", &te);
-			x += te.x_advance;
-		}
-
-		cairo_text_extents_t te;
-		cairo_text_extents(cr, "    ", &te);
-		x += te.x_advance;
-	}
-
-	cairo_restore(cr);
-	cairo_pop_group_to_source(cr);
-	cairo_paint(cr);
-
-	cairo_destroy(cr);
-}
-
 static void
 user_set_mode(struct user *u, enum mode mode)
 {
@@ -1587,13 +1395,6 @@ user_set_mode(struct user *u, enum mode mode)
 	if (MODE_RELABEL == u->mode)
 		win_update_label(u->focused_win, '?');
 
-	if (MODE_WINDOWS == u->mode) {
-		editor_clear(&u->input);
-	} else {
-		XDO(xcb_unmap_window, conn, u->popup);
-	}
-
-	user_render_popup(u);
 	user_update_input_focus(u);
 }
 
@@ -2109,50 +1910,6 @@ user_dump_tree(struct user *u)
 }
 
 static void
-user_feed_cmdline(struct user *u, xkb_keysym_t keysym,
-		xcb_input_key_press_event_t const *event)
-{
-	if (XCB_INPUT_KEY_RELEASE == event->event_type) {
-		bool hold = 150 < event->time - u->timestamp;
-		if (hold && XKB_KEY_slash == keysym) {
-			user_set_mode(u, MODE_NORMAL);
-		}
-		return;
-	}
-
-	if (mod_super == (~XCB_MOD_MASK_SHIFT & event->mods.base)) {
-		user_feed_normal(u, keysym, event);
-		return;
-	}
-
-	editor_feed(&u->input, keysym, event->mods.effective);
-	user_render_popup(u);
-
-	switch (keysym) {
-	case XKB_KEY_Escape:
-		user_set_mode(u, MODE_NORMAL);
-		return;
-
-	case XKB_KEY_Return:
-	{
-		struct session *s;
-		struct tab *t;
-		struct win *w;
-		TAILQ_FOREACH(s, &sessions, link)
-		TAILQ_FOREACH(t, &s->tabs, link)
-		TAILQ_FOREACH(w, &t->wins, link) {
-			if (user_is_win_matched(u, w)) {
-				user_focus_win(u, w);
-				user_set_mode(u, MODE_NORMAL);
-				return;
-			}
-		}
-	}
-		break;
-	}
-}
-
-static void
 user_feed_relabel(struct user *u, xkb_keysym_t keysym,
 		xcb_input_key_press_event_t const *event)
 {
@@ -2437,14 +2194,6 @@ user_feed_normal(struct user *u, xkb_keysym_t keysym,
 		}
 		break;
 
-	case XKB_KEY_slash:
-	case XKB_KEY_colon:
-		user_set_mode(u, u->mode == MODE_WINDOWS ? MODE_NORMAL : MODE_WINDOWS);
-		if (u->mode == MODE_WINDOWS)
-			user_render_popup(u);
-		u->timestamp = event->time;
-		break;
-
 	case XKB_KEY_numbersign:
 		if (u->alt_tab)
 			user_focus_win(u, tab_get_latest_win(u->alt_tab));
@@ -2519,11 +2268,6 @@ handle_input_key(xcb_input_key_press_event_t const *event)
 
 	case MODE_COMMAND:
 		user_feed_command(u, keysym, event);
-		propagate = false;
-		break;
-
-	case MODE_WINDOWS:
-		user_feed_cmdline(u, keysym, event);
 		propagate = false;
 		break;
 
