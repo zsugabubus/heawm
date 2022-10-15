@@ -170,7 +170,7 @@ variations exit master mode. I<N> defaults to 1.
 
 =item B<M>, B<m>
 
-Enter monocle mode. Grid dimensions are ignored and only the last focused
+Toggle monocle mode. Grid dimensions are ignored and only the last focused
 window is shown.
 
 =item B<q>

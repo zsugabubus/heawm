@@ -2021,7 +2021,7 @@ user_feed_command(struct user *u, xkb_keysym_t keysym,
 		t->master = '\0';
 		/* FALLTHROUGH */
 	case XKB_KEY_m:
-		t->monocle = true;
+		t->monocle ^= true;
 		break;
 
 	case XKB_KEY_q:
