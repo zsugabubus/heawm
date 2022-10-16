@@ -1406,8 +1406,6 @@ user_enable(struct user *u)
 
 	enum {
 		PER_CLIENT_FLAGS =
-			/* So we can check for repeating. */
-			XCB_XKB_PER_CLIENT_FLAG_DETECTABLE_AUTO_REPEAT |
 			/* Send good state in events. */
 			XCB_XKB_PER_CLIENT_FLAG_GRABS_USE_XKB_STATE |
 			XCB_XKB_PER_CLIENT_FLAG_LOOKUP_STATE_WHEN_GRABBED,
