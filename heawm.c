@@ -2475,23 +2475,18 @@ grid_init(struct grid *g, int32_t ntiles, xcb_rectangle_t const *geom, int32_t c
 			}
 		}
 	} else {
-		bool swap = cols < 0;
-
-		if (cols < 0)
+		if (cols < 0) {
 			cols = -cols;
-
-		if (ntiles < cols)
-			cols = ntiles;
-
-		g->cols = cols;
-		g->rows = cols ? (ntiles + cols - 1) / cols : 0;
-
-		if (swap) {
-			int32_t t = g->cols;
-			g->cols = g->rows;
-			g->rows = t;
+			if (ntiles < cols)
+				cols = ntiles;
+			g->cols = (ntiles + cols - 1) / cols;
+			g->rows = (ntiles + g->cols - 1) / g->cols;
+		} else if (0 < cols) {
+			if (ntiles < cols)
+				cols = ntiles;
+			g->cols = cols;
+			g->rows = (ntiles + cols - 1) / cols;
 		}
-
 		g->last_cols = ntiles - (g->rows - 1) * g->cols;
 	}
 
