@@ -1312,7 +1312,7 @@ user_grab_keyboard(struct user *u)
 				XCB_CURSOR_NONE,
 				u->master_keyboard,
 				XCB_INPUT_GRAB_TYPE_KEYCODE, XCB_GRAB_ANY,
-				XCB_INPUT_GRAB_MODE_22_SYNC,
+				XCB_INPUT_GRAB_MODE_22_ASYNC,
 				XCB_INPUT_GRAB_OWNER_NO_OWNER,
 				XCB_INPUT_XI_EVENT_MASK_KEY_PRESS,
 				{
@@ -1325,7 +1325,7 @@ user_grab_keyboard(struct user *u)
 				XCB_CURSOR_NONE,
 				u->master_keyboard,
 				XCB_INPUT_GRAB_TYPE_KEYCODE, XCB_GRAB_ANY,
-				XCB_INPUT_GRAB_MODE_22_SYNC,
+				XCB_INPUT_GRAB_MODE_22_ASYNC,
 				XCB_INPUT_GRAB_OWNER_NO_OWNER,
 				XCB_INPUT_XI_EVENT_MASK_KEY_RELEASE,
 				{
@@ -1353,7 +1353,7 @@ user_grab_keyboard(struct user *u)
 				XCB_CURSOR_NONE,
 				u->master_keyboard,
 				XCB_INPUT_GRAB_TYPE_KEYCODE, XCB_GRAB_ANY,
-				XCB_INPUT_GRAB_MODE_22_SYNC,
+				XCB_INPUT_GRAB_MODE_22_ASYNC,
 				XCB_INPUT_GRAB_OWNER_NO_OWNER,
 				XCB_INPUT_XI_EVENT_MASK_KEY_PRESS,
 				{ XCB_INPUT_MODIFIER_MASK_ANY });
@@ -2211,8 +2211,6 @@ user_feed_normal(struct user *u, xkb_keysym_t keysym,
 static void
 handle_input_key(xcb_input_key_press_event_t const *event)
 {
-	bool propagate = true;
-
 	xcb_input_device_id_t deviceid = event->sourceid;
 	struct device *dev = device_find_by_id(deviceid);
 	struct user *u = dev->user;
@@ -2222,7 +2220,7 @@ handle_input_key(xcb_input_key_press_event_t const *event)
 				deviceid, XKB_KEYMAP_COMPILE_NO_FLAGS);
 	if (!dev->keymap) {
 		fprintf(stderr, "Could not load keymap\n");
-		goto out;
+		return;
 	}
 
 	xkb_keysym_t const *syms;
@@ -2230,7 +2228,7 @@ handle_input_key(xcb_input_key_press_event_t const *event)
 			/* Only care about Shift when user really presses. */
 			(XCB_MOD_MASK_SHIFT & event->mods.base ? 1 : 0), &syms);
 	if (!nsyms)
-		goto out;
+		return;
 
 	xkb_keysym_t keysym = syms[0];
 #if 0
@@ -2246,45 +2244,30 @@ handle_input_key(xcb_input_key_press_event_t const *event)
 
 	switch (u->mode) {
 	case MODE_NORMAL:
-		if (mod_super == (~XCB_MOD_MASK_SHIFT & event->mods.base)) {
+		if (mod_super == (~XCB_MOD_MASK_SHIFT & event->mods.base))
 			user_feed_normal(u, keysym, event);
-			propagate = false;
-		} else if ((mod_super | XCB_MOD_MASK_CONTROL) == (~XCB_MOD_MASK_SHIFT & event->mods.base)) {
+		else if ((mod_super | XCB_MOD_MASK_CONTROL) == (~XCB_MOD_MASK_SHIFT & event->mods.base))
 			user_feed_command(u, keysym, event);
-			propagate = false;
-		}
 		break;
 
 	case MODE_INSERT:
 		if (XCB_INPUT_KEY_PRESS == event->event_type &&
 		    mod_super == event->mods.base &&
 		    XKB_KEY_Escape == keysym)
-		{
 			user_set_mode(u, MODE_NORMAL);
-			propagate = false;
-		}
 		break;
 
 	case MODE_COMMAND:
 		user_feed_command(u, keysym, event);
-		propagate = false;
 		break;
 
 	case MODE_RELABEL:
 		user_feed_relabel(u, keysym, event);
-		propagate = false;
 		break;
 
 	case MODE_MOUSE:
 		break;
 	}
-
-out:
-	XDO(xcb_input_xi_allow_events, conn, XCB_CURRENT_TIME, event->deviceid,
-			propagate
-				? XCB_INPUT_EVENT_MODE_REPLAY_DEVICE
-				: XCB_INPUT_EVENT_MODE_SYNC_DEVICE,
-			0, 0);
 }
 
 static void
