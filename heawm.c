@@ -1232,8 +1232,10 @@ handle_input_enter(xcb_input_enter_event_t const *event)
 {
 	if (XCB_INPUT_NOTIFY_MODE_NORMAL != event->mode)
 		return;
+	if (event->event == event->root)
+		return;
 
-	XDO(xcb_input_xi_set_client_pointer, conn, event->child, event->deviceid);
+	XDO(xcb_input_xi_set_client_pointer, conn, event->event, event->deviceid);
 }
 
 static void
