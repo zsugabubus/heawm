@@ -1698,9 +1698,11 @@ win_swap(struct win *x, struct win *y)
 	if (x == y)
 		return;
 	TAILQ_SWAP(x, &x->tab->wins, y, &y->tab->wins, win, link);
-	if (x->tab->zoomed_win == x)
+	bool xzoomed = x->tab->zoomed_win == x;
+	bool yzoomed = y->tab->zoomed_win == y;
+	if (xzoomed)
 		x->tab->zoomed_win = y;
-	if (y->tab->zoomed_win == y)
+	if (yzoomed)
 		y->tab->zoomed_win = x;
 	SWAP(x->tab, y->tab, struct tab *);
 	wins_changed = true;
