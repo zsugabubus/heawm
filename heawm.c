@@ -1973,6 +1973,7 @@ user_feed_command(struct user *u, xkb_keysym_t keysym,
 		if (num <= 9) {
 			t->mfact = num;
 			t->master = keysym - XKB_KEY_a + 'a';
+			t->zoomed_win = NULL;
 			win_move_top(w);
 		}
 		break;
