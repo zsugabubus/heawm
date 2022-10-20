@@ -220,18 +220,6 @@ struct xdo_cookie {
 
 enum { XCB_MOD_MASK_NUM_LOCK = XCB_MOD_MASK_2, };
 
-# define NORMAL_GRAB_MASKS { \
-	0, \
-	XCB_MOD_MASK_SHIFT, \
-	XCB_MOD_MASK_CONTROL, \
-	XCB_MOD_MASK_1, \
-\
-	XCB_MOD_MASK_LOCK | 0, \
-	XCB_MOD_MASK_LOCK | XCB_MOD_MASK_SHIFT, \
-	XCB_MOD_MASK_LOCK | XCB_MOD_MASK_CONTROL, \
-	XCB_MOD_MASK_LOCK | XCB_MOD_MASK_1, \
-}
-
 #define EFFECTIVE_MASK(mask) \
 	                                            (mask), \
 	XCB_MOD_MASK_LOCK |                         (mask), \
