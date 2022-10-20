@@ -1309,6 +1309,7 @@ user_grab_keyboard(struct user *u)
 					EFFECTIVE_MASK(mod_super | 0),
 					EFFECTIVE_MASK(mod_super | XCB_MOD_MASK_SHIFT),
 					EFFECTIVE_MASK(mod_super | XCB_MOD_MASK_CONTROL),
+					EFFECTIVE_MASK(mod_super | XCB_MOD_MASK_SHIFT | XCB_MOD_MASK_CONTROL),
 				});
 
 		XCB_INPUT_XI_PASSIVE_GRAB_DEVICE_WRAPPER(screen->root,
@@ -1322,6 +1323,7 @@ user_grab_keyboard(struct user *u)
 					EFFECTIVE_MASK(mod_super | 0),
 					EFFECTIVE_MASK(mod_super | XCB_MOD_MASK_SHIFT),
 					EFFECTIVE_MASK(mod_super | XCB_MOD_MASK_CONTROL),
+					EFFECTIVE_MASK(mod_super | XCB_MOD_MASK_SHIFT | XCB_MOD_MASK_CONTROL),
 				});
 		break;
 
