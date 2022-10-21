@@ -2872,6 +2872,7 @@ user_feed_command_key(struct user *u, xkb_keysym_t keysym,
 		t->mfact = user_number(u, !t->master ? 6 : t->mfact);
 		t->master = keysym - XKB_KEY_a + 'a';
 		t->zoomed_win = NULL;
+		w->floating = false;
 		win_move_top(w);
 		break;
 
