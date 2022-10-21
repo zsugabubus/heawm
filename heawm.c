@@ -282,7 +282,6 @@ static bool wins_changed;
 	NET_ATOMS \
 	HEAWM_ATOMS \
 	xmacro(WM_CLIENT_LEADER) \
-	xmacro(WM_WINDOW_ROLE) \
 	xmacro(WM_DELETE_WINDOW) \
 	xmacro(WM_PROTOCOLS) \
 	xmacro(WM_SIZE_HINTS) \
@@ -416,7 +415,6 @@ struct win {
 	xcb_window_t transient_for;
 	char *title;
 	char *class_instance, *class_class;
-	char *role;
 	xcb_atom_t type;
 	pid_t pid;
 	bool fullscreen: 1;
@@ -1870,13 +1868,6 @@ win_prop_update_heawm_label(struct win *w, void *data, int sz)
 }
 
 static void
-win_prop_update_role(struct win *w, void *data, int sz)
-{
-	free(w->role);
-	w->role = sz ? strndup(data, sz) : NULL;
-}
-
-static void
 win_prop_update_leader(struct win *w, void *data, int sz)
 {
 	w->leader = sizeof(xcb_window_t) == sz
@@ -1965,7 +1956,6 @@ win_prop_update_hints(struct win *w, void *data, int sz)
 	xmacro(ATOM(_HEAWM_NAME), ATOM(UTF8_STRING), win_prop_update_heawm_name) \
 	xmacro(ATOM(_HEAWM_LABEL), ATOM(UTF8_STRING), win_prop_update_heawm_label) \
 	xmacro(XCB_ATOM_WM_CLASS, XCB_ATOM_STRING, win_prop_update_class) \
-	xmacro(ATOM(WM_WINDOW_ROLE), XCB_ATOM_STRING, win_prop_update_role) \
 	xmacro(ATOM(WM_CLIENT_LEADER), XCB_ATOM_WINDOW, win_prop_update_leader) \
 	xmacro(XCB_ATOM_WM_TRANSIENT_FOR, XCB_ATOM_WINDOW, win_prop_update_transient_for) \
 	xmacro(ATOM(_NET_WM_STATE), XCB_ATOM_ATOM, win_prop_update_state) \
@@ -2362,7 +2352,6 @@ win_del(struct win *w)
 	free(w->name);
 	free(w->title);
 	free(w->class_instance);
-	free(w->role);
 	free(w);
 }
 
