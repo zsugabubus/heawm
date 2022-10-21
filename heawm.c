@@ -335,7 +335,6 @@ struct user {
 		MODE_LABEL,
 	} mode;
 	uint32_t num;
-	xcb_timestamp_t timestamp;
 	int16_t pointer_x, pointer_y;
 	xcb_input_device_id_t master_pointer, master_keyboard;
 };
@@ -2969,8 +2968,6 @@ user_feed_normal_key(struct user *u, xkb_keysym_t keysym,
 {
 	if (XCB_INPUT_KEY_RELEASE == event->event_type)
 		return;
-
-	u->timestamp = event->time;
 
 	if (XKB_KEY_a <= keysym && keysym <= XKB_KEY_z) {
 		char label = keysym - XKB_KEY_a + 'a';
