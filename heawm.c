@@ -2336,14 +2336,23 @@ handle_input_motion(xcb_input_motion_event_t const *event)
 	struct user *u = user_find_by_device(event->sourceid);
 	if (!u)
 		return;
+	if (MODE_MOUSE != u->mode)
+		return;
 
-	if (MODE_MOUSE == u->mode) {
-		struct win *w = u->focused_win;
-		xcb_rectangle_t rect = w->user_geom;
-		rect.x = (event->root_x >> 16) + u->pointer_x;
-		rect.y = (event->root_y >> 16) + u->pointer_y;
-		win_set_user_geom(w, &rect);
+	struct win *w = u->focused_win;
+	if (!w->floating)
+		return;
+
+	/* For convenience. */
+	if (w->tab->zoomed_win == w) {
+		w->tab->zoomed_win = NULL;
+		wins_changed = true;
 	}
+
+	xcb_rectangle_t rect = w->user_geom;
+	rect.x = (event->root_x >> 16) + u->pointer_x;
+	rect.y = (event->root_y >> 16) + u->pointer_y;
+	win_set_user_geom(w, &rect);
 }
 
 static void
