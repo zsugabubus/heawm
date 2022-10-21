@@ -372,7 +372,7 @@ struct tab {
 	bool mapped;
 
 	struct win *zoomed_win;
-	char master; /* NIL: off, hjkl: on */
+	char master; /* NUL: off, hjkl: on */
 	uint8_t mfact; /* [1,9] */
 	bool monocle;
 	int32_t cols; /* <0: fix rows; =0: auto; >0: fix cols. */
