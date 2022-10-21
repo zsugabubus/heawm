@@ -237,24 +237,6 @@ enum { XCB_ERROR_NOTIFY = 0 };
 #define LABEL_INSTANCE "Label"
 #define WIN_FRAME_INSTANCE "Frame"
 
-static xcb_screen_t *screen;
-static xcb_visualtype_t *visual_type;
-static xcb_cursor_t move_cursor;
-static xcb_cursor_t default_cursor;
-static xcb_window_t active_window;
-
-static uint8_t xi_opcode;
-static uint8_t shape_first_event;
-static uint8_t randr_first_event;
-static uint8_t xkb_first_event;
-static struct xkb_context *xkb_context;
-
-static sigset_t saved_set;
-/* There is no fine grained window change tracking. Whenever something related
- * to windows change server_update_wins() should run, that reconfigures all
- * windows. */
-static bool wins_changed;
-
 #define ATOM(name) ((xcb_atom_t const)atoms[ATOM_##name])
 
 #define NET_ATOMS \
@@ -300,18 +282,31 @@ enum {
 #undef xmacro
 };
 
-static xcb_atom_t atoms[ARRAY_SIZE(ATOM_NAMES)];
-
 static xcb_connection_t *conn;
+static xcb_atom_t atoms[ARRAY_SIZE(ATOM_NAMES)];
+static uint8_t xi_opcode;
+static uint8_t shape_first_event;
+static uint8_t randr_first_event;
+static uint8_t xkb_first_event;
+static xcb_screen_t *screen;
+static xcb_visualtype_t *visual_type;
+static xcb_cursor_t move_cursor;
+static xcb_cursor_t default_cursor;
+static xcb_window_t active_window;
+static struct xkb_context *xkb_context;
 
+static sigset_t saved_set;
+/* There is no fine grained window change tracking. All windows are
+ * reconfigured at once in server_update_wins(). */
+static bool wins_changed;
+
+static uint32_t mod_super = XCB_MOD_MASK_4;
 static char const *label_font = "monospace";
 static int32_t label_font_size_pt = 17;
 static uint32_t label_bg = 0xff0000;
 static uint32_t label_stroke_color = 0x000000;
 static uint32_t label_fg = 0xffff00;
 static uint32_t label_urgent_bg = 0xffdf5f;
-
-static uint32_t mod_super = XCB_MOD_MASK_4;
 
 struct device {
 	struct user *user;
