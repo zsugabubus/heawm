@@ -2861,39 +2861,24 @@ user_feed_command_key(struct user *u, xkb_keysym_t keysym,
 	struct tab *t = w->tab;
 
 	if (XKB_KEY_0 <= keysym && keysym <= XKB_KEY_9) {
-		u->num *= 10;
-		u->num += keysym - XKB_KEY_0;
+		u->num = keysym - XKB_KEY_0;
 		return;
 	}
-
-	uint8_t num;
 
 	switch (keysym) {
 	case XKB_KEY_h:
 	case XKB_KEY_j:
 	case XKB_KEY_k:
 	case XKB_KEY_l:
-		num = user_number(u, !t->master ? 6 : t->mfact);
-		if (num <= 9) {
-			t->mfact = num;
-			t->master = keysym - XKB_KEY_a + 'a';
-			t->zoomed_win = NULL;
-			win_move_top(w);
-		}
+		t->mfact = user_number(u, !t->master ? 6 : t->mfact);
+		t->master = keysym - XKB_KEY_a + 'a';
+		t->zoomed_win = NULL;
+		win_move_top(w);
 		break;
 
 	case XKB_KEY_plus:
 	case XKB_KEY_minus:
-	{
-		int dir =
-			(XKB_KEY_plus == keysym ? 1 : -1) *
-			(!TAILQ_PREV(w, tab_wins, link) ? 1 : -1);
-		t->mfact += user_number(u, 1) * dir;
-		if (0 < dir && 9 < t->mfact)
-			t->mfact = 9;
-		else if (dir < 0 && t->mfact < 1)
-			t->mfact = 1;
-	}
+		t->mfact += (XKB_KEY_plus == keysym) == !TAILQ_PREV(w, tab_wins, link) ? 1 : -1;
 		break;
 
 	case XKB_KEY_s:
@@ -2970,6 +2955,10 @@ user_feed_command_key(struct user *u, xkb_keysym_t keysym,
 		return;
 	}
 
+	if (9 < t->mfact)
+		t->mfact = 9;
+	else if (t->mfact < 1)
+		t->mfact = 1;
 	wins_changed = true;
 	user_set_mode(u, MODE_NORMAL);
 }
