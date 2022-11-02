@@ -951,7 +951,7 @@ tab_update_wins(struct tab *t)
 
 	int32_t nmaster = t->master ? 1 : 0;
 	int32_t nslave = tiles - nmaster;
-	struct win *mono_slave = t->monocle ? tab_get_latest_slave_win(t) : NULL;
+	struct win *mono = t->monocle ? tab_get_latest_slave_win(t) : NULL;
 
 	struct grid slave_grid;
 	grid_init(&slave_grid, nslave, &slave_geom, t->cols);
@@ -978,9 +978,9 @@ tab_update_wins(struct tab *t)
 			tile = master_geom;
 		} else if (0 < nslave) {
 			--nslave;
-			if (w == mono_slave) {
+			if (w == mono) {
 				tile = slave_geom;
-			} else if (mono_slave) {
+			} else if (mono) {
 				win_set_mapped(w, false);
 				continue;
 			} else {
@@ -993,7 +993,7 @@ tab_update_wins(struct tab *t)
 
 		win_set_geom(w, &tile);
 		win_set_mapped(w, true);
-		win_label_set_mapped(w, true);
+		win_label_set_mapped(w, w != mono);
 	}
 }
 
