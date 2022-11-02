@@ -2865,10 +2865,6 @@ user_feed_command_key(struct user *u, xkb_keysym_t keysym,
 		t->mfact += (XKB_KEY_plus == keysym) == !TAILQ_PREV(w, tab_wins, link) ? 1 : -1;
 		break;
 
-	case XKB_KEY_s:
-		t->mfact = user_number(u, 6 == t->mfact ? 5 : 6);
-		break;
-
 	case XKB_KEY_G:
 		t->master = '\0';
 		/* FALLTHROUGH */
