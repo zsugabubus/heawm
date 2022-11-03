@@ -962,6 +962,8 @@ tab_update_wins(struct tab *t)
 			tile = w->user_geom;
 
 #define xmacro(x, width) do { \
+	if (tile.width < 100) \
+		tile.width = 100; \
 	int16_t min = geom.x, max = geom.x + geom.width - tile.width; \
 	if (max < min) \
 		SWAP(min, max, int16_t); \
@@ -2524,7 +2526,9 @@ win_new(xcb_window_t window)
 		w->label = parent->label;
 		w->floating = true;
 #define xmacro(x, width) \
-		if (parent->geom.width / 2 < w->user_geom.width) \
+		if (w->user_geom.width <= 1) \
+			w->user_geom.width = parent->geom.width / 2; \
+		else if (parent->geom.width / 2 < w->user_geom.width) \
 			w->user_geom.width = parent->geom.width; \
 		w->user_geom.x = parent->geom.x + (parent->geom.width - w->user_geom.width) / 2;
 		xmacro(x, width);
