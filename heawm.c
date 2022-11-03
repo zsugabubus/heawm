@@ -244,6 +244,7 @@ enum { XCB_ERROR_NOTIFY = 0 };
 	xmacro(_NET_CLIENT_LIST) \
 	xmacro(_NET_CLOSE_WINDOW) \
 	xmacro(_NET_SUPPORTED) \
+	xmacro(_NET_FRAME_EXTENTS) \
 	xmacro(_NET_SUPPORTING_WM_CHECK) \
 	xmacro(_NET_WM_NAME) \
 	xmacro(_NET_WM_PID) \
@@ -2404,6 +2405,11 @@ win_new(xcb_window_t window)
 				XCB_ATOM_STRING, 8,
 				sizeof WIN_FRAME_INSTANCE "\0" WM_NAME,
 				WIN_FRAME_INSTANCE "\0" WM_NAME),
+
+		XDO_COOKIE(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
+				w->window, ATOM(_NET_FRAME_EXTENTS),
+				XCB_ATOM_CARDINAL, 32,
+				4, &(uint32_t const[]){ 0, 0, 0, 0 }),
 
 		XDO_COOKIE(xcb_change_save_set, conn, XCB_SET_MODE_INSERT, window),
 
