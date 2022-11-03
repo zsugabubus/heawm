@@ -301,13 +301,13 @@ static sigset_t saved_set;
  * reconfigured at once in server_update_wins(). */
 static bool wins_changed;
 
-static uint32_t mod_super = XCB_MOD_MASK_4;
-static char const *label_font = "monospace";
-static int32_t label_font_size_pt = 17;
+static uint32_t mod = XCB_MOD_MASK_4;
+static char const *label_fn = "monospace";
+static int32_t label_fs = 17;
 static uint32_t label_bg = 0xff0000;
 static uint32_t label_stroke_color = 0x000000;
 static uint32_t label_fg = 0xffff00;
-static uint32_t label_urgent_bg = 0xffdf5f;
+static uint32_t urgent_bg = 0xffdf5f;
 
 struct device {
 	struct user *user;
@@ -611,7 +611,7 @@ win_label_render(struct win *w, bool shape)
 	if (!wl->mapped)
 		return;
 
-	int font_size = screen_pt2px(label_font_size_pt);
+	int font_size = screen_pt2px(label_fs);
 
 	char text[2] = {
 		w->label,
@@ -626,7 +626,7 @@ win_label_render(struct win *w, bool shape)
 	cairo_save(cr);
 
 	cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
-	cairo_select_font_face(cr, label_font,
+	cairo_select_font_face(cr, label_fn,
 			CAIRO_FONT_SLANT_NORMAL,
 			CAIRO_FONT_WEIGHT_BOLD);
 	cairo_set_font_size(cr, font_size);
@@ -657,7 +657,7 @@ win_label_render(struct win *w, bool shape)
 		if (shape) {
 			cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
 		} else {
-			cairo_set_source_rgb(cr, RGB8_TO_FLOATS(label_urgent_bg));
+			cairo_set_source_rgb(cr, RGB8_TO_FLOATS(urgent_bg));
 			cairo_move_to(cr, 0, 0);
 		}
 		cairo_arc(cr, 0, 0, radius * sqrt(M_PHI), 0, 2 * M_PI);
@@ -1420,10 +1420,10 @@ user_grab_keyboard(struct user *u)
 				XCB_INPUT_GRAB_OWNER_NO_OWNER,
 				XCB_INPUT_XI_EVENT_MASK_KEY_PRESS,
 				{
-					EFFECTIVE_MASK(mod_super | 0),
-					EFFECTIVE_MASK(mod_super | XCB_MOD_MASK_SHIFT),
-					EFFECTIVE_MASK(mod_super | XCB_MOD_MASK_CONTROL),
-					EFFECTIVE_MASK(mod_super | XCB_MOD_MASK_SHIFT | XCB_MOD_MASK_CONTROL),
+					EFFECTIVE_MASK(mod | 0),
+					EFFECTIVE_MASK(mod | XCB_MOD_MASK_SHIFT),
+					EFFECTIVE_MASK(mod | XCB_MOD_MASK_CONTROL),
+					EFFECTIVE_MASK(mod | XCB_MOD_MASK_SHIFT | XCB_MOD_MASK_CONTROL),
 				});
 
 		XCB_INPUT_XI_PASSIVE_GRAB_DEVICE_WRAPPER(screen->root,
@@ -1434,10 +1434,10 @@ user_grab_keyboard(struct user *u)
 				XCB_INPUT_GRAB_OWNER_NO_OWNER,
 				XCB_INPUT_XI_EVENT_MASK_KEY_RELEASE,
 				{
-					EFFECTIVE_MASK(mod_super | 0),
-					EFFECTIVE_MASK(mod_super | XCB_MOD_MASK_SHIFT),
-					EFFECTIVE_MASK(mod_super | XCB_MOD_MASK_CONTROL),
-					EFFECTIVE_MASK(mod_super | XCB_MOD_MASK_SHIFT | XCB_MOD_MASK_CONTROL),
+					EFFECTIVE_MASK(mod | 0),
+					EFFECTIVE_MASK(mod | XCB_MOD_MASK_SHIFT),
+					EFFECTIVE_MASK(mod | XCB_MOD_MASK_CONTROL),
+					EFFECTIVE_MASK(mod | XCB_MOD_MASK_SHIFT | XCB_MOD_MASK_CONTROL),
 				});
 		break;
 
@@ -1450,7 +1450,7 @@ user_grab_keyboard(struct user *u)
 				XCB_INPUT_GRAB_OWNER_NO_OWNER,
 				XCB_INPUT_XI_EVENT_MASK_KEY_PRESS,
 				{
-					EFFECTIVE_MASK(mod_super),
+					EFFECTIVE_MASK(mod),
 				});
 		break;
 
@@ -1485,8 +1485,8 @@ user_grab_pointer(struct user *u)
 			XCB_INPUT_XI_EVENT_MASK_BUTTON_RELEASE |
 			XCB_INPUT_XI_EVENT_MASK_MOTION,
 			{
-				EFFECTIVE_MASK(mod_super),
-				EFFECTIVE_MASK(mod_super | XCB_MOD_MASK_SHIFT),
+				EFFECTIVE_MASK(mod),
+				EFFECTIVE_MASK(mod | XCB_MOD_MASK_SHIFT),
 			});
 }
 
@@ -2379,7 +2379,7 @@ win_new(xcb_window_t window)
 	win_hash_set(w->frame, w);
 	win_hash_set(wl->window, w);
 
-	int font_size = screen_pt2px(label_font_size_pt);
+	int font_size = screen_pt2px(label_fs);
 	wl->geom.width = font_size * sqrt(M_PHI) + 2 * 1 /* px at both sides */;
 	wl->geom.height = wl->geom.width;
 	wl->geom.x = 1 /* Initial frame width. */ - wl->geom.width - 10;
@@ -3085,9 +3085,9 @@ user_feed_key(struct user *u, xkb_keysym_t keysym, xcb_input_key_press_event_t c
 {
 	switch (u->mode) {
 	case MODE_NORMAL:
-		if (mod_super == (~XCB_MOD_MASK_SHIFT & event->mods.base))
+		if (mod == (~XCB_MOD_MASK_SHIFT & event->mods.base))
 			user_feed_normal_key(u, keysym, event);
-		else if ((mod_super | XCB_MOD_MASK_CONTROL) == (~XCB_MOD_MASK_SHIFT & event->mods.base))
+		else if ((mod | XCB_MOD_MASK_CONTROL) == (~XCB_MOD_MASK_SHIFT & event->mods.base))
 			user_feed_command_key(u, keysym, event);
 		break;
 
@@ -3100,7 +3100,7 @@ user_feed_key(struct user *u, xkb_keysym_t keysym, xcb_input_key_press_event_t c
 
 	case MODE_INSERT:
 		if (XCB_INPUT_KEY_PRESS == event->event_type &&
-		    mod_super == event->mods.base &&
+		    mod == event->mods.base &&
 		    XKB_KEY_Escape == keysym)
 			user_set_mode(u, MODE_NORMAL);
 		break;
@@ -3300,7 +3300,7 @@ handle_input_key(xcb_input_key_press_event_t const *event)
 static void
 handle_input_button_press(xcb_input_button_press_event_t const *event)
 {
-	if (!(mod_super & event->mods.base))
+	if (!(mod & event->mods.base))
 		return;
 
 	struct user *u = user_find_by_device(event->sourceid);
@@ -3351,7 +3351,7 @@ handle_input_button_press(xcb_input_button_press_event_t const *event)
 static void
 handle_input_button_release(xcb_input_button_press_event_t const *event)
 {
-	if (!(mod_super & event->mods.base))
+	if (!(mod & event->mods.base))
 		return;
 
 	struct user *u = user_find_by_device(event->sourceid);
