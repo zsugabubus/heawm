@@ -463,14 +463,16 @@ struct grid {
 };
 
 static void
-grid_init(struct grid *g, int32_t ntiles, xcb_rectangle_t const *geom, int32_t cols)
+grid_init(struct grid *g, int32_t n, xcb_rectangle_t const *geom, int32_t cols)
 {
+	if (n <= 0)
+		return;
 	if (!cols) {
 		uint32_t optimum = UINT32_MAX;
 		g->rows = 0;
-		while (++cols <= ntiles) {
-			uint32_t rows = (ntiles + cols - 1) / cols;
-			uint32_t last_cols = ntiles - (rows - 1) * cols;
+		while (++cols <= n) {
+			uint32_t rows = (n + cols - 1) / cols;
+			uint32_t last_cols = n - (rows - 1) * cols;
 			/* Length of internal separators. */
 			uint32_t perimeter =
 				geom->width * (rows - 1) +
@@ -488,17 +490,17 @@ grid_init(struct grid *g, int32_t ntiles, xcb_rectangle_t const *geom, int32_t c
 	} else {
 		if (cols < 0) {
 			cols = -cols;
-			if (ntiles < cols)
-				cols = ntiles;
-			g->cols = (ntiles + cols - 1) / cols;
-			g->rows = (ntiles + g->cols - 1) / g->cols;
+			if (n < cols)
+				cols = n;
+			g->cols = (n + cols - 1) / cols;
+			g->rows = (n + g->cols - 1) / g->cols;
 		} else if (0 < cols) {
-			if (ntiles < cols)
-				cols = ntiles;
+			if (n < cols)
+				cols = n;
 			g->cols = cols;
-			g->rows = (ntiles + cols - 1) / cols;
+			g->rows = (n + cols - 1) / cols;
 		}
-		g->last_cols = ntiles - (g->rows - 1) * g->cols;
+		g->last_cols = n - (g->rows - 1) * g->cols;
 	}
 
 	g->geom = *geom;
