@@ -545,6 +545,20 @@ grid_next(struct grid *g)
 	return ret;
 }
 
+static void
+run_script(char const *name)
+{
+	if (0 != fork())
+		return;
+	if ((!chdir(getenv("XDG_CONFIG_HOME")) ||
+	     (!chdir(getenv("HOME")) && !chdir(".config"))) &&
+	    !chdir("heawm"))
+		execl(name, name, NULL);
+	fprintf(stderr, "Failed to execute script %s: %s\n",
+			name, strerror(errno));
+	_exit(127);
+}
+
 static struct win *
 tab_get_latest_slave_win(struct tab const *t)
 {
@@ -1981,6 +1995,8 @@ user_update_all(void)
 
 	TAILQ_FOREACH(u, &users, link)
 		user_update_input_focus(u);
+
+	run_script("inputchange");
 }
 
 static struct user *
@@ -2384,7 +2400,7 @@ output_update_all(void)
 
 	if (!randr_first_event) {
 		(void)output_new_from_screen();
-		return;
+		goto run_script;
 	}
 
 	/* Force RROutputChange under Xephyr -resizeable, otherwise monitor
@@ -2400,7 +2416,7 @@ output_update_all(void)
 	XGET(monitors, xcb_randr_get_monitors, conn, screen->root, true);
 	if (!monitors) {
 		(void)output_new_from_screen();
-		return;
+		goto run_script;
 	}
 
 	for (xcb_randr_monitor_info_iterator_t iter = xcb_randr_get_monitors_monitors_iterator(monitors);
@@ -2409,6 +2425,9 @@ output_update_all(void)
 		(void)output_new_from_randr_monitor(iter.data);
 
 	free(monitors);
+
+run_script:
+	run_script("outputchange");
 }
 
 static void
