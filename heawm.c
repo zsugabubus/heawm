@@ -308,6 +308,11 @@ static uint32_t label_bg = 0xff0000;
 static uint32_t label_stroke_color = 0x000000;
 static uint32_t label_fg = 0xffff00;
 static uint32_t urgent_bg = 0xffdf5f;
+static uint32_t bar_fs = 10;
+static uint32_t bar_label_fs = 13;
+static uint32_t bar_bg = 0x000000;
+static uint32_t bar_fg = 0xffffff;
+static uint32_t bar_height;
 
 struct device {
 	struct user *user;
@@ -351,6 +356,12 @@ struct output {
 	xcb_rectangle_t geom;
 	char *name;
 	bool primary;
+	struct {
+		bool mapped;
+		xcb_rectangle_t geom;
+		xcb_window_t window;
+		cairo_t *cr;
+	} bar;
 };
 
 static TAILQ_HEAD(, output) outputs = TAILQ_HEAD_INITIALIZER(outputs);
@@ -886,6 +897,39 @@ win_set_auto_label(struct win *w)
 }
 
 static void
+tab_compute_split(struct tab *t,
+		xcb_rectangle_t *master_geom,
+		xcb_rectangle_t *slave_geom,
+		xcb_rectangle_t const *geom)
+{
+	*master_geom = *geom;
+	*slave_geom = *geom;
+
+	switch (t->master) {
+#define xmacro(h, l, x, width) \
+	case h: \
+	case l: \
+	{ \
+		int16_t size = geom->width * t->mfact / 10; \
+		int16_t gap = 1, gap_start = gap / 2, gap_end = gap - gap_start; \
+		if (h == t->master) { \
+			master_geom->width = size - gap_end; \
+			slave_geom->x += size + gap_start; \
+			slave_geom->width -= size + gap_start; \
+		} else { \
+			slave_geom->width = master_geom->width - size - gap_end; \
+			master_geom->x += master_geom->width - (size - gap_start); \
+			master_geom->width = size - gap_start; \
+		} \
+		break; \
+	}
+	xmacro('h', 'l', x, width)
+	xmacro('k', 'j', y, height)
+#undef xmacro
+	}
+}
+
+static void
 tab_update_wins(struct tab *t)
 {
 	bool mapped = t->session->mapped && t->output;
@@ -913,39 +957,13 @@ tab_update_wins(struct tab *t)
 		return;
 	}
 
-	xcb_rectangle_t master_geom = geom;
-	xcb_rectangle_t slave_geom = geom;
-
 	int32_t tiles = 0;
 	TAILQ_FOREACH(w, &t->wins, link)
 		tiles += !w->floating;
 
-	switch (t->master) {
-	case '\0':
-		slave_geom = geom;
-		break;
-
-#define xmacro(h, l, x, width) \
-	case h: \
-	case l: \
-	{ \
-		int16_t size = geom.width * t->mfact / 10; \
-		int16_t gap = 1, gap_start = gap / 2, gap_end = gap - gap_start; \
-		if (h == t->master) { \
-			master_geom.width = size - gap_end; \
-			slave_geom.x += size + gap_start; \
-			slave_geom.width -= size + gap_start; \
-		} else { \
-			slave_geom.width = master_geom.width - size - gap_end; \
-			master_geom.x += master_geom.width - (size - gap_start); \
-			master_geom.width = size - gap_start; \
-		} \
-		break; \
-	}
-	xmacro('h', 'l', x, width)
-	xmacro('k', 'j', y, height)
-#undef xmacro
-	}
+	xcb_rectangle_t master_geom;
+	xcb_rectangle_t slave_geom;
+	tab_compute_split(t, &master_geom, &slave_geom, &geom);
 
 	int32_t nmaster = t->master ? 1 : 0;
 	int32_t nslave = tiles - nmaster;
@@ -976,10 +994,16 @@ tab_update_wins(struct tab *t)
 		} else if (0 < nmaster) {
 			--nmaster;
 			tile = master_geom;
+			if (t->monocle && !t->master) {
+				tile.y += t->output->bar.geom.height;
+				tile.height -= t->output->bar.geom.height;
+			}
 		} else if (0 < nslave) {
 			--nslave;
 			if (w == mono) {
 				tile = slave_geom;
+				tile.y += t->output->bar.geom.height;
+				tile.height -= t->output->bar.geom.height;
 			} else if (mono) {
 				win_set_mapped(w, false);
 				continue;
@@ -993,7 +1017,7 @@ tab_update_wins(struct tab *t)
 
 		win_set_geom(w, &tile);
 		win_set_mapped(w, true);
-		win_label_set_mapped(w, w != mono);
+		win_label_set_mapped(w, w != mono || t->master);
 	}
 }
 
@@ -1023,11 +1047,186 @@ session_update_wins(struct session *s)
 }
 
 static void
+output_render_bar(struct output *o)
+{
+	if (!o->bar.mapped)
+		return;
+
+	struct tab *t;
+	struct session *s = TAILQ_FIRST(&sessions);
+	TAILQ_FOREACH(t, &s->tabs, link)
+		if (t->output == o)
+			break;
+
+	cairo_t *cr = o->bar.cr;
+	cairo_push_group(cr);
+
+	cairo_set_source_rgb(cr, RGB24_TO_FLOATS(bar_bg));
+	cairo_rectangle(cr, 0, 0, o->bar.geom.width, o->bar.geom.height);
+	cairo_fill(cr);
+
+	int32_t ntiles = 0;
+	struct win *w;
+	TAILQ_FOREACH(w, &t->wins, link)
+		ntiles += !w->floating && (!t->master || TAILQ_PREV(w, tab_wins, link));
+
+	int x = 0;
+	TAILQ_FOREACH(w, &t->wins, link) {
+		bool show = !w->floating && (!t->master || TAILQ_PREV(w, tab_wins, link));
+		if (!show)
+			continue;
+
+		double rx = x;
+
+		cairo_save(cr);
+		cairo_rectangle(cr, x, 0, o->bar.geom.width / ntiles, o->bar.geom.height);
+		cairo_clip(cr);
+
+		char buf[] = { ' ', w->label, ' ', '\0', };
+
+		cairo_select_font_face(cr, label_fn,
+				CAIRO_FONT_SLANT_NORMAL,
+				CAIRO_FONT_WEIGHT_BOLD);
+		cairo_set_font_size(cr, screen_pt2px(bar_label_fs));
+		cairo_set_antialias(cr, CAIRO_ANTIALIAS_GOOD);
+
+		cairo_text_extents_t te;
+		cairo_text_extents(cr, buf, &te);
+
+		if (w->focused || w->urgent) {
+			cairo_move_to(cr, rx + te.x_advance / 2, o->bar.geom.height / 2);
+			cairo_arc(cr, rx + te.x_advance / 2, o->bar.geom.height / 2, o->bar.geom.height / 2, 0, 2 * M_PI);
+			cairo_set_source_rgb(cr, RGB24_TO_FLOATS(w->focused ? label_bg : urgent_bg));
+			cairo_fill(cr);
+		} else if (win_is_alt(w)) {
+			cairo_set_source_rgb(cr, RGB24_TO_FLOATS(label_bg));
+			cairo_set_line_width(cr, 1);
+			cairo_arc(cr, rx + te.x_advance / 2, o->bar.geom.height / 2, o->bar.geom.height / 2, 0, 2 * M_PI);
+			cairo_stroke(cr);
+		}
+
+		cairo_move_to(cr, rx, (o->bar.geom.height - te.height) / 2 - te.y_bearing);
+		cairo_set_source_rgb(cr, RGB24_TO_FLOATS(label_stroke_color));
+		cairo_text_path(cr, buf);
+		cairo_set_line_width(cr, 1.5);
+		cairo_stroke_preserve(cr);
+		cairo_set_source_rgb(cr, RGB24_TO_FLOATS(label_fg));
+		cairo_fill(cr);
+
+		rx += te.x_advance;
+
+		cairo_select_font_face(cr, label_fn,
+				CAIRO_FONT_SLANT_NORMAL,
+				CAIRO_FONT_WEIGHT_BOLD);
+		cairo_set_font_size(cr, screen_pt2px(bar_fs));
+		cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
+
+		cairo_font_extents_t fe;
+		cairo_font_extents(cr, &fe);
+		cairo_move_to(cr, rx, (o->bar.geom.height + fe.height) / 2 - fe.descent);
+		cairo_set_source_rgb(cr, RGB24_TO_FLOATS(bar_fg));
+		cairo_show_text(cr, w->name);
+
+		cairo_select_font_face(cr, label_fn,
+				CAIRO_FONT_SLANT_NORMAL,
+				CAIRO_FONT_WEIGHT_NORMAL);
+		cairo_show_text(cr, ":");
+		cairo_show_text(cr, w->title);
+
+		cairo_restore(cr);
+
+		x += o->bar.geom.width / ntiles;
+	}
+
+	cairo_pop_group_to_source(cr);
+	cairo_paint(cr);
+
+	cairo_surface_flush(cairo_get_target(cr));
+}
+
+static void
+output_update_bar(struct output *o)
+{
+	struct tab *t = NULL;
+	struct session *s = TAILQ_FIRST(&sessions);
+	if (s)
+		TAILQ_FOREACH(t, &s->tabs, link)
+			if (t->output == o)
+				break;
+
+	bool mapped = t && t->monocle && !t->zoomed_win;
+	if (o->bar.mapped == mapped && !mapped)
+		return;
+
+	if (!mapped) {
+		o->bar.mapped = false;
+		XDO(xcb_unmap_window, conn, o->bar.window);
+		return;
+	}
+
+	if (XCB_WINDOW_NONE == o->bar.window) {
+		o->bar.window = xcb_generate_id(conn);
+		XDO(xcb_create_window, conn, XCB_COPY_FROM_PARENT,
+				o->bar.window,
+				screen->root,
+				0, 0, 1, 1, 0,
+				XCB_WINDOW_CLASS_INPUT_OUTPUT,
+				XCB_COPY_FROM_PARENT,
+				XCB_CW_OVERRIDE_REDIRECT |
+				XCB_CW_EVENT_MASK,
+				(uint32_t const[]){
+					true,
+					XCB_EVENT_MASK_EXPOSURE,
+				});
+	}
+
+	xcb_rectangle_t master_geom, geom;
+	tab_compute_split(t, &master_geom, &geom, &o->geom);
+	geom.height = bar_height;
+
+	if (memcmp(&o->bar.geom, &geom, sizeof geom)) {
+		o->bar.geom = geom;
+
+		uint32_t values[4];
+		uint32_t mask =
+			XCB_CONFIG_WINDOW_X |
+			XCB_CONFIG_WINDOW_Y |
+			XCB_CONFIG_WINDOW_WIDTH |
+			XCB_CONFIG_WINDOW_HEIGHT;
+		values[0] = o->bar.geom.x;
+		values[1] = o->bar.geom.y;
+		values[2] = o->bar.geom.width;
+		values[3] = o->bar.geom.height;
+		XDO(xcb_configure_window, conn, o->bar.window, mask, values);
+
+		if (o->bar.cr)
+			cairo_destroy(o->bar.cr);
+
+		cairo_surface_t *surface = cairo_xcb_surface_create(conn,
+				o->bar.window, visual_type,
+				o->bar.geom.width, o->bar.geom.height);
+		o->bar.cr = cairo_create(surface);
+		cairo_surface_destroy(surface);
+	}
+
+	if (!o->bar.mapped) {
+		o->bar.mapped = true;
+		XDO(xcb_map_window, conn, o->bar.window);
+	}
+
+	output_render_bar(o);
+}
+
+static void
 server_update_wins(void)
 {
 	if (!wins_changed)
 		return;
 	wins_changed = false;
+
+	struct output *o;
+	TAILQ_FOREACH(o, &outputs, link)
+		output_update_bar(o);
 
 	struct session *s;
 	TAILQ_FOREACH(s, &sessions, link)
@@ -1072,6 +1271,8 @@ output_del(struct output *o)
 		session_update_tabs(s);
 	}
 
+	cairo_destroy(o->bar.cr);
+	XDO(xcb_destroy_window, conn, o->bar.window);
 	TAILQ_REMOVE(&outputs, o, link);
 	free(o->name);
 	free(o);
@@ -1840,6 +2041,9 @@ win_prop_update_title(struct win *w, void *data, int sz)
 
 	free(w->title);
 	XASSERT(w->title = strndup(data, sz));
+
+	if (w->tab && w->tab->output)
+		output_render_bar(w->tab->output);
 }
 
 static void
@@ -1850,6 +2054,9 @@ win_prop_update_heawm_name(struct win *w, void *data, int sz)
 
 	free(w->name);
 	XASSERT(w->name = strndup(data, sz));
+
+	if (w->tab && w->tab->output)
+		output_render_bar(w->tab->output);
 }
 
 static void
@@ -1860,6 +2067,9 @@ win_prop_update_heawm_label(struct win *w, void *data, int sz)
 
 	w->label = *(char *)data;
 	win_label_shape_and_render(w);
+
+	if (w->tab && w->tab->output)
+		output_render_bar(w->tab->output);
 }
 
 static void
@@ -1941,6 +2151,8 @@ win_prop_update_hints(struct win *w, void *data, int sz)
 	if (w->urgent < urgent) {
 		w->urgent = urgent;
 		win_label_shape_and_render(w);
+		if (w->tab && w->tab->output)
+			output_render_bar(w->tab->output);
 	}
 }
 
@@ -2830,6 +3042,21 @@ screen_setup(void)
 		exit(EXIT_FAILURE);
 	}
 
+	if (!bar_height) {
+		cairo_surface_t *surface = cairo_image_surface_create(
+				CAIRO_FORMAT_RGB24, 0, 0);
+		cairo_t *cr = cairo_create(surface);
+		cairo_surface_destroy(surface);
+		cairo_select_font_face(cr, label_fn,
+				CAIRO_FONT_SLANT_NORMAL,
+				CAIRO_FONT_WEIGHT_NORMAL);
+		cairo_font_extents_t fe;
+		cairo_font_extents(cr, &fe);
+		cairo_set_font_size(cr, screen_pt2px(10));
+		bar_height = fe.height * 1.5;
+		cairo_destroy(cr);
+	}
+
 	screen_setup_net();
 	screen_setup_outputs();
 	screen_setup_users();
@@ -3144,8 +3371,18 @@ handle_expose(xcb_expose_event_t const *event)
 		return;
 
 	struct win *w = win_hash_get(event->window);
-	if (w)
+	if (w) {
 		win_label_render(w, false);
+		return;
+	}
+
+	struct output *o;
+	TAILQ_FOREACH(o, &outputs, link) {
+		if (event->window == o->bar.window) {
+			output_render_bar(o);
+			return;
+		}
+	}
 }
 
 static void
