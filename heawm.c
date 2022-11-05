@@ -385,8 +385,6 @@ struct win_label {
 	xcb_rectangle_t geom;
 	cairo_t *cr;
 	cairo_t *shape_cr;
-	cairo_surface_t *surface;
-	cairo_surface_t *shape_surface;
 	bool mapped;
 };
 
@@ -602,8 +600,6 @@ win_label_del(struct win_label *wl)
 	XDO(xcb_free_pixmap, conn, wl->shape);
 	cairo_destroy(wl->cr);
 	cairo_destroy(wl->shape_cr);
-	cairo_surface_destroy(wl->surface);
-	cairo_surface_destroy(wl->shape_surface);
 }
 
 static void
@@ -620,7 +616,6 @@ win_label_render(struct win *w, bool shape)
 		'\0',
 	};
 
-	cairo_surface_t *surface = shape ? wl->shape_surface : wl->surface;
 	cairo_t *cr = shape ? wl->shape_cr : wl->cr;
 
 	if (!shape)
@@ -701,7 +696,7 @@ win_label_render(struct win *w, bool shape)
 		cairo_paint(cr);
 	}
 
-	cairo_surface_flush(surface);
+	cairo_surface_flush(cairo_get_target(cr));
 }
 
 static void
@@ -2515,14 +2510,18 @@ win_new(xcb_window_t window)
 	ARRAY_IFOREACH(i, properties)
 		win_prop_handle_reply(w, &properties[i], prop_cookies[i]);
 
-	wl->shape_surface = cairo_xcb_surface_create_for_bitmap(conn,
+	cairo_surface_t *surface;
+	surface = cairo_xcb_surface_create_for_bitmap(conn,
 			screen, wl->shape,
 			wl->geom.width, wl->geom.height);
-	wl->shape_cr = cairo_create(wl->shape_surface);
-	wl->surface = cairo_xcb_surface_create(conn,
+	wl->shape_cr = cairo_create(surface);
+	cairo_surface_destroy(surface);
+
+	surface = cairo_xcb_surface_create(conn,
 			wl->window, visual_type,
 			wl->geom.width, wl->geom.height);
-	wl->cr = cairo_create(wl->surface);
+	wl->cr = cairo_create(surface);
+	cairo_surface_destroy(surface);
 
 	if (ATOM(_NET_WM_WINDOW_TYPE_SPLASH) == w->type)
 		w->floating = true;
