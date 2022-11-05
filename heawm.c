@@ -228,7 +228,7 @@ enum { XCB_MOD_MASK_NUM_LOCK = XCB_MOD_MASK_2, };
 
 enum { XCB_ERROR_NOTIFY = 0 };
 
-#define RGB8_TO_FLOATS(color) \
+#define RGB24_TO_FLOATS(color) \
 	(uint8_t)((color) >> 16) / 256., \
 	(uint8_t)((color) >> 8 ) / 256., \
 	(uint8_t)((color)      ) / 256.
@@ -650,7 +650,7 @@ win_label_render(struct win *w, bool shape)
 		if (shape) {
 			cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
 		} else {
-			cairo_set_source_rgb(cr, RGB8_TO_FLOATS(label_bg));
+			cairo_set_source_rgb(cr, RGB24_TO_FLOATS(label_bg));
 			cairo_move_to(cr, 0, 0);
 		}
 		cairo_arc(cr, 0, 0, radius * sqrt(M_PHI), 0, 2 * M_PI);
@@ -659,7 +659,7 @@ win_label_render(struct win *w, bool shape)
 		if (shape) {
 			cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
 		} else {
-			cairo_set_source_rgb(cr, RGB8_TO_FLOATS(urgent_bg));
+			cairo_set_source_rgb(cr, RGB24_TO_FLOATS(urgent_bg));
 			cairo_move_to(cr, 0, 0);
 		}
 		cairo_arc(cr, 0, 0, radius * sqrt(M_PHI), 0, 2 * M_PI);
@@ -668,7 +668,7 @@ win_label_render(struct win *w, bool shape)
 		if (shape) {
 			cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
 		} else {
-			cairo_set_source_rgb(cr, RGB8_TO_FLOATS(label_bg));
+			cairo_set_source_rgb(cr, RGB24_TO_FLOATS(label_bg));
 			cairo_move_to(cr, 0, 0);
 		}
 		cairo_set_line_width(cr, 1);
@@ -682,7 +682,7 @@ win_label_render(struct win *w, bool shape)
 	cairo_set_antialias(cr, CAIRO_ANTIALIAS_BEST);
 
 	if (!shape)
-		cairo_set_source_rgb(cr, RGB8_TO_FLOATS(label_stroke_color));
+		cairo_set_source_rgb(cr, RGB24_TO_FLOATS(label_stroke_color));
 	else
 		cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
 	cairo_move_to(cr, te_left, te_top);
@@ -691,7 +691,7 @@ win_label_render(struct win *w, bool shape)
 	cairo_stroke(cr);
 
 	if (!shape)
-		cairo_set_source_rgb(cr, RGB8_TO_FLOATS(label_fg));
+		cairo_set_source_rgb(cr, RGB24_TO_FLOATS(label_fg));
 	cairo_move_to(cr, te_left, te_top);
 	cairo_show_text(cr, text);
 
