@@ -3072,13 +3072,12 @@ user_feed_label_key(struct user *u, xkb_keysym_t keysym,
 
 	if (XKB_KEY_a <= keysym && keysym <= XKB_KEY_z) {
 		win_update_label(u->focused_win, keysym - XKB_KEY_a + 'a');
+		user_set_mode(u, MODE_NORMAL);
 	} else switch (keysym) {
 	case XKB_KEY_semicolon:
 		win_set_auto_label(u->focused_win);
 		break;
 	}
-
-	user_set_mode(u, MODE_NORMAL);
 }
 
 static void
