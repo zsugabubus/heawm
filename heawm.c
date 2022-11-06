@@ -1071,55 +1071,65 @@ output_render_bar(struct output *o)
 	cairo_rectangle(cr, 0, 0, o->bar.geom.width, o->bar.geom.height);
 	cairo_fill(cr);
 
-	int32_t ntiles = 0;
-	struct win *w;
-	TAILQ_FOREACH(w, &t->wins, link)
-		ntiles += !w->floating && (!t->master || TAILQ_PREV(w, tab_wins, link));
+	int32_t n = 0;
+	struct win *w = TAILQ_FIRST(&t->wins);
+	if (t->master && w && !w->floating)
+		w = TAILQ_NEXT(w, link);
+	struct win *slave = w;
+	for (w = slave; w; w = TAILQ_NEXT(w, link))
+		n += !w->floating;
 
-	int x = 0;
-	TAILQ_FOREACH(w, &t->wins, link) {
-		bool show = !w->floating && (!t->master || TAILQ_PREV(w, tab_wins, link));
-		if (!show)
+	int i = 0;
+	for (w = slave; w; w = TAILQ_NEXT(w, link), ++i) {
+		if (w->floating)
 			continue;
 
-		double rx = x;
-
 		cairo_save(cr);
-		cairo_rectangle(cr, x, 0, o->bar.geom.width / ntiles, o->bar.geom.height);
+		cairo_translate(cr, o->bar.geom.width * i / n, 0);
+		cairo_rectangle(cr, 0, 0,
+				o->bar.geom.width / n + 1 /* Rounding error. */,
+				o->bar.geom.height);
 		cairo_clip(cr);
 
-		char buf[] = { ' ', w->label, ' ', '\0', };
+		char label[] = { ' ', w->label, ' ', '\0', };
 
 		cairo_select_font_face(cr, label_fn,
 				CAIRO_FONT_SLANT_NORMAL,
 				CAIRO_FONT_WEIGHT_BOLD);
 		cairo_set_font_size(cr, screen_pt2px(bar_label_fs));
-		cairo_set_antialias(cr, CAIRO_ANTIALIAS_GOOD);
+		cairo_set_antialias(cr, CAIRO_ANTIALIAS_BEST);
 
 		cairo_text_extents_t te;
-		cairo_text_extents(cr, buf, &te);
+		cairo_text_extents(cr, label, &te);
 
-		if (w->focused || w->urgent) {
-			cairo_move_to(cr, rx + te.x_advance / 2, o->bar.geom.height / 2);
-			cairo_arc(cr, rx + te.x_advance / 2, o->bar.geom.height / 2, o->bar.geom.height / 2, 0, 2 * M_PI);
-			cairo_set_source_rgb(cr, RGB24_TO_FLOATS(w->focused ? label_bg : urgent_bg));
+		cairo_save(cr);
+		cairo_translate(cr, te.x_advance / 2, o->bar.geom.height / 2);
+		cairo_arc(cr, 0, 0, o->bar.geom.height / 2, 0, 2 * M_PI);
+		if (w->focused) {
+			cairo_set_source_rgb(cr, RGB24_TO_FLOATS(label_bg));
+			cairo_fill(cr);
+		} else if (w->urgent) {
+			cairo_set_source_rgb(cr, RGB24_TO_FLOATS(urgent_bg));
 			cairo_fill(cr);
 		} else if (win_is_alt(w)) {
 			cairo_set_source_rgb(cr, RGB24_TO_FLOATS(label_bg));
 			cairo_set_line_width(cr, 1);
-			cairo_arc(cr, rx + te.x_advance / 2, o->bar.geom.height / 2, o->bar.geom.height / 2, 0, 2 * M_PI);
 			cairo_stroke(cr);
+		} else {
+			cairo_new_path(cr);
 		}
+		cairo_restore(cr);
 
-		cairo_move_to(cr, rx, (o->bar.geom.height - te.height) / 2 - te.y_bearing);
+		double x = 0;
+		double y = (o->bar.geom.height - te.height) / 2 - te.y_bearing;
+		cairo_move_to(cr, x, y);
 		cairo_set_source_rgb(cr, RGB24_TO_FLOATS(label_stroke_color));
-		cairo_text_path(cr, buf);
+		cairo_text_path(cr, label);
 		cairo_set_line_width(cr, 1.5);
 		cairo_stroke_preserve(cr);
 		cairo_set_source_rgb(cr, RGB24_TO_FLOATS(label_fg));
+		/* Provides better result than cairo_show_text() for small sizes. */
 		cairo_fill(cr);
-
-		rx += te.x_advance;
 
 		cairo_select_font_face(cr, label_fn,
 				CAIRO_FONT_SLANT_NORMAL,
@@ -1129,7 +1139,7 @@ output_render_bar(struct output *o)
 
 		cairo_font_extents_t fe;
 		cairo_font_extents(cr, &fe);
-		cairo_move_to(cr, rx, (o->bar.geom.height + fe.height) / 2 - fe.descent);
+		cairo_move_to(cr, te.x_advance, (o->bar.geom.height + fe.height) / 2 - fe.descent);
 		cairo_set_source_rgb(cr, RGB24_TO_FLOATS(bar_fg));
 		cairo_show_text(cr, w->name);
 
@@ -1140,8 +1150,6 @@ output_render_bar(struct output *o)
 		cairo_show_text(cr, w->title);
 
 		cairo_restore(cr);
-
-		x += o->bar.geom.width / ntiles;
 	}
 
 	cairo_pop_group_to_source(cr);
