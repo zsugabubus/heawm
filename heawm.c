@@ -2940,9 +2940,9 @@ win_new(xcb_window_t window)
 	}
 
 	if (!w->tab && TAILQ_NEXT(w, older)) {
-		struct win *after = TAILQ_LAST(&latest_wins, latest_wins);
-		TAILQ_INSERT_AFTER(&after->tab->wins, after, w, link);
-		w->tab = after->tab;
+		struct win *afterw = TAILQ_LAST(&latest_wins, latest_wins);
+		TAILQ_INSERT_AFTER(&afterw->tab->wins, afterw, w, link);
+		w->tab = afterw->tab;
 		wins_changed = true;
 
 		struct user *u;
