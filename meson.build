@@ -14,6 +14,7 @@ deps = [
 	dependency('xcb-xinput'),
 	dependency('xcb-xkb'),
 	dependency('xcb-xtest'),
+	dependency('xcb-xrm'),
 	dependency('xkbcommon-x11'),
 ]
 

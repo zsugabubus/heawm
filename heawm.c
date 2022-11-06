@@ -30,6 +30,7 @@
 #include <xcb/xcb_ewmh.h>
 #include <xcb/xcb_icccm.h>
 #include <xcb/xcb_keysyms.h>
+#include <xcb/xcb_xrm.h>
 #include <xcb/xinput.h>
 #include <xcb/xkb.h>
 #include <xcb/xproto.h>
@@ -302,17 +303,17 @@ static sigset_t saved_set;
 static bool wins_changed;
 
 static uint32_t mod = XCB_MOD_MASK_4;
-static char const *label_fn = "monospace";
-static int32_t label_fs = 17;
-static uint32_t label_bg = 0xff0000;
-static uint32_t label_stroke_color = 0x000000;
-static uint32_t label_fg = 0xffff00;
-static uint32_t urgent_bg = 0xffdf5f;
-static uint32_t bar_fs = 10;
-static uint32_t bar_label_fs = 13;
-static uint32_t bar_bg = 0x000000;
-static uint32_t bar_fg = 0xffffff;
-static uint32_t bar_height;
+static char *label_fn;
+static long label_fs;
+static uint32_t label_bg;
+static uint32_t label_stroke_color;
+static uint32_t label_fg;
+static uint32_t urgent_bg;
+static long bar_fs;
+static long bar_label_fs;
+static uint32_t bar_bg;
+static uint32_t bar_fg;
+static long bar_height;
 
 struct device {
 	struct user *user;
@@ -1229,6 +1230,70 @@ output_update_bar(struct output *o)
 	}
 
 	output_render_bar(o);
+}
+
+static void
+xrm_get_color(xcb_xrm_database_t *db, char const *name, char const *class, uint32_t *out, uint32_t def)
+{
+	char *s;
+	int rc = xcb_xrm_resource_get_string(db, name, class, &s);
+	if (0 <= rc) {
+		if (1 == sscanf(s, "#%"SCNx32, out)) {
+			free(s);
+			return;
+		}
+		fprintf(stderr, "Resource %s has invalid value: %s\n", name, s);
+		free(s);
+	}
+	*out = def;
+}
+
+static void
+xrm_get_long(xcb_xrm_database_t *db, char const *name, char const *class, long *out, long def)
+{
+	int rc = xcb_xrm_resource_get_long(db, name, class, out);
+	if (-1 == rc)
+		fprintf(stderr, "Resource %s has invalid value\n", name);
+	if (rc < 0)
+		*out = def;
+}
+
+static void
+xrm_update(void)
+{
+	xcb_xrm_database_t *db;
+	XASSERT(db = xcb_xrm_database_from_default(conn));
+
+	free(label_fn);
+	if (xcb_xrm_resource_get_string(db, "heawm.fontFamily", "heawm.FontFamily", &label_fn) < 0)
+		XASSERT(label_fn = strdup("monospace"));
+	xrm_get_long(db, "heawm.label.fontSize", "Heawm.Label.FontSize", &label_fs, 17);
+	xrm_get_color(db, "heawm.label.foreground", "Heawm.Label.Foreground", &label_fg, 0xffff00);
+	xrm_get_color(db, "heawm.label.background", "Heawm.Label.Background", &label_bg, 0xff0000);
+	xrm_get_color(db, "heawm.label.stroke", "Heawm.Label.Stroke", &label_stroke_color, 0x000000);
+	xrm_get_color(db, "heawm.label.urgentBackground", "Heawm.Label.UrgentBackground", &urgent_bg, 0xffdf5f);
+	xrm_get_long(db, "heawm.bar.fontSize", "Heawm.Bar.FontSize", &bar_fs, 10);
+	xrm_get_long(db, "heawm.bar.label.FontSize", "Heawm.Bar.Label.FontSize", &bar_label_fs, 13);
+	xrm_get_color(db, "heawm.bar.background", "Heawm.Bar.Background", &bar_bg, 0x000000);
+	xrm_get_color(db, "heawm.bar.foreground", "Heawm.Bar.Foreground", &bar_fg, 0xffffff);
+	xrm_get_long(db, "heawm.bar.height", "Heawm.Bar.Height", &bar_height, 0);
+
+	xcb_xrm_database_free(db);
+
+	if (!bar_height) {
+		cairo_surface_t *surface = cairo_image_surface_create(
+				CAIRO_FORMAT_RGB24, 0, 0);
+		cairo_t *cr = cairo_create(surface);
+		cairo_surface_destroy(surface);
+		cairo_select_font_face(cr, label_fn,
+				CAIRO_FONT_SLANT_NORMAL,
+				CAIRO_FONT_WEIGHT_NORMAL);
+		cairo_set_font_size(cr, screen_pt2px(bar_fs));
+		cairo_font_extents_t fe;
+		cairo_font_extents(cr, &fe);
+		bar_height = fe.height * 1.1;
+		cairo_destroy(cr);
+	}
 }
 
 static void
@@ -3061,21 +3126,7 @@ screen_setup(void)
 		exit(EXIT_FAILURE);
 	}
 
-	if (!bar_height) {
-		cairo_surface_t *surface = cairo_image_surface_create(
-				CAIRO_FORMAT_RGB24, 0, 0);
-		cairo_t *cr = cairo_create(surface);
-		cairo_surface_destroy(surface);
-		cairo_select_font_face(cr, label_fn,
-				CAIRO_FONT_SLANT_NORMAL,
-				CAIRO_FONT_WEIGHT_NORMAL);
-		cairo_font_extents_t fe;
-		cairo_font_extents(cr, &fe);
-		cairo_set_font_size(cr, screen_pt2px(10));
-		bar_height = fe.height * 1.5;
-		cairo_destroy(cr);
-	}
-
+	xrm_update();
 	screen_setup_net();
 	screen_setup_outputs();
 	screen_setup_users();
@@ -3874,6 +3925,13 @@ handle_event(xcb_generic_event_t *event)
 }
 
 static void
+handle_reload(int sig)
+{
+	(void)sig;
+	xrm_update();
+}
+
+static void
 setup_signals(void)
 {
 	struct sigaction sa;
@@ -3883,6 +3941,9 @@ setup_signals(void)
 
 	sa.sa_handler = handle_child;
 	sigaction(SIGCHLD, &sa, NULL);
+
+	sa.sa_handler = handle_reload;
+	sigaction(SIGHUP, &sa, NULL);
 }
 
 static void
