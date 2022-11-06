@@ -3447,7 +3447,7 @@ handle_configure_request(xcb_configure_request_event_t const *event)
 	if (!w)
 		return;
 
-	/* Do not annoy users. */
+	/* Do not allow clients to alter layout. */
 	if (!w->floating) {
 #define xmacro(X, x) \
 	if (XCB_CONFIG_WINDOW_##X & event->value_mask) \
@@ -3459,6 +3459,8 @@ handle_configure_request(xcb_configure_request_event_t const *event)
 #undef xmacro
 	}
 
+	/* Notify programs about their unchanged size before they start doing
+	 * some insane things, like resizing themselves randomly. */
 	win_send_configure_notify(w);
 }
 
