@@ -668,55 +668,39 @@ win_label_render(struct win *w, bool shape)
 	cairo_text_extents_t te;
 	cairo_text_extents(cr, text, &te);
 
-	int radius = font_size / 2;
-
+	cairo_arc(cr, 0, 0, font_size * sqrt(M_PHI) / 2, 0, 2 * M_PI);
+	if (shape)
+		cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
 	if (w->focused) {
-		if (shape) {
-			cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
-		} else {
-			cairo_set_source_rgb(cr, RGB24_TO_FLOATS(label_bg));
-			cairo_move_to(cr, 0, 0);
-		}
-		cairo_arc(cr, 0, 0, radius * sqrt(M_PHI), 0, 2 * M_PI);
+		cairo_set_source_rgb(cr, RGB24_TO_FLOATS(label_bg));
 		cairo_fill(cr);
 	} else if (w->urgent) {
-		if (shape) {
-			cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
-		} else {
-			cairo_set_source_rgb(cr, RGB24_TO_FLOATS(urgent_bg));
-			cairo_move_to(cr, 0, 0);
-		}
-		cairo_arc(cr, 0, 0, radius * sqrt(M_PHI), 0, 2 * M_PI);
+		cairo_set_source_rgb(cr, RGB24_TO_FLOATS(urgent_bg));
 		cairo_fill(cr);
 	} else if (win_is_alt(w)) {
-		if (shape) {
-			cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
-		} else {
-			cairo_set_source_rgb(cr, RGB24_TO_FLOATS(label_bg));
-			cairo_move_to(cr, 0, 0);
-		}
+		cairo_set_source_rgb(cr, RGB24_TO_FLOATS(label_bg));
 		cairo_set_line_width(cr, 1);
-		cairo_arc(cr, 0, 0, radius * sqrt(M_PHI) - 1, 0, 2 * M_PI);
 		cairo_stroke(cr);
+	} else {
+		cairo_new_path(cr);
 	}
 
-	double te_left = -(te.width + te.x_bearing) / 2;
-	double te_top = -te.y_bearing - te.height / 2;
-
 	cairo_set_antialias(cr, CAIRO_ANTIALIAS_BEST);
+
+	double x = -(te.width + te.x_bearing) / 2;
+	double y = -te.y_bearing - te.height / 2;
 
 	if (!shape)
 		cairo_set_source_rgb(cr, RGB24_TO_FLOATS(label_stroke_color));
 	else
 		cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
-	cairo_move_to(cr, te_left, te_top);
+	cairo_move_to(cr, x, y);
 	cairo_text_path(cr, text);
 	cairo_set_line_width(cr, 2.5);
 	cairo_stroke(cr);
-
 	if (!shape)
 		cairo_set_source_rgb(cr, RGB24_TO_FLOATS(label_fg));
-	cairo_move_to(cr, te_left, te_top);
+	cairo_move_to(cr, x, y);
 	cairo_show_text(cr, text);
 
 	cairo_restore(cr);
