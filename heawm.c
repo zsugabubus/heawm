@@ -1224,12 +1224,12 @@ output_update_bar(struct output *o)
 		cairo_surface_destroy(surface);
 	}
 
+	output_render_bar(o);
+
 	if (!o->bar.mapped) {
 		o->bar.mapped = true;
 		XDO(xcb_map_window, conn, o->bar.window);
 	}
-
-	output_render_bar(o);
 }
 
 static void
