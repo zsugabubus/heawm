@@ -967,34 +967,62 @@ tab_update_wins(struct tab *t)
 
 	if (t->zoomed_win && TAILQ_FIRST(&sessions) == t->session) {
 		win_set_geom(t->zoomed_win, &geom);
-		win_set_mapped(t->zoomed_win, true);
 		win_label_set_mapped(t->zoomed_win, false);
 		TAILQ_FOREACH(w, &t->wins, link)
-			if (w != t->zoomed_win)
-				win_set_mapped(w, false);
+			win_set_mapped(w, w == t->zoomed_win);
 		return;
 	}
-
-	int32_t tiles = 0;
-	TAILQ_FOREACH(w, &t->wins, link)
-		tiles += !w->floating;
 
 	xcb_rectangle_t master_geom;
 	xcb_rectangle_t slave_geom;
 	tab_compute_split(t, &master_geom, &slave_geom, &geom);
 
-	int32_t nmaster = t->master ? 1 : 0;
-	int32_t nslave = tiles - nmaster;
+	w = TAILQ_FIRST(&t->wins);
+
+	if (t->master && w && !w->floating) {
+		win_set_geom(w, &master_geom);
+		win_set_mapped(w, true);
+		win_label_set_mapped(w, true);
+		w = TAILQ_NEXT(w, link);
+	}
+
+	struct win *slave = w;
 	struct win *mono = t->monocle ? tab_get_latest_slave_win(t) : NULL;
+	if (mono) {
+		xcb_rectangle_t tile = slave_geom;
+		tile.y += t->output->bar.geom.height;
+		tile.height -= t->output->bar.geom.height;
+		win_set_geom(mono, &tile);
+		win_label_set_mapped(mono, t->master);
 
-	struct grid slave_grid;
-	grid_init(&slave_grid, nslave, &slave_geom, t->cols);
+		for (w = slave; w; w = TAILQ_NEXT(w, link)) {
+			if (w->floating)
+				continue;
+			win_set_mapped(w, w == mono);
+		}
+	} else {
+		int32_t n = 0;
+		for (w = slave; w; w = TAILQ_NEXT(w, link))
+			n += !w->floating;
 
-	TAILQ_FOREACH(w, &t->wins, link) {
-		xcb_rectangle_t tile;
-		if (w->floating) {
-			tile = w->user_geom;
+		struct grid layout;
+		grid_init(&layout, n, &slave_geom, t->cols);
 
+		for (w = slave; w; w = TAILQ_NEXT(w, link)) {
+			if (w->floating)
+				continue;
+			xcb_rectangle_t tile = grid_next(&layout);
+			win_set_geom(w, &tile);
+			win_set_mapped(w, true);
+			win_label_set_mapped(w, true);
+		}
+	}
+
+	for (w = slave; w; w = TAILQ_NEXT(w, link)) {
+		if (!w->floating)
+			continue;
+
+		xcb_rectangle_t tile = w->user_geom;
 #define xmacro(x, width) do { \
 	if (tile.width < 100) \
 		tile.width = 100; \
@@ -1006,36 +1034,12 @@ tab_update_wins(struct tab *t)
 	else if (max < tile.x) \
 		tile.x = max; \
 } while (0)
-			xmacro(x, width);
-			xmacro(y, height);
+		xmacro(x, width);
+		xmacro(y, height);
 #undef xmacro
-		} else if (0 < nmaster) {
-			--nmaster;
-			tile = master_geom;
-			if (t->monocle && !t->master) {
-				tile.y += t->output->bar.geom.height;
-				tile.height -= t->output->bar.geom.height;
-			}
-		} else if (0 < nslave) {
-			--nslave;
-			if (w == mono) {
-				tile = slave_geom;
-				tile.y += t->output->bar.geom.height;
-				tile.height -= t->output->bar.geom.height;
-			} else if (mono) {
-				win_set_mapped(w, false);
-				continue;
-			} else {
-				tile = grid_next(&slave_grid);
-			}
-		} else {
-			win_set_mapped(w, false);
-			continue;
-		}
-
 		win_set_geom(w, &tile);
 		win_set_mapped(w, true);
-		win_label_set_mapped(w, w != mono || t->master);
+		win_label_set_mapped(w, true);
 	}
 }
 
