@@ -3148,7 +3148,9 @@ user_feed_command_key(struct user *u, xkb_keysym_t keysym,
 
 	case XKB_KEY_M:
 		t->master = '\0';
-		/* FALLTHROUGH */
+		t->monocle = true;
+		break;
+
 	case XKB_KEY_m:
 		t->monocle ^= true;
 		break;
