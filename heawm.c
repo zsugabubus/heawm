@@ -268,7 +268,7 @@ enum { XCB_ERROR_NOTIFY = 0 };
 	xmacro(WM_CLIENT_LEADER) \
 	xmacro(WM_DELETE_WINDOW) \
 	xmacro(WM_PROTOCOLS) \
-	xmacro(WM_SIZE_HINTS) \
+	xmacro(WM_TAKE_FOCUS) \
 	xmacro(WM_STATE) \
 	xmacro(UTF8_STRING) \
 
@@ -413,6 +413,9 @@ struct win {
 	bool floating: 1;
 	bool shaped: 1;
 	bool mapped: 1;
+	bool net_wm_name: 1;
+	bool wm_delete_window: 1;
+	bool wm_take_focus: 1;
 	uint8_t focused;
 
 	xcb_window_t window;
@@ -1834,6 +1837,25 @@ user_set_mode(struct user *u, enum mode mode)
 }
 
 static void
+win_send_take_focus(struct win *w)
+{
+	XDO(xcb_send_event, conn, false, w->window,
+			XCB_EVENT_MASK_NO_EVENT,
+			XCB_SEND_EVENT_EVENT(xcb_client_message_event_t, {
+				.response_type = XCB_CLIENT_MESSAGE,
+				.window = w->window,
+				.type = ATOM(WM_PROTOCOLS),
+				.format = 32,
+				.data = {
+					.data32 = {
+						ATOM(WM_TAKE_FOCUS),
+						XCB_CURRENT_TIME,
+					},
+				},
+			}));
+}
+
+static void
 user_focus_win(struct user *u, struct win *w)
 {
 	struct win *oldw = u->focused_win;
@@ -1908,6 +1930,8 @@ user_focus_win(struct user *u, struct win *w)
 	wins_changed = true;
 	server_update_wins();
 	user_restore_pointer(u);
+	if (w->wm_take_focus)
+		win_send_take_focus(w);
 	user_update_input_focus(u);
 }
 
@@ -2102,26 +2126,35 @@ user_find_win(struct user const *u, char label)
 }
 
 static void
-win_update_name(struct win const *w, char const *name)
+win_prop_update_wm_client_leader(struct win *w, void *data, int sz)
 {
-	if (!strcmp(w->name, name))
-		return;
-	XDO(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
-			w->window, ATOM(_HEAWM_NAME),
-			ATOM(UTF8_STRING), 8,
-			strlen(name), name);
+	w->leader = sizeof(xcb_window_t) == sz
+		? *(xcb_window_t *)data
+		: XCB_WINDOW_NONE;
 }
 
 static void
-win_prop_update_title(struct win *w, void *data, int sz)
+win_prop_update_protocols(struct win *w, void *data, int sz)
 {
-	/* Ignore zero-sized reply meaning property is not supported (or
-	 * something like this), e.g. Firefox. */
+	w->wm_delete_window = false;
+	w->wm_take_focus = false;
+
+	while ((int)sizeof(xcb_atom_t) <= sz) {
+		sz -= sizeof(xcb_atom_t);
+		xcb_atom_t atom = *(xcb_atom_t const *)((char *)data + sz);
+		w->wm_delete_window |= ATOM(WM_DELETE_WINDOW) == atom;
+		w->wm_take_focus |= ATOM(WM_TAKE_FOCUS) == atom;
+	}
+}
+
+static void
+win_prop_update_heawm_label(struct win *w, void *data, int sz)
+{
 	if (!sz)
 		return;
 
-	free(w->title);
-	XASSERT(w->title = strndup(data, sz));
+	w->label = *(char *)data;
+	win_label_shape_and_render(w);
 
 	if (w->tab && w->tab->output)
 		output_render_bar(w->tab->output);
@@ -2141,44 +2174,19 @@ win_prop_update_heawm_name(struct win *w, void *data, int sz)
 }
 
 static void
-win_prop_update_heawm_label(struct win *w, void *data, int sz)
+win_prop_update_net_wm_name(struct win *w, void *data, int sz)
 {
-	if (!sz)
-		return;
+	w->net_wm_name = true;
 
-	w->label = *(char *)data;
-	win_label_shape_and_render(w);
+	free(w->title);
+	XASSERT(w->title = strndup(data, sz));
 
 	if (w->tab && w->tab->output)
 		output_render_bar(w->tab->output);
 }
 
 static void
-win_prop_update_leader(struct win *w, void *data, int sz)
-{
-	w->leader = sizeof(xcb_window_t) == sz
-		? *(xcb_window_t *)data
-		: XCB_WINDOW_NONE;
-}
-
-static void
-win_prop_update_transient_for(struct win *w, void *data, int sz)
-{
-	w->transient_for = sizeof(xcb_window_t) == sz
-		? *(xcb_window_t *)data
-		: XCB_WINDOW_NONE;
-}
-
-static void
-win_prop_update_type(struct win *w, void *data, int sz)
-{
-	w->type = sizeof(xcb_window_t) == sz
-		? *(xcb_window_t *)data
-		: XCB_WINDOW_NONE;
-}
-
-static void
-win_prop_update_pid(struct win *w, void *data, int sz)
+win_prop_update_net_wm_pid(struct win *w, void *data, int sz)
 {
 	w->pid = sizeof(uint32_t) == sz
 		? *(uint32_t *)data
@@ -2186,7 +2194,38 @@ win_prop_update_pid(struct win *w, void *data, int sz)
 }
 
 static void
-win_prop_update_class(struct win *w, void *data, int sz)
+win_prop_update_net_wm_state(struct win *w, void *data, int sz)
+{
+	w->fullscreen = false;
+
+	while ((int)sizeof(xcb_atom_t) <= sz) {
+		sz -= sizeof(xcb_atom_t);
+		xcb_atom_t atom = *(xcb_atom_t const *)((char *)data + sz);
+		w->fullscreen |= ATOM(_NET_WM_STATE_FULLSCREEN) == atom;
+	}
+}
+
+static void
+win_update_name(struct win const *w, char const *name)
+{
+	if (!strcmp(w->name, name))
+		return;
+	XDO(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
+			w->window, ATOM(_HEAWM_NAME),
+			ATOM(UTF8_STRING), 8,
+			strlen(name), name);
+}
+
+static void
+win_prop_update_net_wm_window_type(struct win *w, void *data, int sz)
+{
+	w->type = sizeof(xcb_window_t) == sz
+		? *(xcb_atom_t *)data
+		: XCB_ATOM_NONE;
+}
+
+static void
+win_prop_update_wm_class(struct win *w, void *data, int sz)
 {
 	free(w->class_instance);
 	XASSERT(w->class_class = w->class_instance = strdup(""));
@@ -2210,19 +2249,7 @@ win_prop_update_class(struct win *w, void *data, int sz)
 }
 
 static void
-win_prop_update_state(struct win *w, void *data, int sz)
-{
-	w->fullscreen = false;
-
-	while ((int)sizeof(xcb_atom_t) <= sz) {
-		sz -= sizeof(xcb_atom_t);
-		xcb_atom_t atom = *(xcb_atom_t const *)((char *)data + sz);
-		w->fullscreen |= ATOM(_NET_WM_STATE_FULLSCREEN) == atom;
-	}
-}
-
-static void
-win_prop_update_hints(struct win *w, void *data, int sz)
+win_prop_update_wm_hints(struct win *w, void *data, int sz)
 {
 	xcb_icccm_wm_hints_t const *hints = data;
 	if (sz < (int)sizeof *hints)
@@ -2237,18 +2264,41 @@ win_prop_update_hints(struct win *w, void *data, int sz)
 	}
 }
 
+static void
+win_prop_update_wm_name(struct win *w, void *data, int sz)
+{
+	/* Ignore if _NET_WM_NAME is supported. */
+	if (w->net_wm_name)
+		return;
+
+	free(w->title);
+	XASSERT(w->title = strndup(data, sz));
+
+	if (w->tab && w->tab->output)
+		output_render_bar(w->tab->output);
+}
+
+static void
+win_prop_update_wm_transient_for(struct win *w, void *data, int sz)
+{
+	w->transient_for = sizeof(xcb_window_t) == sz
+		? *(xcb_window_t *)data
+		: XCB_WINDOW_NONE;
+}
+
 #define PROPERTIES \
-	xmacro(XCB_ATOM_WM_HINTS, XCB_ATOM_WM_HINTS, win_prop_update_hints) \
-	xmacro(XCB_ATOM_WM_NAME, XCB_ATOM_STRING, win_prop_update_title) \
-	xmacro(ATOM(_NET_WM_NAME), ATOM(UTF8_STRING), win_prop_update_title) \
-	xmacro(ATOM(_HEAWM_NAME), ATOM(UTF8_STRING), win_prop_update_heawm_name) \
+	xmacro(ATOM(WM_CLIENT_LEADER), XCB_ATOM_WINDOW, win_prop_update_wm_client_leader) \
+	xmacro(ATOM(WM_PROTOCOLS), XCB_ATOM_ATOM, win_prop_update_protocols) \
 	xmacro(ATOM(_HEAWM_LABEL), ATOM(UTF8_STRING), win_prop_update_heawm_label) \
-	xmacro(XCB_ATOM_WM_CLASS, XCB_ATOM_STRING, win_prop_update_class) \
-	xmacro(ATOM(WM_CLIENT_LEADER), XCB_ATOM_WINDOW, win_prop_update_leader) \
-	xmacro(XCB_ATOM_WM_TRANSIENT_FOR, XCB_ATOM_WINDOW, win_prop_update_transient_for) \
-	xmacro(ATOM(_NET_WM_STATE), XCB_ATOM_ATOM, win_prop_update_state) \
-	xmacro(ATOM(_NET_WM_WINDOW_TYPE), XCB_ATOM_ATOM, win_prop_update_type) \
-	xmacro(ATOM(_NET_WM_PID), XCB_ATOM_CARDINAL, win_prop_update_pid) \
+	xmacro(ATOM(_HEAWM_NAME), ATOM(UTF8_STRING), win_prop_update_heawm_name) \
+	xmacro(ATOM(_NET_WM_NAME), ATOM(UTF8_STRING), win_prop_update_net_wm_name) \
+	xmacro(ATOM(_NET_WM_PID), XCB_ATOM_CARDINAL, win_prop_update_net_wm_pid) \
+	xmacro(ATOM(_NET_WM_STATE), XCB_ATOM_ATOM, win_prop_update_net_wm_state) \
+	xmacro(ATOM(_NET_WM_WINDOW_TYPE), XCB_ATOM_ATOM, win_prop_update_net_wm_window_type) \
+	xmacro(XCB_ATOM_WM_CLASS, XCB_ATOM_STRING, win_prop_update_wm_class) \
+	xmacro(XCB_ATOM_WM_HINTS, XCB_ATOM_WM_HINTS, win_prop_update_wm_hints) \
+	xmacro(XCB_ATOM_WM_NAME, XCB_ATOM_STRING, win_prop_update_wm_name) \
+	xmacro(XCB_ATOM_WM_TRANSIENT_FOR, XCB_ATOM_WINDOW, win_prop_update_wm_transient_for) \
 
 /** List of window properties to be watched. */
 static struct prop {
@@ -2321,15 +2371,15 @@ user_break_win(struct user *u)
 }
 
 static void
-win_close(struct win *w)
+win_send_delete(struct win *w)
 {
 	XDO(xcb_send_event, conn, false, w->window,
 			XCB_EVENT_MASK_NO_EVENT/* Client messages cannot be masked. */,
 			XCB_SEND_EVENT_EVENT(xcb_client_message_event_t, {
 				.response_type = XCB_CLIENT_MESSAGE,
-				.format = 32,
 				.window = w->window,
 				.type = ATOM(WM_PROTOCOLS),
+				.format = 32,
 				.data = {
 					.data32 = {
 						ATOM(WM_DELETE_WINDOW),
@@ -2342,6 +2392,15 @@ static void
 win_kill(struct win *w)
 {
 	XDO(xcb_kill_client, conn, w->window);
+}
+
+static void
+win_close(struct win *w)
+{
+	if (w->wm_delete_window)
+		win_send_delete(w);
+	else
+		win_kill(w);
 }
 
 static void
@@ -2531,7 +2590,7 @@ win_prop_get(struct win const *w, struct prop const *prop)
 {
 	XGET_COOKIE(cookie, xcb_get_property, conn, 0, w->window,
 			prop->atom, prop->type,
-			0, (256 << 10) / sizeof(uint32_t));
+			0, UINT32_MAX);
 	return cookie;
 }
 
@@ -2636,6 +2695,7 @@ win_del(struct win *w)
 	XDO(xcb_reparent_window, conn, w->window, screen->root, 0, 0);
 	XDO(xcb_destroy_window, conn, w->frame);
 	XDO(xcb_change_save_set, conn, XCB_SET_MODE_DELETE, w->window);
+	XDO(xcb_input_xi_select_events, conn, w->window, 0, NULL);
 
 	if (TAILQ_EMPTY(&w->tab->wins))
 		tab_del(w->tab);
@@ -3533,7 +3593,10 @@ handle_property_notify(xcb_property_notify_event_t const *event)
 		if (event->atom != prop->atom)
 			continue;
 
-		win_prop_handle_reply(w, prop, win_prop_get(w, prop));
+		if (XCB_PROPERTY_NEW_VALUE == event->state)
+			win_prop_handle_reply(w, prop, win_prop_get(w, prop));
+		else if (XCB_PROPERTY_DELETE == event->state)
+			prop->handle(w, NULL, 0);
 		return;
 	}
 }
@@ -3701,7 +3764,8 @@ handle_input_motion(xcb_input_motion_event_t const *event)
 static void
 handle_input_enter(xcb_input_enter_event_t const *event)
 {
-	if (XCB_INPUT_NOTIFY_MODE_NORMAL != event->mode)
+	if (!(XCB_INPUT_NOTIFY_MODE_NORMAL == event->mode ||
+	      XCB_INPUT_NOTIFY_MODE_WHILE_GRABBED == event->mode))
 		return;
 	if (event->event == event->root)
 		return;
@@ -3712,17 +3776,23 @@ handle_input_enter(xcb_input_enter_event_t const *event)
 static void
 handle_input_focus_in(xcb_input_focus_in_event_t const *event)
 {
-	if (XCB_INPUT_NOTIFY_MODE_NORMAL != event->mode)
+	if (!(XCB_INPUT_NOTIFY_MODE_NORMAL == event->mode ||
+	      XCB_INPUT_NOTIFY_MODE_WHILE_GRABBED == event->mode))
 		return;
 
 	struct user *u = user_find_by_device(event->deviceid);
 	if (!u)
 		return;
 
-	if (event->event != user_get_focus_target(u) ||
-	    /* Focus in event generated for root (and no focus out) but we have
-	     * to forcefully focus it again to make it really focused... */
-	    !u->focused_win)
+	if (u->focused_win) {
+		struct win *focusw = win_hash_get(event->event);
+		if (focusw && focusw->transient_for == u->focused_win->window) {
+			user_focus_win(u, focusw);
+			return;
+		}
+	}
+
+	if (event->event != user_get_focus_target(u))
 		user_update_input_focus(u);
 }
 
