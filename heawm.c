@@ -564,12 +564,18 @@ run_script(char const *name)
 }
 
 static struct win *
-tab_get_latest_slave_win(struct tab const *t)
+tab_latest_slave_win(struct tab const *t)
 {
 	struct win const *w;
-	TAILQ_FOREACH_REVERSE(w, &latest_wins, latest_wins, older)
-		if (w->tab == t && !w->floating && (!t->master || TAILQ_PREV(w, tab_wins, link)))
-			return (struct win *)w;
+	TAILQ_FOREACH_REVERSE(w, &latest_wins, latest_wins, older) {
+		if (w->tab != t)
+			continue;
+		if (w->floating)
+			continue;
+		if (t->master && TAILQ_FIRST(&w->tab->wins) == w)
+			continue;
+		return (struct win *)w;
+	}
 	return NULL;
 }
 
@@ -971,7 +977,7 @@ tab_update_wins(struct tab *t)
 	}
 
 	struct win *slave = w;
-	struct win *mono = t->monocle ? tab_get_latest_slave_win(t) : NULL;
+	struct win *mono = t->monocle ? tab_latest_slave_win(t) : NULL;
 	if (mono) {
 		xcb_rectangle_t tile = slave_geom;
 		tile.y += t->output->bar.geom.height;
@@ -1592,7 +1598,7 @@ device_find_by_id(xcb_input_device_id_t deviceid)
 }
 
 static struct win *
-tab_get_latest_win(struct tab const *t)
+tab_latest_win(struct tab const *t)
 {
 	struct win const *w;
 	TAILQ_FOREACH_REVERSE(w, &latest_wins, latest_wins, older)
@@ -1981,7 +1987,7 @@ user_jump_tabs(struct user *u, int dir)
 	}
 	session_update_tabs(s);
 
-	user_focus_win(u, tab_get_latest_win(t));
+	user_focus_win(u, tab_latest_win(t));
 }
 
 static void
@@ -2651,7 +2657,7 @@ win_del(struct win *w)
 {
 	TAILQ_REMOVE(&w->tab->wins, w, link);
 	if (w->tab->zoomed_win == w)
-		w->tab->zoomed_win = tab_get_latest_win(w->tab);
+		w->tab->zoomed_win = tab_latest_win(w->tab);
 	wins_changed = true;
 
 	TAILQ_REMOVE(&latest_wins, w, older);
@@ -2667,7 +2673,7 @@ win_del(struct win *w)
 		if (u->focused_win == w) {
 			struct win *focused_win = NULL;
 			if (!focused_win)
-				focused_win = tab_get_latest_win(w->tab);
+				focused_win = tab_latest_win(w->tab);
 			if (!focused_win)
 				focused_win = session_get_latest_win(w->tab->session);
 			if (!focused_win)
@@ -3405,7 +3411,7 @@ user_feed_normal_key(struct user *u, xkb_keysym_t keysym,
 
 	case XKB_KEY_numbersign:
 		if (u->alt_tab)
-			user_focus_win(u, tab_get_latest_win(u->alt_tab));
+			user_focus_win(u, tab_latest_win(u->alt_tab));
 		break;
 
 	case XKB_KEY_ampersand:
