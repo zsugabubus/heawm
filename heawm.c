@@ -457,7 +457,7 @@ xdo_check(struct xdo_cookie cookie)
 	int ret = 0;
 
 	xcb_generic_error_t *error = xcb_request_check(conn, cookie.cookie);
-	if (error) {
+	if (error != NULL) {
 #if DEBUG_XTRACE
 		fprintf(stderr, "[line %d in %s] ", cookie.line, cookie.request);
 #endif
@@ -775,7 +775,7 @@ win_send_configure_notify(struct win const *w)
 static void
 win_set_geom(struct win *w, xcb_rectangle_t const *geom)
 {
-	if (!memcmp(&w->geom, geom, sizeof w->geom))
+	if (memcmp(&w->geom, geom, sizeof w->geom) == 0)
 		return;
 
 	/* Maintain north-east gravity. */
@@ -955,7 +955,7 @@ tab_update_wins(struct tab *t)
 
 	xcb_rectangle_t geom = t->output->geom;
 
-	if (t->zoomed_win && TAILQ_FIRST(&sessions) == t->session) {
+	if (t->zoomed_win != NULL && TAILQ_FIRST(&sessions) == t->session) {
 		win_set_geom(t->zoomed_win, &geom);
 		win_label_set_mapped(t->zoomed_win, false);
 		TAILQ_FOREACH(w, &t->wins, link)
@@ -969,7 +969,7 @@ tab_update_wins(struct tab *t)
 
 	w = TAILQ_FIRST(&t->wins);
 
-	if (t->master && w && !w->floating) {
+	if (t->master && w != NULL && !w->floating) {
 		win_set_geom(w, &master_geom);
 		win_set_mapped(w, true);
 		win_label_set_mapped(w, true);
@@ -978,7 +978,7 @@ tab_update_wins(struct tab *t)
 
 	struct win *slave = w;
 	struct win *mono = t->monocle ? tab_latest_slave_win(t) : NULL;
-	if (mono) {
+	if (mono != NULL) {
 		xcb_rectangle_t tile = slave_geom;
 		tile.y += t->output->bar.geom.height;
 		tile.height -= t->output->bar.geom.height;
@@ -1079,7 +1079,7 @@ output_render_bar(struct output *o)
 
 	int32_t n = 0;
 	struct win *w = TAILQ_FIRST(&t->wins);
-	if (t->master && w && !w->floating)
+	if (t->master && w != NULL && !w->floating)
 		w = TAILQ_NEXT(w, link);
 	struct win *slave = w;
 	for (w = slave; w; w = TAILQ_NEXT(w, link))
@@ -1169,7 +1169,7 @@ output_update_bar(struct output *o)
 {
 	struct tab *t = NULL;
 	struct session *s = TAILQ_FIRST(&sessions);
-	if (s)
+	if (s != NULL)
 		TAILQ_FOREACH(t, &s->tabs, link)
 			if (t->output == o)
 				break;
@@ -1204,7 +1204,7 @@ output_update_bar(struct output *o)
 	tab_compute_split(t, &master_geom, &geom, &o->geom);
 	geom.height = bar_height;
 
-	if (memcmp(&o->bar.geom, &geom, sizeof geom)) {
+	if (memcmp(&o->bar.geom, &geom, sizeof geom) != 0) {
 		o->bar.geom = geom;
 
 		uint32_t values[4];
@@ -1243,7 +1243,7 @@ xrm_get_color(xcb_xrm_database_t *db, char const *name, char const *class, uint3
 	char *s;
 	int rc = xcb_xrm_resource_get_string(db, name, class, &s);
 	if (0 <= rc) {
-		if (1 == sscanf(s, "#%"SCNx32, out)) {
+		if (sscanf(s, "#%"SCNx32, out) == 1) {
 			free(s);
 			return;
 		}
@@ -1257,7 +1257,7 @@ static void
 xrm_get_long(xcb_xrm_database_t *db, char const *name, char const *class, long *out, long def)
 {
 	int rc = xcb_xrm_resource_get_long(db, name, class, out);
-	if (-1 == rc)
+	if (rc == -1)
 		fprintf(stderr, "Resource %s has invalid value\n", name);
 	if (rc < 0)
 		*out = def;
@@ -1285,7 +1285,7 @@ xrm_update(void)
 
 	xcb_xrm_database_free(db);
 
-	if (!bar_height) {
+	if (bar_height == 0) {
 		cairo_surface_t *surface = cairo_image_surface_create(
 				CAIRO_FORMAT_RGB24, 0, 0);
 		cairo_t *cr = cairo_create(surface);
@@ -1324,7 +1324,7 @@ session_update_tabs(struct session *s)
 	struct tab *t;
 	TAILQ_FOREACH(t, &s->tabs, link) {
 		t->output = o;
-		if (o)
+		if (o != NULL)
 			o = TAILQ_NEXT(o, link);
 	}
 
@@ -1409,7 +1409,7 @@ tab_del(struct tab *t)
 			u->alt_tab = NULL;
 
 	struct tab *last = TAILQ_LAST(&t->session->tabs, session_tabs);
-	if (last != t && t->output) {
+	if (last != t && t->output != NULL) {
 		TAILQ_REMOVE(&t->session->tabs, last, link);
 		TAILQ_INSERT_BEFORE(t, last, link);
 	}
@@ -1461,7 +1461,7 @@ get_atom_name(xcb_atom_t atom)
 {
 	XGET(reply, xcb_get_atom_name, conn, atom);
 	char *ret;
-	if (reply) {
+	if (reply != NULL) {
 		char *buf = xcb_get_atom_name_name(reply);
 		int sz = xcb_get_atom_name_name_length(reply);
 		ret = strndup(buf, sz);
@@ -1531,7 +1531,7 @@ static pid_t
 proc_fork(struct proc *proc)
 {
 	pid_t pid = fork();
-	if (!pid)
+	if (pid == 0)
 		sigprocmask(SIG_SETMASK, &saved_set, NULL);
 	else if (0 < pid)
 		proc->pid = pid;
@@ -1556,7 +1556,7 @@ proc_execvp(struct proc *proc, char const *file, ...)
 	va_end(ap);
 
 	pid_t pid = proc_fork(proc);
-	if (!pid) {
+	if (pid == 0) {
 		setsid();
 		execvp(file, argv);
 		_exit(127);
@@ -1574,7 +1574,7 @@ user_number(struct user const *u, uint32_t def)
 static xcb_window_t
 user_get_focus_target(struct user *u)
 {
-	if (u->focused_win)
+	if (u->focused_win != NULL)
 		return u->focused_win->window;
 	return screen->root;
 }
@@ -1622,11 +1622,11 @@ user_save_pointer(struct user *u)
 {
 	XGET(reply, xcb_input_xi_query_pointer, conn,
 			screen->root, u->master_pointer);
-	if (!reply)
+	if (reply == NULL)
 		return;
 
 	struct win *w = win_hash_get(reply->child);
-	if (w) {
+	if (w != NULL) {
 		w->pointer_x = reply->root_x - (w->geom.x << 16);
 		w->pointer_y = reply->root_y - (w->geom.y << 16);
 	}
@@ -1637,11 +1637,11 @@ static void
 user_restore_pointer(struct user *u)
 {
 	struct win *w = u->focused_win;
-	if (!w)
+	if (w == NULL)
 		return;
 
 	/* Center pointer by default. */
-	if (!w->pointer_x && !w->pointer_y) {
+	if (w->pointer_x == 0 && w->pointer_y == 0) {
 		w->pointer_x = (w->geom.width << 16) / 2;
 		w->pointer_y = (w->geom.height << 16) / 2;
 	}
@@ -1657,7 +1657,7 @@ user_restore_pointer(struct user *u)
 static void
 screen_set_active_window(struct win const *w)
 {
-	xcb_window_t window = w ? w->window : XCB_WINDOW_NONE;
+	xcb_window_t window = w != NULL ? w->window : XCB_WINDOW_NONE;
 	if (window == active_window)
 		return;
 	active_window = window;
@@ -1870,14 +1870,14 @@ user_focus_win(struct user *u, struct win *w)
 	if (TAILQ_FIRST(&users) == u)
 		screen_set_active_window(w);
 
-	if (MODE_MOUSE == u->mode || (MODE_LABEL == u->mode && !w))
+	if (MODE_MOUSE == u->mode || (MODE_LABEL == u->mode && w == NULL))
 		user_set_mode(u, MODE_NORMAL);
 
 	struct tab *oldt = NULL;
-	if (oldw) {
+	if (oldw != NULL) {
 		--oldw->focused;
 
-		if (!w || oldw->tab != w->tab)
+		if (w == NULL || oldw->tab != w->tab)
 			u->alt_tab = oldw->tab;
 
 		oldt = oldw->tab;
@@ -1885,10 +1885,10 @@ user_focus_win(struct user *u, struct win *w)
 		win_update_net(oldw);
 	}
 
-	if (oldaltw && (oldaltw != w && oldaltw != oldw))
+	if (oldaltw != NULL && (oldaltw != w && oldaltw != oldw))
 		win_label_shape_and_render(oldaltw);
 
-	if (!w) {
+	if (w == NULL) {
 		user_update_input_focus(u);
 		return;
 	}
@@ -1900,7 +1900,7 @@ user_focus_win(struct user *u, struct win *w)
 	win_label_shape_and_render(w);
 	win_update_net(w);
 
-	if (w->tab->zoomed_win)
+	if (w->tab->zoomed_win != NULL)
 		w->tab->zoomed_win = w;
 
 	/* Rotate to destination session. */
@@ -1975,7 +1975,7 @@ user_jump_tabs(struct user *u, int dir)
 	struct tab *t;
 	if (0 < dir) {
 		TAILQ_FOREACH(t, &s->tabs, link)
-			if (!t->output)
+			if (t->output == NULL)
 				break;
 	} else {
 		t = TAILQ_LAST(&s->tabs, session_tabs);
@@ -1999,13 +1999,13 @@ user_jump_sessions(struct user *u, int dir)
 	struct session *s;
 	if (0 <= dir) {
 		s = TAILQ_FIRST(&sessions);
-		if (!s)
+		if (s == NULL)
 			return;
 		s = TAILQ_NEXT(s, link);
 	} else {
 		s = TAILQ_LAST(&sessions, sessions);
 	}
-	if (!s)
+	if (s == NULL)
 		return;
 
 	user_focus_win(u, session_get_latest_win(s));
@@ -2024,7 +2024,7 @@ static void
 user_update_all(void)
 {
 	XGET(reply, xcb_input_xi_query_device, conn, XCB_INPUT_DEVICE_ALL);
-	if (!reply)
+	if (reply == NULL)
 		return;
 
 	struct user *u, *tmpu;
@@ -2046,7 +2046,7 @@ user_update_all(void)
 				if (xdev->deviceid == u->master_pointer)
 					break;
 
-			if (u) {
+			if (u != NULL) {
 				TAILQ_REMOVE(&users, u, link);
 				TAILQ_INSERT_TAIL(&users, u, link);
 			} else {
@@ -2055,7 +2055,7 @@ user_update_all(void)
 
 			user_enable(u);
 
-			if (!newu)
+			if (newu == NULL)
 				newu = u;
 		}
 
@@ -2097,7 +2097,7 @@ static struct win *
 user_find_win(struct user const *u, char label)
 {
 	struct win *w = u->focused_win;
-	if (w && w->label == label) {
+	if (w != NULL && w->label == label) {
 		for (;;) {
 			if (TAILQ_NEXT(w, link)) {
 				w = TAILQ_NEXT(w, link);
@@ -2148,26 +2148,26 @@ win_prop_update_protocols(struct win *w, void *data, int sz)
 static void
 win_prop_update_heawm_label(struct win *w, void *data, int sz)
 {
-	if (!sz)
+	if (sz == 0)
 		return;
 
 	w->label = *(char *)data;
 	win_label_shape_and_render(w);
 
-	if (w->tab && w->tab->output)
+	if (w->tab != NULL && w->tab->output != NULL)
 		output_render_bar(w->tab->output);
 }
 
 static void
 win_prop_update_heawm_name(struct win *w, void *data, int sz)
 {
-	if (!sz)
+	if (sz == 0)
 		return;
 
 	free(w->name);
 	XASSERT(w->name = strndup(data, sz));
 
-	if (w->tab && w->tab->output)
+	if (w->tab != NULL && w->tab->output != NULL)
 		output_render_bar(w->tab->output);
 }
 
@@ -2179,7 +2179,7 @@ win_prop_update_net_wm_name(struct win *w, void *data, int sz)
 	free(w->title);
 	XASSERT(w->title = strndup(data, sz));
 
-	if (w->tab && w->tab->output)
+	if (w->tab != NULL && w->tab->output != NULL)
 		output_render_bar(w->tab->output);
 }
 
@@ -2206,7 +2206,7 @@ win_prop_update_net_wm_state(struct win *w, void *data, int sz)
 static void
 win_update_name(struct win const *w, char const *name)
 {
-	if (!strcmp(w->name, name))
+	if (strcmp(w->name, name) == 0)
 		return;
 	XDO(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
 			w->window, ATOM(_HEAWM_NAME),
@@ -2231,18 +2231,18 @@ win_prop_update_wm_class(struct win *w, void *data, int sz)
 	if (sz < 2)
 		return;
 
-	if (((char *)data)[sz - 1])
+	if (((char *)data)[sz - 1] != '\0')
 		return;
 
 	char const *sep = memchr(data, '\0', sz - 1);
-	if (!sep)
+	if (sep == NULL)
 		return;
 
 	XASSERT(w->class_instance = malloc(sz));
 	memcpy(w->class_instance, data, sz);
 	w->class_class = w->class_instance + (sep - (char *)data) + 1;
 
-	if (!*w->name)
+	if (*w->name == '\0')
 		win_update_name(w, w->class_class);
 }
 
@@ -2257,7 +2257,7 @@ win_prop_update_wm_hints(struct win *w, void *data, int sz)
 	if (w->urgent < urgent) {
 		w->urgent = urgent;
 		win_label_shape_and_render(w);
-		if (w->tab && w->tab->output)
+		if (w->tab != NULL && w->tab->output != NULL)
 			output_render_bar(w->tab->output);
 	}
 }
@@ -2272,7 +2272,7 @@ win_prop_update_wm_name(struct win *w, void *data, int sz)
 	free(w->title);
 	XASSERT(w->title = strndup(data, sz));
 
-	if (w->tab && w->tab->output)
+	if (w->tab != NULL && w->tab->output != NULL)
 		output_render_bar(w->tab->output);
 }
 
@@ -2343,11 +2343,11 @@ static void
 user_break_win(struct user *u)
 {
 	struct win *w = u->focused_win;
-	if (!w)
+	if (w == NULL)
 		return;
 
 	/* Tab already contains a single element. */
-	if (!TAILQ_NEXT(TAILQ_FIRST(&w->tab->wins), link))
+	if (TAILQ_NEXT(TAILQ_FIRST(&w->tab->wins), link) == NULL)
 		return;
 
 	struct tab *oldt = w->tab;
@@ -2421,7 +2421,7 @@ user_focus_urgent_win(struct user *u)
 			found = w;
 	}
 
-	if (found)
+	if (found != NULL)
 		user_focus_win(u, (struct win *)found);
 }
 
@@ -2430,7 +2430,7 @@ user_dump_tree(struct user *u)
 {
 	char tmppath[] = "/tmp/"WM_NAME".layoutXXXXXX";
 	FILE *f = fdopen(mkstemp(tmppath), "w");
-	if (!f)
+	if (f == NULL)
 		return;
 	unsigned sel_lnum = 0;
 	unsigned lnum = 0;
@@ -2477,7 +2477,7 @@ user_dump_tree(struct user *u)
 static void
 win_set_user_geom(struct win *w, xcb_rectangle_t const *rect)
 {
-	if (memcmp(&w->user_geom, rect, sizeof w->geom)) {
+	if (memcmp(&w->user_geom, rect, sizeof w->geom) != 0) {
 		w->user_geom = *rect;
 		wins_changed = true;
 	}
@@ -2487,16 +2487,16 @@ static void
 user_jump_wins(struct user *u, int dir)
 {
 	struct win *w = u->focused_win;
-	if (!w)
+	if (w == NULL)
 		return;
 	struct tab *t = w->tab;
 	if (0 <= dir) {
 		w = TAILQ_NEXT(w, link);
-		if (!w)
+		if (w == NULL)
 			w = TAILQ_FIRST(&t->wins);
 	} else {
 		w = TAILQ_PREV(w, tab_wins, link);
-		if (!w)
+		if (w == NULL)
 			w = TAILQ_LAST(&t->wins, tab_wins);
 	}
 	user_focus_win(u, w);
@@ -2505,7 +2505,7 @@ user_jump_wins(struct user *u, int dir)
 static void
 user_swap_win(struct user *u, struct win *w)
 {
-	if (!u->focused_win || !w)
+	if (u->focused_win == NULL || w == NULL)
 		return;
 	if (u->focused_win->tab == w->tab)
 		win_swap(u->focused_win, w);
@@ -2536,7 +2536,7 @@ output_update_all(void)
 	XDISCARD(xcb_randr_get_screen_resources, conn, screen->root);
 
 	XGET(monitors, xcb_randr_get_monitors, conn, screen->root, true);
-	if (!monitors) {
+	if (monitors == NULL) {
 		(void)output_new_from_screen();
 		goto run_script;
 	}
@@ -2560,7 +2560,7 @@ screen_update_client_list(void)
 	xcb_window_t list[128];
 
 	for (struct win const *w = TAILQ_FIRST(&latest_wins);; w = TAILQ_NEXT(w, older)) {
-		if (!w || ARRAY_SIZE(list) == i) {
+		if (w == NULL || ARRAY_SIZE(list) == i) {
 			XDO(xcb_change_property, conn, mode,
 					screen->root, ATOM(_NET_CLIENT_LIST),
 					XCB_ATOM_WINDOW, 32,
@@ -2568,7 +2568,7 @@ screen_update_client_list(void)
 			i = 0;
 			mode = XCB_PROP_MODE_APPEND;
 		}
-		if (!w)
+		if (w == NULL)
 			break;
 		list[i++] = w->window;
 	}
@@ -2597,7 +2597,7 @@ win_prop_handle_reply(struct win *w, struct prop const *prop,
 		xcb_get_property_cookie_t cookie)
 {
 	XGET_REPLY_LOCAL(reply, xcb_get_property, conn, cookie);
-	if (!reply)
+	if (reply == NULL)
 		return;
 
 	int sz = xcb_get_property_value_length(reply);
@@ -2668,11 +2668,11 @@ win_del(struct win *w)
 	TAILQ_FOREACH(u, &users, link) {
 		if (u->focused_win == w) {
 			struct win *focused_win = NULL;
-			if (!focused_win)
+			if (focused_win == NULL)
 				focused_win = tab_latest_win(w->tab);
-			if (!focused_win)
+			if (focused_win == NULL)
 				focused_win = session_get_latest_win(w->tab->session);
-			if (!focused_win)
+			if (focused_win == NULL)
 				focused_win = TAILQ_LAST(&latest_wins, latest_wins);
 			user_focus_win(u, focused_win);
 		}
@@ -2841,7 +2841,7 @@ win_new(xcb_window_t window)
 			poisoned = true;
 
 	XGET_REPLY(geom_reply, xcb_get_geometry, conn, geom_cookie);
-	if (geom_reply) {
+	if (geom_reply != NULL) {
 		w->user_geom = (xcb_rectangle_t){
 			.x = geom_reply->x,
 			.y = geom_reply->y,
@@ -2852,7 +2852,7 @@ win_new(xcb_window_t window)
 	}
 
 	XGET_REPLY(shape_reply, xcb_shape_query_extents, conn, shape_cookie);
-	if (shape_reply) {
+	if (shape_reply != NULL) {
 		w->shaped = shape_reply->bounding_shaped;
 		if (w->shaped) {
 			win_update_shape(w, XCB_SHAPE_SK_BOUNDING);
@@ -2881,7 +2881,7 @@ win_new(xcb_window_t window)
 		w->floating = true;
 
 	struct win *parent = win_hash_get(w->transient_for);
-	if (!w->tab && parent) {
+	if (w->tab == NULL && parent != NULL) {
 		TAILQ_INSERT_AFTER(&parent->tab->wins, parent, w, link);
 		w->tab = parent->tab;
 		w->label = parent->label;
@@ -2903,29 +2903,29 @@ win_new(xcb_window_t window)
 				user_focus_win(u, w);
 	}
 
-	if (!w->tab) {
+	if (w->tab == NULL) {
 		struct proc *proc = proc_find(w->pid);
-		if (proc && proc->user->focused_win) {
+		if (proc != NULL && proc->user->focused_win) {
 			struct win *afterw = proc->user->focused_win;
 			TAILQ_INSERT_AFTER(&afterw->tab->wins, afterw, w, link);
 			w->tab = afterw->tab;
-			if (proc->data)
+			if (proc->data != NULL)
 				w->floating = true;
 			wins_changed = true;
 			user_focus_win(proc->user, w);
-			if (proc->data && w->tab->output) {
+			if (proc->data != NULL && w->tab->output != NULL) {
 				w->user_geom = w->tab->output->geom;
 				wins_changed = true;
 			}
 		}
 	}
 
-	if (!w->tab && XCB_WINDOW_NONE != w->leader) {
+	if (w->tab == NULL && XCB_WINDOW_NONE != w->leader) {
 		struct win *leaderw = NULL;
 		TAILQ_FOREACH_REVERSE(leaderw, &latest_wins, latest_wins, older)
 			if (w->leader == leaderw->leader && w != leaderw)
 				break;
-		if (leaderw) {
+		if (leaderw != NULL) {
 			TAILQ_INSERT_AFTER(&leaderw->tab->wins, leaderw, w, link);
 			w->tab = leaderw->tab;
 			wins_changed = true;
@@ -2937,7 +2937,7 @@ win_new(xcb_window_t window)
 		}
 	}
 
-	if (!w->tab && TAILQ_NEXT(w, older)) {
+	if (w->tab == NULL && TAILQ_NEXT(w, older)) {
 		struct win *afterw = TAILQ_LAST(&latest_wins, latest_wins);
 		TAILQ_INSERT_AFTER(&afterw->tab->wins, afterw, w, link);
 		w->tab = afterw->tab;
@@ -2945,11 +2945,11 @@ win_new(xcb_window_t window)
 
 		struct user *u;
 		TAILQ_FOREACH(u, &users, link)
-			if (u->focused_win && w->tab == u->focused_win->tab)
+			if (u->focused_win != NULL && w->tab == u->focused_win->tab)
 				user_focus_win(u, w);
 	}
 
-	if (!w->tab) {
+	if (w->tab == NULL) {
 		struct session *s = session_new();
 		struct tab *t = tab_new(s);
 		TAILQ_INSERT_TAIL(&t->wins, w, link);
@@ -2961,7 +2961,7 @@ win_new(xcb_window_t window)
 			user_focus_win(u, w);
 	}
 
-	if (!w->label)
+	if (w->label == '\0')
 		win_set_auto_label(w);
 
 	if (poisoned) {
@@ -2976,7 +2976,7 @@ static void
 win_new_from_children(xcb_window_t parent)
 {
 	XGET(reply, xcb_query_tree, conn, parent);
-	if (!reply)
+	if (reply == NULL)
 		return;
 
 	xcb_window_t const *children = xcb_query_tree_children(reply);
@@ -2992,7 +2992,7 @@ win_new_from_children(xcb_window_t parent)
 
 	for (int i = 0; i < n; ++i) {
 		XGET_REPLY_LOCAL(reply, xcb_get_window_attributes, conn, cookies[i]);
-		if (!reply)
+		if (reply == NULL)
 			continue;
 
 		if (!reply->override_redirect &&
@@ -3011,7 +3011,7 @@ load_tree(struct proc *proc)
 {
 	FILE *f = fopen(proc->data, "r");
 	unlink(proc->data);
-	if (!f)
+	if (f == NULL)
 		return;
 
 	struct session *s;
@@ -3032,18 +3032,18 @@ load_tree(struct proc *proc)
 			++blanks;
 			continue;
 		}
-		p += '\t' == *p;
+		p += *p == '\t';
 		char label = *p;
-		if ('\t' == label)
+		if (label == '\t')
 			label = '\0';
 		else
 			p += !!label;
-		p += '\t' == *p;
+		p += *p == '\t';
 		char *name = p;
 		name[strcspn(name, "\n\t")] = '\0';
 
 		struct win *w = win_hash_get(window);
-		if (!w)
+		if (w == NULL)
 			continue;
 
 		if (2 <= blanks) {
@@ -3073,7 +3073,7 @@ load_tree(struct proc *proc)
 		win_update_label(w, label);
 		win_update_name(w, name);
 
-		if (' ' == *line)
+		if (*line == ' ')
 			focusw = w;
 	}
 	free(line);
@@ -3093,7 +3093,7 @@ load_tree(struct proc *proc)
 	}
 
 	wins_changed = true;
-	if (focusw)
+	if (focusw != NULL)
 		user_focus_win(proc->user, focusw);
 }
 
@@ -3205,7 +3205,7 @@ user_feed_command_key(struct user *u, xkb_keysym_t keysym,
 	}
 
 	struct win *w = u->focused_win;
-	if (!w)
+	if (w == NULL)
 		return;
 	struct tab *t = w->tab;
 
@@ -3321,21 +3321,21 @@ user_feed_normal_key(struct user *u, xkb_keysym_t keysym,
 	if (XKB_KEY_a <= keysym && keysym <= XKB_KEY_z) {
 		char label = keysym - XKB_KEY_a + 'a';
 		struct win *w = user_find_win(u, label);
-		if (w)
+		if (w != NULL)
 			user_focus_win(u, w);
 	} else if (XKB_KEY_A <= keysym && keysym <= XKB_KEY_Z) {
 		char label = keysym - XKB_KEY_A + 'a';
 		struct win *w = user_find_win(u, label);
-		if (w)
+		if (w != NULL)
 			user_swap_win(u, w);
 	} else switch (keysym) {
 	case XKB_KEY_Tab:
-		if (u->alt_win)
+		if (u->alt_win != NULL)
 			user_focus_win(u, u->alt_win);
 		break;
 
 	case XKB_KEY_period:
-		if (u->focused_win) {
+		if (u->focused_win != NULL) {
 			struct tab *t = u->focused_win->tab;
 			t->zoomed_win = t->zoomed_win ? NULL : u->focused_win;
 			wins_changed = true;
@@ -3343,7 +3343,7 @@ user_feed_normal_key(struct user *u, xkb_keysym_t keysym,
 		break;
 
 	case XKB_KEY_space:
-		if (u->focused_win && !win_move_top(u->focused_win) && u->alt_win)
+		if (u->focused_win != NULL && !win_move_top(u->focused_win) && u->alt_win != NULL)
 			user_swap_win(u, u->alt_win);
 		break;
 
@@ -3353,7 +3353,7 @@ user_feed_normal_key(struct user *u, xkb_keysym_t keysym,
 		break;
 
 	case XKB_KEY_semicolon:
-		if (u->focused_win)
+		if (u->focused_win != NULL)
 			user_set_mode(u, MODE_LABEL);
 		break;
 
@@ -3399,14 +3399,14 @@ user_feed_normal_key(struct user *u, xkb_keysym_t keysym,
 		break;
 
 	case XKB_KEY_asterisk:
-		if (u->focused_win) {
+		if (u->focused_win != NULL) {
 			win_forget_pointer(u->focused_win);
 			user_restore_pointer(u);
 		}
 		break;
 
 	case XKB_KEY_numbersign:
-		if (u->alt_tab)
+		if (u->alt_tab != NULL)
 			user_focus_win(u, tab_latest_win(u->alt_tab));
 		break;
 
@@ -3477,10 +3477,10 @@ handle_child(int sig)
 	pid_t pid;
 	while (0 < (pid = waitpid(-1, &status, WNOHANG))) {
 		struct proc *proc = proc_find(pid);
-		if (!proc)
+		if (proc == NULL)
 			continue;
 
-		if (proc->data)
+		if (proc->data != NULL)
 			load_tree(proc);
 
 		proc_del(proc);
@@ -3501,7 +3501,7 @@ handle_expose(xcb_expose_event_t const *event)
 		return;
 
 	struct win *w = win_hash_get(event->window);
-	if (w) {
+	if (w != NULL) {
 		win_label_render(w, false);
 		return;
 	}
@@ -3523,7 +3523,7 @@ handle_unmap_notify(xcb_unmap_notify_event_t const *event)
 		return;
 
 	struct win *w = win_hash_get(event->window);
-	if (w)
+	if (w != NULL)
 		win_del(w);
 }
 
@@ -3531,7 +3531,7 @@ static void
 handle_map_request(xcb_map_request_event_t const *event)
 {
 	struct win *w = win_hash_get(event->window);
-	if (!w)
+	if (w == NULL)
 		win_new(event->window);
 }
 
@@ -3555,7 +3555,7 @@ static void
 handle_configure_request(xcb_configure_request_event_t const *event)
 {
 	struct win *w = win_hash_get(event->window);
-	if (!w)
+	if (w == NULL)
 		return;
 
 	/* Do not allow clients to alter layout. */
@@ -3583,7 +3583,7 @@ handle_property_notify(xcb_property_notify_event_t const *event)
 #endif
 
 	struct win *w = win_hash_get(event->window);
-	if (!w)
+	if (w == NULL)
 		return;
 
 	struct prop *prop;
@@ -3606,7 +3606,7 @@ handle_client_message(xcb_client_message_event_t const *event)
 #if 0
 	print_atom("client message", event->type);
 #endif
-	if (!w)
+	if (w == NULL)
 		return;
 
 	if (ATOM(_NET_CLOSE_WINDOW) == event->type) {
@@ -3651,11 +3651,11 @@ handle_input_key(xcb_input_key_press_event_t const *event)
 	xcb_input_device_id_t deviceid = event->sourceid;
 	struct device *dev = device_find_by_id(deviceid);
 	struct user *u = dev->user;
-	if (!dev->keymap)
+	if (dev->keymap == NULL)
 		dev->keymap = xkb_x11_keymap_new_from_device(
 				xkb_context, conn,
 				deviceid, XKB_KEYMAP_COMPILE_NO_FLAGS);
-	if (!dev->keymap) {
+	if (dev->keymap == NULL) {
 		fprintf(stderr, "Could not load keymap\n");
 		return;
 	}
@@ -3676,7 +3676,7 @@ handle_input_button_press(xcb_input_button_press_event_t const *event)
 		return;
 
 	struct user *u = user_find_by_device(event->sourceid);
-	if (!u)
+	if (u == NULL)
 		return;
 
 	if (1 == event->detail) {
@@ -3684,7 +3684,7 @@ handle_input_button_press(xcb_input_button_press_event_t const *event)
 			return;
 
 		struct win *w = win_hash_get(event->child);
-		if (!w)
+		if (w == NULL)
 			return;
 
 		user_focus_win(u, w);
@@ -3727,7 +3727,7 @@ handle_input_button_release(xcb_input_button_press_event_t const *event)
 		return;
 
 	struct user *u = user_find_by_device(event->sourceid);
-	if (!u)
+	if (u == NULL)
 		return;
 
 	if (MODE_MOUSE == u->mode)
@@ -3738,7 +3738,7 @@ static void
 handle_input_motion(xcb_input_motion_event_t const *event)
 {
 	struct user *u = user_find_by_device(event->sourceid);
-	if (!u)
+	if (u == NULL)
 		return;
 	if (MODE_MOUSE != u->mode)
 		return;
@@ -3779,7 +3779,7 @@ handle_input_focus_in(xcb_input_focus_in_event_t const *event)
 		return;
 
 	struct user *u = user_find_by_device(event->deviceid);
-	if (!u)
+	if (u == NULL)
 		return;
 
 	if (u->focused_win) {
@@ -3854,7 +3854,7 @@ static void
 handle_keyboard_mapping(uint8_t deviceid)
 {
 	struct device *dev = device_find_by_id(deviceid);
-	if (!dev)
+	if (dev == NULL)
 		return;
 	/* New mapping is loaded upon the first key event. */
 	xkb_keymap_unref(dev->keymap);
@@ -3929,7 +3929,7 @@ static void
 handle_shape_notify(xcb_shape_notify_event_t const *event)
 {
 	struct win *w = win_hash_get(event->affected_window);
-	if (!w)
+	if (w == NULL)
 		return;
 
 	if (XCB_SHAPE_SK_BOUNDING == event->shape_kind)
@@ -4027,7 +4027,7 @@ setup_atoms(void)
 
 	ARRAY_IFOREACH(i, ATOM_NAMES) {
 		XGET_REPLY_LOCAL(reply, xcb_intern_atom, conn, cookies[i]);
-		if (reply) {
+		if (reply != NULL) {
 			atoms[i] = reply->atom;
 			free(reply);
 		}
@@ -4084,7 +4084,7 @@ setup_extensions(void)
 		XGET(reply, xcb_xkb_use_extension, conn,
 				XCB_XKB_MAJOR_VERSION,
 				XCB_XKB_MINOR_VERSION);
-		if (reply) {
+		if (reply != NULL) {
 			if (!reply->supported) {
 				fprintf(stderr, "Requested XKB version %d.%d not supported by server, got %d.%d; keyboard input may not work\n",
 						XCB_XKB_MAJOR_VERSION, XCB_XKB_MINOR_VERSION,
