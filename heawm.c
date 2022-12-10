@@ -48,7 +48,7 @@
 
 #define sizeof_member(type, member) (sizeof(((type *)0)->member))
 
-#define XASSERT(cond) do { \
+#define ASSERT(cond) do { \
 	if (!(cond)) \
 		abort(); \
 } while (0)
@@ -1267,11 +1267,11 @@ static void
 xrm_update(void)
 {
 	xcb_xrm_database_t *db;
-	XASSERT(db = xcb_xrm_database_from_default(conn));
+	ASSERT(db = xcb_xrm_database_from_default(conn));
 
 	free(label_fn);
 	if (xcb_xrm_resource_get_string(db, "heawm.fontFamily", "heawm.FontFamily", &label_fn) < 0)
-		XASSERT(label_fn = strdup("monospace"));
+		ASSERT(label_fn = strdup("monospace"));
 	xrm_get_long(db, "heawm.label.fontSize", "Heawm.Label.FontSize", &label_fs, 17);
 	xrm_get_color(db, "heawm.label.foreground", "Heawm.Label.Foreground", &label_fg, 0xffff00);
 	xrm_get_color(db, "heawm.label.background", "Heawm.Label.Background", &label_bg, 0xff0000);
@@ -1366,7 +1366,7 @@ static struct session *
 session_new(void)
 {
 	struct session *s;
-	XASSERT(s = calloc(1, sizeof *s));
+	ASSERT(s = calloc(1, sizeof *s));
 
 	TAILQ_INSERT_TAIL(&sessions, s, link);
 	TAILQ_INIT(&s->tabs);
@@ -1388,7 +1388,7 @@ static struct tab *
 tab_new(struct session *s)
 {
 	struct tab *t;
-	XASSERT(t = calloc(1, sizeof *t));
+	ASSERT(t = calloc(1, sizeof *t));
 
 	TAILQ_INIT(&t->wins);
 	TAILQ_INSERT_TAIL(&s->tabs, t, link);
@@ -1427,7 +1427,7 @@ static struct output *
 output_new(bool primary, xcb_rectangle_t geom)
 {
 	struct output *o;
-	XASSERT(o = calloc(1, sizeof *o));
+	ASSERT(o = calloc(1, sizeof *o));
 
 	TAILQ_INSERT_TAIL(&outputs, o, link);
 	o->geom = geom;
@@ -1451,7 +1451,7 @@ output_new_from_screen(void)
 		.height = screen->height_in_pixels,
 	});
 
-	XASSERT(o->name = strdup("SCREEN"));
+	ASSERT(o->name = strdup("SCREEN"));
 
 	return o;
 }
@@ -1469,7 +1469,7 @@ get_atom_name(xcb_atom_t atom)
 	} else {
 		ret = strdup("");
 	}
-	XASSERT(ret);
+	ASSERT(ret);
 	return ret;
 }
 
@@ -1492,7 +1492,7 @@ output_new_from_randr_monitor(xcb_randr_monitor_info_t const *monitor)
 		.height = monitor->height,
 	});
 
-	XASSERT(o->name = get_atom_name(monitor->name));
+	ASSERT(o->name = get_atom_name(monitor->name));
 
 	return o;
 }
@@ -1501,7 +1501,7 @@ static struct proc *
 proc_new(struct user *u)
 {
 	struct proc *proc;
-	XASSERT(proc = calloc(1, sizeof *proc));
+	ASSERT(proc = calloc(1, sizeof *proc));
 
 	LIST_INSERT_HEAD(&procs, proc, link);
 	proc->user = u;
@@ -1671,7 +1671,7 @@ static struct user *
 user_new(xcb_input_xi_device_info_t const *xdev)
 {
 	struct user *u;
-	XASSERT(u = calloc(1, sizeof *u));
+	ASSERT(u = calloc(1, sizeof *u));
 
 	TAILQ_INSERT_TAIL(&users, u, link);
 	u->master_pointer = xdev->deviceid;
@@ -1679,7 +1679,7 @@ user_new(xcb_input_xi_device_info_t const *xdev)
 
 	char const *name = xcb_input_xi_device_info_name(xdev);
 	int sz = xcb_input_xi_device_info_name_length(xdev) - strlen(" pointer");
-	XASSERT(u->name = strndup(name, sz));
+	ASSERT(u->name = strndup(name, sz));
 
 	return u;
 }
@@ -2165,7 +2165,7 @@ win_prop_update_heawm_name(struct win *w, void *data, int sz)
 		return;
 
 	free(w->name);
-	XASSERT(w->name = strndup(data, sz));
+	ASSERT(w->name = strndup(data, sz));
 
 	if (w->tab != NULL && w->tab->output != NULL)
 		output_render_bar(w->tab->output);
@@ -2177,7 +2177,7 @@ win_prop_update_net_wm_name(struct win *w, void *data, int sz)
 	w->net_wm_name = true;
 
 	free(w->title);
-	XASSERT(w->title = strndup(data, sz));
+	ASSERT(w->title = strndup(data, sz));
 
 	if (w->tab != NULL && w->tab->output != NULL)
 		output_render_bar(w->tab->output);
@@ -2226,7 +2226,7 @@ static void
 win_prop_update_wm_class(struct win *w, void *data, int sz)
 {
 	free(w->class_instance);
-	XASSERT(w->class_class = w->class_instance = strdup(""));
+	ASSERT(w->class_class = w->class_instance = strdup(""));
 
 	if (sz < 2)
 		return;
@@ -2238,7 +2238,7 @@ win_prop_update_wm_class(struct win *w, void *data, int sz)
 	if (sep == NULL)
 		return;
 
-	XASSERT(w->class_instance = malloc(sz));
+	ASSERT(w->class_instance = malloc(sz));
 	memcpy(w->class_instance, data, sz);
 	w->class_class = w->class_instance + (sep - (char *)data) + 1;
 
@@ -2270,7 +2270,7 @@ win_prop_update_wm_name(struct win *w, void *data, int sz)
 		return;
 
 	free(w->title);
-	XASSERT(w->title = strndup(data, sz));
+	ASSERT(w->title = strndup(data, sz));
 
 	if (w->tab != NULL && w->tab->output != NULL)
 		output_render_bar(w->tab->output);
@@ -2470,7 +2470,7 @@ user_dump_tree(struct user *u)
 	char cmd[128];
 	sprintf(cmd, "%d", sel_lnum);
 	struct proc *proc = proc_new(u);
-	XASSERT(proc->data = strdup(tmppath));
+	ASSERT(proc->data = strdup(tmppath));
 	proc_execvp(proc, "sh", "sh", "-c", "${TERMINAL?} -e sh -c '${EDITOR?} +$2 -- \"$1\" || unlink \"$1\"' sh \"$@\"", "sh", tmppath, cmd, NULL);
 }
 
@@ -2710,7 +2710,7 @@ win_new(xcb_window_t window)
 	bool poisoned = false;
 
 	struct win *w;
-	XASSERT(w = calloc(1, sizeof *w));
+	ASSERT(w = calloc(1, sizeof *w));
 
 	w->window = window;
 	w->frame = xcb_generate_id(conn);
@@ -2718,9 +2718,9 @@ win_new(xcb_window_t window)
 	struct win_label *wl = &w->win_label;
 	win_label_new(wl);
 
-	XASSERT(w->name = strdup(""));
-	XASSERT(w->title = strdup(""));
-	XASSERT(w->class_class = w->class_instance = strdup(""));
+	ASSERT(w->name = strdup(""));
+	ASSERT(w->title = strdup(""));
+	ASSERT(w->class_class = w->class_instance = strdup(""));
 
 	TAILQ_INSERT_HEAD(&latest_wins, w, older);
 
@@ -2983,7 +2983,7 @@ win_new_from_children(xcb_window_t parent)
 	int n = xcb_query_tree_children_length(reply);
 
 	xcb_get_window_attributes_cookie_t *cookies;
-	XASSERT(cookies = malloc(n * sizeof *cookies));
+	ASSERT(cookies = malloc(n * sizeof *cookies));
 
 	for (int i = 0; i < n; ++i) {
 		XGET_COOKIE(cookie, xcb_get_window_attributes, conn, children[i]);
@@ -3164,7 +3164,7 @@ static void
 screen_setup(void)
 {
 	xcb_cursor_context_t *ctx;
-	XASSERT(0 <= xcb_cursor_context_new(conn, screen, &ctx));
+	ASSERT(0 <= xcb_cursor_context_new(conn, screen, &ctx));
 	move_cursor = xcb_cursor_load_cursor(ctx, "move");
 	default_cursor = xcb_cursor_load_cursor(ctx, "default");
 	xcb_cursor_context_free(ctx);
@@ -4094,7 +4094,7 @@ setup_extensions(void)
 		}
 
 		xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
-		XASSERT(xkb_context);
+		ASSERT(xkb_context);
 	}
 }
 
