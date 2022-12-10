@@ -1903,6 +1903,7 @@ user_focus_win(struct user *u, struct win *w)
 	if (w->tab->zoomed_win)
 		w->tab->zoomed_win = w;
 
+	/* Rotate to destination session. */
 	while (TAILQ_FIRST(&sessions) != w->tab->session) {
 		struct session *s = TAILQ_FIRST(&sessions);
 		TAILQ_REMOVE(&sessions, s, link);
@@ -1910,22 +1911,33 @@ user_focus_win(struct user *u, struct win *w)
 		wins_changed = true;
 	}
 
-	if (!w->tab->output) {
+	/* Rotate to destination tab. */
+	if (w->tab->output == NULL) {
 		struct session *s = w->tab->session;
-		if (oldt && oldt->output) {
-			if (oldt->session != s) {
-				struct tab *t;
-				TAILQ_FOREACH(t, &s->tabs, link)
-					if (t->output == oldt->output)
-						break;
-				if (!t)
-					t = TAILQ_FIRST(&s->tabs);
-				oldt = t;
-			}
-		} else {
-			oldt = TAILQ_FIRST(&s->tabs);
+		if (oldt != NULL && oldt->session != s) {
+			struct tab *t;
+			TAILQ_FOREACH(t, &s->tabs, link)
+				if (t->output == oldt->output)
+					break;
+			oldt = t;
 		}
-		tab_swap(oldt, w->tab);
+		if (oldt == NULL || oldt->output == NULL)
+			oldt = TAILQ_FIRST(&s->tabs);
+
+		while (w->tab->output == NULL) {
+			struct tab *not;
+			TAILQ_FOREACH(not, &s->tabs, link)
+				if (not->output == NULL)
+					break;
+			if (not == NULL)
+				break;
+			TAILQ_REMOVE(&s->tabs, not, link);
+			TAILQ_INSERT_BEFORE(oldt, not, link);
+			TAILQ_REMOVE(&s->tabs, oldt, link);
+			TAILQ_INSERT_TAIL(&s->tabs, oldt, link);
+			session_update_tabs(s);
+			oldt = not;
+		}
 	}
 
 	user_save_pointer(u);
@@ -1956,36 +1968,20 @@ static void
 user_jump_tabs(struct user *u, int dir)
 {
 	struct win *w = u->focused_win;
-	if (!w)
+	if (w == NULL)
 		return;
-	struct tab *curt = w->tab, *t;
-	if (!curt->output)
-		return;
-	struct session *s = curt->session;
+	struct session *s = w->tab->session;
 
-	struct tab *not;
-	TAILQ_FOREACH(not, &s->tabs, link)
-		if (!not->output)
-			break;
-	if (!not)
-		return;
-
-	if (0 <= dir) {
-		t = not;
-		TAILQ_REMOVE(&s->tabs, not, link);
-		TAILQ_INSERT_BEFORE(curt, not, link);
-		TAILQ_REMOVE(&s->tabs, curt, link);
-		TAILQ_INSERT_TAIL(&s->tabs, curt, link);
+	struct tab *t;
+	if (0 < dir) {
+		TAILQ_FOREACH(t, &s->tabs, link)
+			if (!t->output)
+				break;
 	} else {
 		t = TAILQ_LAST(&s->tabs, session_tabs);
-		TAILQ_REMOVE(&s->tabs, t, link);
-		TAILQ_INSERT_BEFORE(curt, t, link);
-		if (not != t) {
-			TAILQ_REMOVE(&s->tabs, curt, link);
-			TAILQ_INSERT_BEFORE(not, curt, link);
-		}
 	}
-	session_update_tabs(s);
+	if (t == NULL)
+		return;
 
 	user_focus_win(u, tab_latest_win(t));
 }
