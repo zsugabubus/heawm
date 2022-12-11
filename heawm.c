@@ -552,7 +552,7 @@ grid_next(struct grid *g)
 static void
 run_script(char const *name)
 {
-	if (0 != fork())
+	if (fork() != 0)
 		return;
 	if ((!chdir(getenv("XDG_CONFIG_HOME")) ||
 	     (!chdir(getenv("HOME")) && !chdir(".config"))) &&
@@ -572,7 +572,7 @@ tab_latest_slave_win(struct tab const *t)
 			continue;
 		if (w->floating)
 			continue;
-		if (t->master && TAILQ_FIRST(&w->tab->wins) == w)
+		if (t->master && w == TAILQ_FIRST(&w->tab->wins))
 			continue;
 		return (struct win *)w;
 	}
@@ -843,7 +843,7 @@ xcb_icccm_set_wm_state(xcb_window_t window, xcb_icccm_wm_state_t state)
 	} xcb_icccm_wm_state_data_t;
 
 	/* http://tronche.com/gui/x/icccm/sec-4.html#s-4.1.3.1 */
-	if (XCB_ICCCM_WM_STATE_WITHDRAWN == state)
+	if (state == XCB_ICCCM_WM_STATE_WITHDRAWN)
 		XDO(xcb_delete_property, conn, window, ATOM(WM_STATE));
 	else
 		XDO(xcb_change_property, conn, XCB_PROP_MODE_REPLACE,
@@ -955,7 +955,7 @@ tab_update_wins(struct tab *t)
 
 	xcb_rectangle_t geom = t->output->geom;
 
-	if (t->zoomed_win != NULL && TAILQ_FIRST(&sessions) == t->session) {
+	if (t->zoomed_win != NULL && t->session == TAILQ_FIRST(&sessions)) {
 		win_set_geom(t->zoomed_win, &geom);
 		win_label_set_mapped(t->zoomed_win, false);
 		TAILQ_FOREACH(w, &t->wins, link)
@@ -1048,7 +1048,7 @@ session_is_floating(struct session const *s)
 static void
 session_update_wins(struct session *s)
 {
-	bool mapped = TAILQ_FIRST(&sessions) == s || session_is_floating(s);
+	bool mapped = s == TAILQ_FIRST(&sessions) || session_is_floating(s);
 	if (s->mapped == mapped && !mapped)
 		return;
 	s->mapped = mapped;
@@ -1184,7 +1184,7 @@ output_update_bar(struct output *o)
 		return;
 	}
 
-	if (XCB_WINDOW_NONE == o->bar.window) {
+	if (o->bar.window == XCB_WINDOW_NONE) {
 		o->bar.window = xcb_generate_id(conn);
 		XDO(xcb_create_window, conn, XCB_COPY_FROM_PARENT,
 				o->bar.window,
@@ -1832,7 +1832,7 @@ user_set_mode(struct user *u, enum mode mode)
 	u->mode = mode;
 	user_grab_keyboard(u);
 
-	if (MODE_LABEL == u->mode)
+	if (u->mode == MODE_LABEL)
 		win_update_label(u->focused_win, '?');
 
 	user_update_input_focus(u);
@@ -1867,10 +1867,10 @@ user_focus_win(struct user *u, struct win *w)
 	struct win *oldaltw = u->alt_win;
 	u->alt_win = oldw;
 	u->focused_win = w;
-	if (TAILQ_FIRST(&users) == u)
+	if (u == TAILQ_FIRST(&users))
 		screen_set_active_window(w);
 
-	if (MODE_MOUSE == u->mode || (MODE_LABEL == u->mode && w == NULL))
+	if (u->mode == MODE_MOUSE || (u->mode == MODE_LABEL && w == NULL))
 		user_set_mode(u, MODE_NORMAL);
 
 	struct tab *oldt = NULL;
@@ -1904,7 +1904,7 @@ user_focus_win(struct user *u, struct win *w)
 		w->tab->zoomed_win = w;
 
 	/* Rotate to destination session. */
-	while (TAILQ_FIRST(&sessions) != w->tab->session) {
+	while (w->tab->session != TAILQ_FIRST(&sessions)) {
 		struct session *s = TAILQ_FIRST(&sessions);
 		TAILQ_REMOVE(&sessions, s, link);
 		TAILQ_INSERT_TAIL(&sessions, s, link);
@@ -2041,7 +2041,7 @@ user_update_all(void)
 		xcb_input_xi_device_info_t const *xdev = iter.data;
 
 		/* Master devices always come in pair. */
-		if (XCB_INPUT_DEVICE_TYPE_MASTER_POINTER == xdev->type) {
+		if (xdev->type == XCB_INPUT_DEVICE_TYPE_MASTER_POINTER) {
 			TAILQ_FOREACH(u, &users, link)
 				if (xdev->deviceid == u->master_pointer)
 					break;
@@ -2126,7 +2126,7 @@ user_find_win(struct user const *u, char label)
 static void
 win_prop_update_wm_client_leader(struct win *w, void *data, int sz)
 {
-	w->leader = sizeof(xcb_window_t) == sz
+	w->leader = sz == sizeof(xcb_window_t)
 		? *(xcb_window_t *)data
 		: XCB_WINDOW_NONE;
 }
@@ -2140,8 +2140,8 @@ win_prop_update_protocols(struct win *w, void *data, int sz)
 	while ((int)sizeof(xcb_atom_t) <= sz) {
 		sz -= sizeof(xcb_atom_t);
 		xcb_atom_t atom = *(xcb_atom_t const *)((char *)data + sz);
-		w->wm_delete_window |= ATOM(WM_DELETE_WINDOW) == atom;
-		w->wm_take_focus |= ATOM(WM_TAKE_FOCUS) == atom;
+		w->wm_delete_window |= atom == ATOM(WM_DELETE_WINDOW);
+		w->wm_take_focus |= atom == ATOM(WM_TAKE_FOCUS);
 	}
 }
 
@@ -2186,7 +2186,7 @@ win_prop_update_net_wm_name(struct win *w, void *data, int sz)
 static void
 win_prop_update_net_wm_pid(struct win *w, void *data, int sz)
 {
-	w->pid = sizeof(uint32_t) == sz
+	w->pid = sz == sizeof(uint32_t)
 		? *(uint32_t *)data
 		: 0;
 }
@@ -2199,7 +2199,7 @@ win_prop_update_net_wm_state(struct win *w, void *data, int sz)
 	while ((int)sizeof(xcb_atom_t) <= sz) {
 		sz -= sizeof(xcb_atom_t);
 		xcb_atom_t atom = *(xcb_atom_t const *)((char *)data + sz);
-		w->fullscreen |= ATOM(_NET_WM_STATE_FULLSCREEN) == atom;
+		w->fullscreen |= atom == ATOM(_NET_WM_STATE_FULLSCREEN);
 	}
 }
 
@@ -2217,7 +2217,7 @@ win_update_name(struct win const *w, char const *name)
 static void
 win_prop_update_net_wm_window_type(struct win *w, void *data, int sz)
 {
-	w->type = sizeof(xcb_window_t) == sz
+	w->type = sz == sizeof(xcb_window_t)
 		? *(xcb_atom_t *)data
 		: XCB_ATOM_NONE;
 }
@@ -2279,7 +2279,7 @@ win_prop_update_wm_name(struct win *w, void *data, int sz)
 static void
 win_prop_update_wm_transient_for(struct win *w, void *data, int sz)
 {
-	w->transient_for = sizeof(xcb_window_t) == sz
+	w->transient_for = sz == sizeof(xcb_window_t)
 		? *(xcb_window_t *)data
 		: XCB_WINDOW_NONE;
 }
@@ -2560,7 +2560,7 @@ screen_update_client_list(void)
 	xcb_window_t list[128];
 
 	for (struct win const *w = TAILQ_FIRST(&latest_wins);; w = TAILQ_NEXT(w, older)) {
-		if (w == NULL || ARRAY_SIZE(list) == i) {
+		if (w == NULL || i == ARRAY_SIZE(list)) {
 			XDO(xcb_change_property, conn, mode,
 					screen->root, ATOM(_NET_CLIENT_LIST),
 					XCB_ATOM_WINDOW, 32,
@@ -2602,8 +2602,8 @@ win_prop_handle_reply(struct win *w, struct prop const *prop,
 
 	int sz = xcb_get_property_value_length(reply);
 	uint8_t expected_format = (
-		XCB_ATOM_STRING == prop->type ? 8 :
-		ATOM(UTF8_STRING) == prop->type ? 8 :
+		prop->type == XCB_ATOM_STRING ? 8 :
+		prop->type == ATOM(UTF8_STRING) ? 8 :
 		32
 	);
 	if (0 < sz &&
@@ -2877,7 +2877,7 @@ win_new(xcb_window_t window)
 	wl->cr = cairo_create(surface);
 	cairo_surface_destroy(surface);
 
-	if (ATOM(_NET_WM_WINDOW_TYPE_SPLASH) == w->type)
+	if (w->type == ATOM(_NET_WM_WINDOW_TYPE_SPLASH))
 		w->floating = true;
 
 	struct win *parent = win_hash_get(w->transient_for);
@@ -2920,7 +2920,7 @@ win_new(xcb_window_t window)
 		}
 	}
 
-	if (w->tab == NULL && XCB_WINDOW_NONE != w->leader) {
+	if (w->tab == NULL && w->leader != XCB_WINDOW_NONE) {
 		struct win *leaderw = NULL;
 		TAILQ_FOREACH_REVERSE(leaderw, &latest_wins, latest_wins, older)
 			if (w->leader == leaderw->leader && w != leaderw)
@@ -2996,7 +2996,7 @@ win_new_from_children(xcb_window_t parent)
 			continue;
 
 		if (!reply->override_redirect &&
-		    XCB_MAP_STATE_VIEWABLE == reply->map_state)
+		    reply->map_state == XCB_MAP_STATE_VIEWABLE)
 			(void)win_new(children[i]);
 
 		free(reply);
@@ -3178,11 +3178,10 @@ screen_setup(void)
 				XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT,
 				default_cursor,
 			});
-	if (error) {
-		if (XCB_ACCESS == error)
-			fprintf(stderr, "Window manager is already running");
+	if (error == XCB_ACCESS)
+		fprintf(stderr, "Window manager is already running");
+	else if (error)
 		exit(EXIT_FAILURE);
-	}
 
 	xrm_update();
 	screen_setup_net();
@@ -3196,10 +3195,10 @@ static void
 user_feed_command_key(struct user *u, xkb_keysym_t keysym,
 		xcb_input_key_press_event_t const *event)
 {
-	if (XCB_INPUT_KEY_RELEASE == event->event_type)
+	if (event->event_type == XCB_INPUT_KEY_RELEASE)
 		return;
 
-	if (XKB_KEY_Escape == keysym) {
+	if (keysym == XKB_KEY_Escape) {
 		user_set_mode(u, MODE_NORMAL);
 		return;
 	}
@@ -3315,7 +3314,7 @@ static void
 user_feed_normal_key(struct user *u, xkb_keysym_t keysym,
 		xcb_input_key_press_event_t const *event)
 {
-	if (XCB_INPUT_KEY_RELEASE == event->event_type)
+	if (event->event_type == XCB_INPUT_KEY_RELEASE)
 		return;
 
 	if (XKB_KEY_a <= keysym && keysym <= XKB_KEY_z) {
@@ -3424,7 +3423,7 @@ static void
 user_feed_label_key(struct user *u, xkb_keysym_t keysym,
 		xcb_input_key_press_event_t const *event)
 {
-	if (XCB_INPUT_KEY_RELEASE == event->event_type)
+	if (event->event_type == XCB_INPUT_KEY_RELEASE)
 		return;
 
 	if (XKB_KEY_a <= keysym && keysym <= XKB_KEY_z) {
@@ -3456,9 +3455,9 @@ user_feed_key(struct user *u, xkb_keysym_t keysym, xcb_input_key_press_event_t c
 		break;
 
 	case MODE_INSERT:
-		if (XCB_INPUT_KEY_PRESS == event->event_type &&
+		if (event->event_type == XCB_INPUT_KEY_PRESS &&
 		    mod == event->mods.base &&
-		    XKB_KEY_Escape == keysym)
+		    keysym == XKB_KEY_Escape)
 			user_set_mode(u, MODE_NORMAL);
 		break;
 
@@ -3591,9 +3590,9 @@ handle_property_notify(xcb_property_notify_event_t const *event)
 		if (event->atom != prop->atom)
 			continue;
 
-		if (XCB_PROPERTY_NEW_VALUE == event->state)
+		if (event->state == XCB_PROPERTY_NEW_VALUE)
 			win_prop_handle_reply(w, prop, win_prop_get(w, prop));
-		else if (XCB_PROPERTY_DELETE == event->state)
+		else if (event->state == XCB_PROPERTY_DELETE)
 			prop->handle(w, NULL, 0);
 		return;
 	}
@@ -3609,18 +3608,18 @@ handle_client_message(xcb_client_message_event_t const *event)
 	if (w == NULL)
 		return;
 
-	if (ATOM(_NET_CLOSE_WINDOW) == event->type) {
+	if (event->type == ATOM(_NET_CLOSE_WINDOW)) {
 		win_close(w);
-	} else if (ATOM(_NET_ACTIVE_WINDOW) == event->type) {
-		if (XCB_EWMH_CLIENT_SOURCE_TYPE_NORMAL == event->data.data32[0])
+	} else if (event->type == ATOM(_NET_ACTIVE_WINDOW)) {
+		if (event->data.data32[0] == XCB_EWMH_CLIENT_SOURCE_TYPE_NORMAL)
 			return;
 
 		if (!TAILQ_EMPTY(&users))
 			user_focus_win(TAILQ_FIRST(&users), w);
-	} else if (ATOM(_NET_WM_STATE) == event->type) {
-		if (!(32 == event->format &&
-		     (ATOM(_NET_WM_STATE_FULLSCREEN) == event->data.data32[1] ||
-		      ATOM(_NET_WM_STATE_FULLSCREEN) == event->data.data32[2])))
+	} else if (event->type == ATOM(_NET_WM_STATE)) {
+		if (!(event->format == 32 &&
+		     (event->data.data32[1] == ATOM(_NET_WM_STATE_FULLSCREEN) ||
+		      event->data.data32[2] == ATOM(_NET_WM_STATE_FULLSCREEN))))
 			return;
 
 		switch (event->data.data32[0]) {
@@ -3679,8 +3678,8 @@ handle_input_button_press(xcb_input_button_press_event_t const *event)
 	if (u == NULL)
 		return;
 
-	if (1 == event->detail) {
-		if (MODE_NORMAL != u->mode)
+	if (event->detail == 1) {
+		if (u->mode != MODE_NORMAL)
 			return;
 
 		struct win *w = win_hash_get(event->child);
@@ -3691,7 +3690,7 @@ handle_input_button_press(xcb_input_button_press_event_t const *event)
 		u->pointer_x = w->user_geom.x - (event->root_x >> 16);
 		u->pointer_y = w->user_geom.y - (event->root_y >> 16);
 		user_set_mode(u, MODE_MOUSE);
-	} else if (3 == event->detail) {
+	} else if (event->detail == 3) {
 		struct win *w = u->focused_win;
 
 		int16_t pointer_x = event->root_x >> 16;
@@ -3710,8 +3709,8 @@ handle_input_button_press(xcb_input_button_press_event_t const *event)
 #undef xmacro
 
 		win_set_user_geom(w, &rect);
-	} else if (4 == event->detail || 5 == event->detail) {
-		int dir = 4 == event->detail ? 1 : -1;
+	} else if (event->detail == 4 || event->detail == 5) {
+		int dir = event->detail == 4 ? 1 : -1;
 		if (XCB_MOD_MASK_SHIFT & event->mods.base) {
 			user_jump_sessions(u, dir);
 		} else {
@@ -3730,7 +3729,7 @@ handle_input_button_release(xcb_input_button_press_event_t const *event)
 	if (u == NULL)
 		return;
 
-	if (MODE_MOUSE == u->mode)
+	if (u->mode == MODE_MOUSE)
 		user_set_mode(u, MODE_NORMAL);
 }
 
@@ -3740,7 +3739,7 @@ handle_input_motion(xcb_input_motion_event_t const *event)
 	struct user *u = user_find_by_device(event->sourceid);
 	if (u == NULL)
 		return;
-	if (MODE_MOUSE != u->mode)
+	if (u->mode != MODE_MOUSE)
 		return;
 
 	struct win *w = u->focused_win;
@@ -3762,8 +3761,8 @@ handle_input_motion(xcb_input_motion_event_t const *event)
 static void
 handle_input_enter(xcb_input_enter_event_t const *event)
 {
-	if (!(XCB_INPUT_NOTIFY_MODE_NORMAL == event->mode ||
-	      XCB_INPUT_NOTIFY_MODE_WHILE_GRABBED == event->mode))
+	if (!(event->mode == XCB_INPUT_NOTIFY_MODE_NORMAL ||
+	      event->mode == XCB_INPUT_NOTIFY_MODE_WHILE_GRABBED))
 		return;
 	if (event->event == event->root)
 		return;
@@ -3774,8 +3773,8 @@ handle_input_enter(xcb_input_enter_event_t const *event)
 static void
 handle_input_focus_in(xcb_input_focus_in_event_t const *event)
 {
-	if (!(XCB_INPUT_NOTIFY_MODE_NORMAL == event->mode ||
-	      XCB_INPUT_NOTIFY_MODE_WHILE_GRABBED == event->mode))
+	if (!(event->mode == XCB_INPUT_NOTIFY_MODE_NORMAL ||
+	      event->mode == XCB_INPUT_NOTIFY_MODE_WHILE_GRABBED))
 		return;
 
 	struct user *u = user_find_by_device(event->deviceid);
@@ -3932,7 +3931,7 @@ handle_shape_notify(xcb_shape_notify_event_t const *event)
 	if (w == NULL)
 		return;
 
-	if (XCB_SHAPE_SK_BOUNDING == event->shape_kind)
+	if (event->shape_kind == XCB_SHAPE_SK_BOUNDING)
 		w->shaped = event->shaped;
 	win_update_shape(w, event->shape_kind);
 }
