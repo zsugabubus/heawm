@@ -2174,7 +2174,8 @@ win_prop_update_heawm_name(struct win *w, void *data, int sz)
 static void
 win_prop_update_net_wm_name(struct win *w, void *data, int sz)
 {
-	w->net_wm_name = true;
+	if (0 < sz)
+		w->net_wm_name = true;
 
 	free(w->title);
 	ASSERT(w->title = strndup(data, sz));
