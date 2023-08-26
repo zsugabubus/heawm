@@ -1,0 +1,11 @@
+export DISPLAY=:0
+export TERMINAL=alacritty
+while :
+do
+	(
+		trap 'exit' INT
+		./rc
+	)
+	echo Restarting. Press C-C to abort.
+	sleep 1
+done

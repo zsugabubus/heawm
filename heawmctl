@@ -1,0 +1,196 @@
+#!/usr/bin/luajit
+require('strict')
+
+local uv = require('luv')
+local c = require('heawm.ffi')
+local ffi = require('ffi')
+
+local M = {}
+M.__index = M
+
+function M.new(cls, opts)
+	local conn = c.Connection.new(opts.display)
+
+	assert(c.xcb_connection_has_error(conn) == 0)
+
+	local self = setmetatable({
+		conn = conn,
+		atoms = require('heawm.atom-registry').new(conn),
+	}, cls)
+
+	local command = opts.args[1]
+
+	local methods = {
+		select_window = function(_, user_id, tree_id)
+			self:request('focus_console', { user_id })
+			self:request('list_windows', { tree_id }, function(_, windows)
+				self:show_window_chooser(user_id, windows, function() end)
+			end)
+		end,
+		edit_layout = function(_, user_id, tree_id)
+			self:request('focus_console', { user_id })
+			self:request('list_windows', { tree_id }, function(_, windows)
+				self:show_layout_editor(user_id, windows, function() end)
+			end)
+		end,
+	}
+	if command then
+		methods = {}
+	end
+
+	local path = self:get_socket_path()
+
+	local pipe = uv.new_pipe(false)
+
+	pipe:connect(path, function(err)
+		assert(not err, err)
+
+		self.rpc = require('heawm.json-rpc'):new(pipe)
+		self.rpc:start(methods, function() end)
+
+		if not command then
+			self:request(
+				'set_console_window',
+				{ assert(tonumber(os.getenv('WINDOWID'))) }
+			)
+		elseif command == 'select_window' then
+			local s = os.clock()
+			self:request('list_users', {}, function(_, data)
+				local user_id = data[1].id
+				self:request('list_trees', {}, function(_, data)
+					local tree_id = data[1].id
+					self:request('list_windows', { tree_id }, function(_, windows)
+						self:show_window_chooser(user_id, windows, function()
+							self:close()
+						end)
+					end)
+				end)
+			end)
+		else
+			assert(false)
+		end
+	end)
+
+	return self
+end
+
+function M:get_socket_path()
+	for screen in self.conn:setup():roots() do
+		local reply = c.xcb_get_property(
+			self.conn,
+			false,
+			screen.root,
+			self.atoms._HEAWM_SOCKET,
+			self.atoms.STRING,
+			0,
+			-1
+		):assert_reply(self.conn)
+
+		local path = ffi.string(
+			c.xcb_get_property_value(reply),
+			c.xcb_get_property_value_length(reply)
+		)
+
+		return path
+	end
+end
+
+function M:show_window_chooser(user_id, windows, callback)
+	if self.process then
+		self.process:kill()
+	end
+
+	local reply = ''
+	local stdin = uv.new_pipe()
+	local stdout = uv.new_pipe()
+	local preview = uv.new_pipe()
+
+	self.process = uv.spawn('fzf', {
+		args = {
+			'--read0',
+			'--print0',
+			'--preview=echo >&3 {n}',
+			-- FIXME: --preview-window=hidden breaks &3.
+			'--preview-window=up,0',
+		},
+		stdio = { stdin, stdout, 2, preview },
+	}, function()
+		callback()
+	end)
+
+	for _, window in ipairs(windows) do
+		uv.write(
+			stdin,
+			string.format('%-10d %-15s %s\0', window.id, window.class, window.title)
+		)
+	end
+	uv.shutdown(stdin, function()
+		uv.close(stdin, function() end)
+	end)
+
+	uv.read_start(stdout, function(err, data)
+		if data then
+			reply = reply .. data
+		else
+			local window_id = tonumber(string.match(reply, '%d+'))
+			if window_id then
+				self:request('focus_window', { user_id, window_id })
+			end
+		end
+	end)
+
+	uv.read_start(preview, function(err, data)
+		if not data then
+			return
+		end
+
+		local index = tonumber(string.match(data, '(%d*)\n')) + 1
+		local window = windows[index]
+		-- self:request('mark_window', user_id, window.id)
+	end)
+end
+
+function M:show_layout_editor(user_id, windows, callback)
+	if self.process then
+		self.process:kill()
+	end
+
+	local stdin = uv.new_pipe()
+
+	self.process = uv.spawn(os.getenv('EDITOR') or 'nvim', {
+		args = {},
+		stdio = { stdin, 1, 2 },
+	}, function()
+		callback()
+	end)
+
+	for _, window in ipairs(windows) do
+		uv.write(
+			stdin,
+			string.format(
+				'%-8d\t%-16s\t%s\n',
+				window.id,
+				window.instance,
+				window.class,
+				window.title
+			)
+		)
+	end
+	uv.shutdown(stdin, function()
+		uv.close(stdin, function() end)
+	end)
+end
+
+function M:request(...)
+	self.rpc:send_request(...)
+end
+
+function M:close()
+	self.rpc:close()
+end
+
+local client = M:new({
+	args = { ... },
+})
+
+uv.run()

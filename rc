@@ -1,0 +1,227 @@
+#!/usr/bin/luajit
+require('strict')
+
+local uv = require('luv')
+local M = require('heawm')
+require('heawm.layout')
+local utils = require('heawm.utils')
+local wm = M:new()
+
+local DVORAK = {
+	keymap = '',
+	keycodes = 'evdev+aliases(qwerty)',
+	types = 'complete',
+	compat = 'complete',
+	symbols = 'pc+pl(dvp)+inet(evdev)+compose(ralt)',
+	geometry = 'pc(pc105)',
+}
+
+local QWERTZ = {
+	keymap = '',
+	keycodes = 'evdev+aliases(qwertz)',
+	types = 'complete',
+	compat = 'complete',
+	symbols = 'pc+hu+inet(evdev)+compose(ralt)',
+	geometry = 'pc(pc105)',
+}
+
+function wm:spawn_terminal()
+	os.execute('cd; ${TERMINAL?} &')
+end
+
+function wm:spawn_console()
+	os.execute('${TERMINAL?} -e ./heawmctl &')
+end
+
+local BINDINGS = {
+	['Super+Return'] = utils.key_press(function(self)
+		self:spawn_terminal()
+	end),
+	['Super+slash'] = utils.key_press(function(self, event)
+		if self:get_console() == nil then
+			self:spawn_console()
+		end
+		self:broadcast(
+			'select_window',
+			event.user.master_pointer.id,
+			event.tree.window_id
+		)
+	end),
+	['Super+semicolon'] = utils.key_press(function(self, event)
+		if self:get_console() == nil then
+			self:spawn_console()
+		end
+		self:broadcast(
+			'edit_layout',
+			event.user.master_pointer.id,
+			event.tree.window_id
+		)
+	end),
+	['Super+Tab'] = utils.key_press(function(self, event)
+		self:restore_user_focused_window(event.user)
+	end),
+	['Super+period'] = utils.key_press(function(self, event)
+		self:toggle_tree_layout(event.tree, 'zoom')
+	end),
+	['Super+m'] = utils.key_press(function(self, event)
+		self:toggle_tree_layout(event.tree, 'cascade')
+	end),
+	['Super+g'] = utils.key_press(function(self, event)
+		self:toggle_tree_layout(event.tree, 'grid')
+	end),
+	['Super+k'] = utils.key_press_window(function(self, window)
+		self:change_window_gravity(window, 'up')
+	end),
+	['Super+j'] = utils.key_press_window(function(self, window)
+		self:change_window_gravity(window, 'down')
+	end),
+	['Super+h'] = utils.key_press_window(function(self, window)
+		self:change_window_gravity(window, 'left')
+	end),
+	['Super+l'] = utils.key_press_window(function(self, window)
+		self:change_window_gravity(window, 'right')
+	end),
+	['Super+plus'] = utils.key_down_window(function(self, window)
+		self:change_window_weight(window, 1)
+	end),
+	['Super+minus'] = utils.key_down_window(function(self, window)
+		self:change_window_weight(window, -1)
+	end),
+	['Super+equal'] = utils.key_down(function(self, event)
+		self:reset_tree_windows_layout(event.tree, {
+			weight = true,
+		})
+	end),
+	['Super+Control+equal'] = utils.key_down(function(self, event)
+		self:reset_tree_windows_layout(event.tree, {
+			weight = true,
+			gravity = true,
+		})
+	end),
+	['Super+space'] = utils.key_press(function(self, event)
+		self:swap_user_windows(event.user)
+	end),
+	['Super+q'] = utils.key_press_window(function(self, window)
+		self:close_window(window)
+	end),
+	['Super+v'] = utils.key_press(function(self, event)
+		local window = self:find_window_by_class(event.tree, 'mpv')
+		return self:set_user_focused_window(event.user, window)
+	end),
+	--[[
+	['Super+asterisk'] = function(self, event)
+		if event.event == 'release' then
+			self
+				:get_user_virtual_input(event.user)
+				:sleep(0.2)
+				:text('0123456789')
+				:press('a')
+				:press('Control+a', 'Control+b')
+				:text('hello world*/+-?')
+				:down('Super_L')
+		end
+	end,
+	]]
+}
+
+wm.config.label_chars = string.gsub(M.config.label_chars, '[hjklmgqv]', '')
+
+for c in string.gmatch(wm.config.label_chars, '.') do
+	BINDINGS['Super+' .. c] = utils.key_press(function(self, event)
+		local window = self:find_window_by_label(event.tree, c)
+		return self:set_user_focused_window(event.user, window)
+	end)
+end
+
+function wm:user_keymap(user, window)
+	if window and window.title == 'Agar.io - Chromium' then
+		return QWERTZ
+	end
+
+	return DVORAK
+end
+
+function M:user_global_bindings(user)
+	return BINDINGS
+end
+
+function M:outputs(config)
+	-- print(
+	-- 	string.sub(
+	-- 		sha.sha256(config.outputs_by_name.HDMI1.properties.EDID.data),
+	-- 		0,
+	-- 		7
+	-- 	)
+	-- )
+
+	if
+		config.outputs_by_name.HDMI1 and self.devices_by_name['Dunno ErgoDox EZ']
+	then
+		return {
+			HDMI1 = {
+				primary = true,
+			},
+		}
+	elseif config.outputs_by_name.eDP1 then
+		return {
+			eDP1 = {
+				primary = true,
+			},
+		}
+	else
+		return {
+			LVDS1 = {
+				primary = true,
+			},
+		}
+	end
+	return {
+		-- KECSKE = {
+		-- 	virtual = true,
+		-- 	inherit = 'eDP1',
+		-- 	x = 10,
+		-- 	y = 60,
+		-- 	width = 800,
+		-- 	height = 400,
+		-- },
+	}
+end
+
+function wm:setup_inputs()
+	self:dirty_outputs()
+end
+
+function wm:setup_tree(tree)
+	self:set_tree_layout(tree, 'grid')
+end
+
+function wm:device_properties()
+	return {
+		['libinput Left Handed Enabled'] = true,
+	}
+end
+
+local TRUSTED_CLASSES = {
+	Alacritty = true,
+	Zathura = true,
+	mpv = true,
+	Minim = true,
+}
+
+function wm:should_user_focus_window(user, window)
+	return M.should_user_focus_window(self, user, window)
+		or TRUSTED_CLASSES[window.wm_class.class]
+end
+
+wm:manage_screens()
+wm:start_ipc()
+wm:start()
+
+os.execute('xset s 125 125 &')
+os.execute('xset +dpms dpms 125 125 125 &')
+
+if not wm:has_windows() then
+	wm:spawn_terminal()
+end
+
+uv.run()
