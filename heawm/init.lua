@@ -24,6 +24,8 @@ M.config = setmetatable({}, {
 M.config.label_font_family = 'monospace'
 M.config.label_font_size = 21
 
+M.bindings = require('heawm.bindings')
+
 function M:set_tree_outputs(tree, outputs)
 	tree.outputs = outputs
 	self:dirty_tree_layout(tree)
@@ -1625,24 +1627,25 @@ end
 
 function M:start_ipc()
 	local methods = {
-		set_console_window = function(client, window_id)
+		set_console_window = function(client, _, window_id)
 			local window = self.windows_by_id[window_id]
 
+			self.console_client = client
 			window.console = true
 			self:dirty_tree_layout(window.tree)
 		end,
-		focus_window = function(client, user_id, window_id)
+		focus_window = function(client, _, user_id, window_id)
 			local user = self.devices_by_id[user_id].user
 			local window = self.windows_by_id[window_id]
 
 			self:set_user_focused_window(user, window)
 		end,
-		focus_console = function(client, user_id)
+		focus_console = function(client, _, user_id)
 			local user = self.devices_by_id[user_id].user
 
 			self:set_user_focused_window(user, self:get_console())
 		end,
-		list_users = function(client, tree_id)
+		list_users = function(client, _, tree_id)
 			local result = {}
 			for _, user in ipairs(self.users) do
 				table.insert(result, {
@@ -1652,7 +1655,7 @@ function M:start_ipc()
 			end
 			return result
 		end,
-		list_trees = function(client, tree_id)
+		list_trees = function(client, _, tree_id)
 			local result = {}
 			for _, tree in pairs(self.trees_by_id) do
 				table.insert(result, {
@@ -1661,7 +1664,7 @@ function M:start_ipc()
 			end
 			return result
 		end,
-		list_windows = function(client, tree_id)
+		list_windows = function(client, _, tree_id)
 			local result = {}
 			for _, window in ipairs(self.trees_by_id[tree_id].window_stack) do
 				if not window.console then
@@ -1703,6 +1706,9 @@ function M:start_ipc()
 
 	local function on_client_close(client)
 		clients[client] = nil
+		if self.console_client == client then
+			self.console_client = nil
+		end
 	end
 
 	server:listen(4, function()
@@ -1714,11 +1720,12 @@ function M:start_ipc()
 		rpc_client:start(methods, on_client_close)
 	end)
 
-	function self:broadcast(method, ...)
-		local params = { ... }
-		for client in pairs(clients) do
-			client:send_request(method, params)
+	function self:call_console_method(method, ...)
+		if not self.console_client then
+			self:spawn_console()
+			return
 		end
+		self.console_client:send_request(method, ...)
 	end
 end
 

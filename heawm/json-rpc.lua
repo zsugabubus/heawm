@@ -46,17 +46,20 @@ local function handle_message(self, methods, msg)
 			return
 		end
 
-		local ok, result = pcall(handler, self, unpack(msg.params))
-		if result then
-			self:send_response(msg.id, result)
+		local ok, payload = pcall(handler, self, msg.id, unpack(msg.params))
+		if not ok then
+			print(payload)
+			self:send_error(msg.id, -32603, 'Internal error')
+		elseif payload ~= nil then
+			self:send_response(msg.id, payload)
 		end
 		return
 	end
 
 	if msg.error then
-		error(string.format('%d: %s', msg.error.code, msg.error.message))
+		print(string.format('RPC error (code: %d, message: %s)', msg.error.code, msg.error.message))
 	end
-	self.response_handlers[msg.id](self, msg.result)
+	self.response_handlers[msg.id](msg.result)
 end
 
 function M:start(methods, on_close)

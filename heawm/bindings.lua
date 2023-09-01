@@ -1,6 +1,6 @@
 local M = {}
 
-function M.key_press(cb)
+function M.press(cb)
 	return function(self, event)
 		if event.event == 'press' then
 			cb(self, event)
@@ -8,7 +8,7 @@ function M.key_press(cb)
 	end
 end
 
-function M.key_down(cb)
+function M.down(cb)
 	return function(self, event)
 		if event.event ~= 'release' then
 			cb(self, event)
@@ -16,7 +16,7 @@ function M.key_down(cb)
 	end
 end
 
-function M.key_window(cb)
+function M.window(cb)
 	return function(self, event)
 		local user = event.user
 		local window = event.user.focused_window
@@ -26,12 +26,12 @@ function M.key_window(cb)
 	end
 end
 
-function M.key_press_window(cb)
-	return M.key_press(M.key_window(cb))
+function M.press_window(cb)
+	return M.press(M.window(cb))
 end
 
-function M.key_down_window(cb)
-	return M.key_down(M.key_window(cb))
+function M.down_window(cb)
+	return M.down(M.window(cb))
 end
 
 return M

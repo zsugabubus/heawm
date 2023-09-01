@@ -4,7 +4,6 @@ require('strict')
 local uv = require('luv')
 local M = require('heawm')
 require('heawm.layout')
-local utils = require('heawm.utils')
 local wm = M:new()
 
 local DVORAK = {
@@ -33,80 +32,111 @@ function wm:spawn_console()
 	os.execute('${TERMINAL?} -e ./heawmctl &')
 end
 
+function wm:set_tree_output_profile(tree, profile)
+	if tree.output_profile == profile then
+		return
+	end
+
+	tree.output_profile = profile
+
+	self:dirty_tree_outputs(tree)
+end
+
+local B = M.bindings
 local BINDINGS = {
-	['Super+Return'] = utils.key_press(function(self)
+	['Super+Return'] = B.press(function(self)
 		self:spawn_terminal()
 	end),
-	['Super+slash'] = utils.key_press(function(self, event)
-		if self:get_console() == nil then
-			self:spawn_console()
-		end
-		self:broadcast(
-			'select_window',
-			event.user.master_pointer.id,
-			event.tree.window_id
-		)
+	['Super+slash'] = B.press(function(self, event)
+		local user_id = event.user.master_pointer.id
+		local tree_id = event.tree.window_id
+
+		self:call_console_method('choose_window', {
+			user_id,
+			tree_id,
+		}, function(window_id)
+			if not window_id then
+				return
+			end
+
+			local user = self.devices_by_id[user_id].user
+			local window = self.windows_by_id[window_id]
+
+			self:set_user_focused_window(user, window)
+		end)
 	end),
-	['Super+semicolon'] = utils.key_press(function(self, event)
-		if self:get_console() == nil then
-			self:spawn_console()
-		end
-		self:broadcast(
-			'edit_layout',
+	['Super+semicolon'] = B.press(function(self, event)
+		self:call_console_method('edit_layout', {
 			event.user.master_pointer.id,
-			event.tree.window_id
-		)
+			event.tree.window_id,
+		})
 	end),
-	['Super+Tab'] = utils.key_press(function(self, event)
+	['Super+Tab'] = B.press(function(self, event)
 		self:restore_user_focused_window(event.user)
 	end),
-	['Super+period'] = utils.key_press(function(self, event)
+	['Super+period'] = B.press(function(self, event)
 		self:toggle_tree_layout(event.tree, 'zoom')
 	end),
-	['Super+m'] = utils.key_press(function(self, event)
+	['Super+m'] = B.press(function(self, event)
 		self:toggle_tree_layout(event.tree, 'cascade')
 	end),
-	['Super+g'] = utils.key_press(function(self, event)
+	['Super+g'] = B.press(function(self, event)
 		self:toggle_tree_layout(event.tree, 'grid')
 	end),
-	['Super+k'] = utils.key_press_window(function(self, window)
+	['Super+k'] = B.press_window(function(self, window)
 		self:change_window_gravity(window, 'up')
 	end),
-	['Super+j'] = utils.key_press_window(function(self, window)
+	['Super+j'] = B.press_window(function(self, window)
 		self:change_window_gravity(window, 'down')
 	end),
-	['Super+h'] = utils.key_press_window(function(self, window)
+	['Super+h'] = B.press_window(function(self, window)
 		self:change_window_gravity(window, 'left')
 	end),
-	['Super+l'] = utils.key_press_window(function(self, window)
+	['Super+l'] = B.press_window(function(self, window)
 		self:change_window_gravity(window, 'right')
 	end),
-	['Super+plus'] = utils.key_down_window(function(self, window)
+	['Super+plus'] = B.down_window(function(self, window)
 		self:change_window_weight(window, 1)
 	end),
-	['Super+minus'] = utils.key_down_window(function(self, window)
+	['Super+minus'] = B.down_window(function(self, window)
 		self:change_window_weight(window, -1)
 	end),
-	['Super+equal'] = utils.key_down(function(self, event)
+	['Super+equal'] = B.down(function(self, event)
 		self:reset_tree_windows_layout(event.tree, {
 			weight = true,
 		})
 	end),
-	['Super+Control+equal'] = utils.key_down(function(self, event)
+	['Super+Control+equal'] = B.down(function(self, event)
 		self:reset_tree_windows_layout(event.tree, {
 			weight = true,
 			gravity = true,
 		})
 	end),
-	['Super+space'] = utils.key_press(function(self, event)
+	['Super+space'] = B.press(function(self, event)
 		self:swap_user_windows(event.user)
 	end),
-	['Super+q'] = utils.key_press_window(function(self, window)
+	['Super+q'] = B.press_window(function(self, window)
 		self:close_window(window)
 	end),
-	['Super+v'] = utils.key_press(function(self, event)
+	['Super+v'] = B.press(function(self, event)
 		local window = self:find_window_by_class(event.tree, 'mpv')
 		return self:set_user_focused_window(event.user, window)
+	end),
+	['Super+p'] = B.press(function(self, event)
+		self:call_console_method('choose_string', {
+			event.user.master_pointer.id,
+			{
+				'auto',
+				'laptop',
+			},
+		}, function(profile)
+			if not profile then
+				return
+			end
+
+			self:set_tree_output_profile(event.tree, profile)
+			self:restore_user_focused_window(event.user)
+		end)
 	end),
 	--[[
 	['Super+asterisk'] = function(self, event)
@@ -124,10 +154,10 @@ local BINDINGS = {
 	]]
 }
 
-wm.config.label_chars = string.gsub(M.config.label_chars, '[hjklmgqv]', '')
+wm.config.label_chars = string.gsub(M.config.label_chars, '[hjklmgqvp]', '')
 
 for c in string.gmatch(wm.config.label_chars, '.') do
-	BINDINGS['Super+' .. c] = utils.key_press(function(self, event)
+	BINDINGS['Super+' .. c] = B.press(function(self, event)
 		local window = self:find_window_by_label(event.tree, c)
 		return self:set_user_focused_window(event.user, window)
 	end)
@@ -145,7 +175,7 @@ function M:user_global_bindings(user)
 	return BINDINGS
 end
 
-function M:outputs(config)
+function M:tree_outputs(tree, config)
 	-- print(
 	-- 	string.sub(
 	-- 		sha.sha256(config.outputs_by_name.HDMI1.properties.EDID.data),
@@ -155,7 +185,9 @@ function M:outputs(config)
 	-- )
 
 	if
-		config.outputs_by_name.HDMI1 and self.devices_by_name['Dunno ErgoDox EZ']
+		tree.output_profile == 'auto'
+		and config.outputs_by_name.HDMI1
+		and self.devices_by_name['Dunno ErgoDox EZ']
 	then
 		return {
 			HDMI1 = {
@@ -193,6 +225,7 @@ end
 
 function wm:setup_tree(tree)
 	self:set_tree_layout(tree, 'grid')
+	self:set_tree_output_profile(tree, 'auto')
 end
 
 function wm:device_properties()

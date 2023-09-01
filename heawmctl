@@ -21,16 +21,32 @@ function M.new(cls, opts)
 	local command = opts.args[1]
 
 	local methods = {
-		select_window = function(_, user_id, tree_id)
+		choose_window = function(_, request_id, user_id, tree_id)
 			self:request('focus_console', { user_id })
-			self:request('list_windows', { tree_id }, function(_, windows)
-				self:show_window_chooser(user_id, windows, function() end)
+			self:request('list_windows', { tree_id }, function(windows)
+				self:show_window_chooser(user_id, windows, function(window_id)
+					if window_id == nil then
+						self:cancel(request_id)
+					else
+						self:reply(request_id, window_id)
+					end
+				end)
 			end)
 		end,
-		edit_layout = function(_, user_id, tree_id)
+		edit_layout = function(_, _, user_id, tree_id)
 			self:request('focus_console', { user_id })
-			self:request('list_windows', { tree_id }, function(_, windows)
+			self:request('list_windows', { tree_id }, function(windows)
 				self:show_layout_editor(user_id, windows, function() end)
+			end)
+		end,
+		choose_string = function(_, request_id, user_id, choices)
+			self:request('focus_console', { user_id })
+			self:show_string_chooser(user_id, choices, function(choice)
+				if choice == nil then
+					self:cancel(request_id)
+				else
+					self:reply(request_id, choice)
+				end
 			end)
 		end,
 	}
@@ -53,14 +69,16 @@ function M.new(cls, opts)
 				'set_console_window',
 				{ assert(tonumber(os.getenv('WINDOWID'))) }
 			)
-		elseif command == 'select_window' then
-			local s = os.clock()
-			self:request('list_users', {}, function(_, data)
+		elseif command == 'choose_window' then
+			self:request('list_users', {}, function(data)
 				local user_id = data[1].id
-				self:request('list_trees', {}, function(_, data)
+				self:request('list_trees', {}, function(data)
 					local tree_id = data[1].id
-					self:request('list_windows', { tree_id }, function(_, windows)
-						self:show_window_chooser(user_id, windows, function()
+					self:request('list_windows', { tree_id }, function(windows)
+						self:show_window_chooser(user_id, windows, function(window_id)
+							if window_id then
+								self:request('focus_window', { user_id, window_id })
+							end
 							self:close()
 						end)
 					end)
@@ -115,7 +133,8 @@ function M:show_window_chooser(user_id, windows, callback)
 		},
 		stdio = { stdin, stdout, 2, preview },
 	}, function()
-		callback()
+		local window_id = tonumber(string.match(reply, '%d+'))
+		callback(window_id)
 	end)
 
 	for _, window in ipairs(windows) do
@@ -131,11 +150,6 @@ function M:show_window_chooser(user_id, windows, callback)
 	uv.read_start(stdout, function(err, data)
 		if data then
 			reply = reply .. data
-		else
-			local window_id = tonumber(string.match(reply, '%d+'))
-			if window_id then
-				self:request('focus_window', { user_id, window_id })
-			end
 		end
 	end)
 
@@ -181,8 +195,51 @@ function M:show_layout_editor(user_id, windows, callback)
 	end)
 end
 
+function M:show_string_chooser(user_id, choices, callback)
+	if self.process then
+		self.process:kill()
+	end
+
+	local reply = ''
+	local stdin = uv.new_pipe()
+	local stdout = uv.new_pipe()
+
+	self.process = uv.spawn('fzf', {
+		args = {
+			'--read0',
+			'--print0',
+		},
+		stdio = { stdin, stdout, 2 },
+	}, function()
+		if reply == '' then
+			callback()
+		else
+			callback(string.sub(reply, 1, -2))
+		end
+	end)
+
+	uv.write(stdin, table.concat(choices, '\0'))
+	uv.shutdown(stdin, function()
+		uv.close(stdin, function() end)
+	end)
+
+	uv.read_start(stdout, function(err, data)
+		if data then
+			reply = reply .. data
+		end
+	end)
+end
+
 function M:request(...)
 	self.rpc:send_request(...)
+end
+
+function M:reply(...)
+	self.rpc:send_response(...)
+end
+
+function M:cancel(request_id)
+	self.rpc:send_error(request_id, -32000, 'Canceled')
 end
 
 function M:close()
